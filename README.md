@@ -34,6 +34,12 @@ never zero remaining. A last-known-good snapshot kept after a failed refresh is
 marked `Stale` and reads as `UNKNOWN` through `StateAt`. A cooldown is a routing
 policy exclusion and never changes quota or health.
 
+[internal/provider/minimax](./internal/provider/minimax) implements the MiniMax
+Token Plan adapter that produces these observations; see
+[docs/minimax-quota-adapter.md](./docs/minimax-quota-adapter.md) for the key
+type, endpoint, response semantics and limitations.
+
+
 Three details worth knowing before using the model:
 
 - Any unusable window makes the whole snapshot `UNKNOWN`. A known-low 5-hour
