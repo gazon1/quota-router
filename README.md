@@ -51,6 +51,19 @@ Three details worth knowing before using the model:
   `NewProviderState` replace an undeclared reason with a safe code, so turning
   a raw provider error into a reason cannot smuggle a credential into the model.
 
+## Turn boundaries
+
+[internal/turn](./internal/turn) is where one model's turn ends and another may
+start: a stopped attempt is `SURFACE`d, never retried, unless it was
+`NOT_DISPATCHED`; executed tool results travel in a `Checkpoint` across the
+boundary, built through `CompletedResult`/`FailedResult` and checked by
+`Validate` so a raw error, a credential shape or a whole file cannot cross it; and
+a migration is refused without an estimated input-token cost within a configured
+budget, and a full-transcript replay without a named decision. See
+[docs/turn-boundary-migration.md](./docs/turn-boundary-migration.md)
+for the stage table and why a model switch is a context rebuild, not a
+continuation.
+
 ## Configuration
 
 Configuration is loaded by [koanf v2](https://github.com/knadh/koanf) into typed
