@@ -251,6 +251,10 @@ func (s Snapshot) StateAt(now time.Time, maxAge time.Duration) (QuotaState, Unkn
 	switch {
 	case maxAge <= 0:
 		return QuotaUnknown, StaleObservation
+	case s.unknown != "":
+		// An explicit failure keeps its reason even when it was recorded with a
+		// zero timestamp: NOT_YET_OBSERVED would hide what actually went wrong.
+		return QuotaUnknown, s.unknown
 	case s.ObservedAt.IsZero():
 		return QuotaUnknown, NotYetObserved
 	case s.Stale, untrusted(s.ObservedAt, now, maxAge):

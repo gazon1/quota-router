@@ -25,7 +25,7 @@ separate types, because none can be derived from another:
 |---|---|---|
 | Subscription quota | `Snapshot` | Windows from a documented provider quota source, with observed-at, source, confidence and raw-field provenance |
 | Local usage | `Usage` | Requests and tokens this installation saw; `Origin` records provider-reported vs locally observed vs estimated |
-| Provider health | `ProviderState` | Healthy, degraded, unavailable or unknown, plus an optional routing cooldown |
+| Provider health | `ProviderState` | Healthy, degraded, unavailable or unknown, plus an optional routing cooldown and a closed `HealthReason` code |
 
 Unusable quota is `UNKNOWN` with an `UnknownReason` (`UNSUPPORTED_NO_DOCUMENTED_QUOTA_API`,
 `TRANSIENT_FETCH_FAILURE`, `STALE_OBSERVATION`, `MALFORMED_RESPONSE`,

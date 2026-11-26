@@ -111,6 +111,12 @@ func TestEachUnknownReasonSurvivesReport(t *testing.T) {
 		if got, gotReason := s.StateAt(now, time.Hour); got != QuotaUnknown || gotReason != reason {
 			t.Errorf("StateAt() = %s/%s, want UNKNOWN/%s", got, gotReason, reason)
 		}
+		// A failure recorded without a timestamp keeps its own reason rather
+		// than reporting NOT_YET_OBSERVED and losing the diagnosis.
+		zero := Failed("p", "src", time.Time{}, reason)
+		if got, gotReason := zero.StateAt(now, time.Hour); got != QuotaUnknown || gotReason != reason {
+			t.Errorf("StateAt(zero timestamp) = %s/%s, want UNKNOWN/%s", got, gotReason, reason)
+		}
 	}
 }
 
