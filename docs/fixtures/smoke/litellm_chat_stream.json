@@ -3,13 +3,14 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 2106,
+    "elapsed_ms": 2593,
     "events": [
       "data: <chunk>",
       "data: <chunk>",
       "data: <chunk>",
       "data: [DONE]"
     ],
-    "final_usage": null
+    "final_usage": null,
+    "verdict": "VERIFIED"
   }
 }

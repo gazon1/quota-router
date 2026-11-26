@@ -3,7 +3,7 @@
   "response": {
     "ok": false,
     "status": 429,
-    "elapsed_ms": 630,
+    "elapsed_ms": 887,
     "body": {
       "type": "error",
       "error": {
@@ -12,6 +12,7 @@
         "http_code": "429"
       },
       "request_id": "***REDACTED***"
-    }
+    },
+    "verdict": "BLOCKED_BY_PLAN"
   }
 }

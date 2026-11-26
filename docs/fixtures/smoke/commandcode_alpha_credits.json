@@ -3,37 +3,37 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1154,
+    "elapsed_ms": 1057,
     "body": {
       "credits": {
-        "belowThreshold": false,
-        "creditThreshold": 0,
-        "monthlyCredits": 67.922923439,
-        "purchasedCredits": 0,
-        "freeCredits": 0
+        "belowThreshold": "bool",
+        "creditThreshold": "int",
+        "monthlyCredits": "float",
+        "purchasedCredits": "int",
+        "freeCredits": "int"
       },
       "windowLimits": {
-        "limited": true,
-        "exceeded": null,
+        "limited": "bool",
+        "exceeded": "NoneType",
         "fiveHour": {
-          "used": 2.077076561,
-          "cap": 14,
-          "exceeded": false,
-          "resetAt": 1795707388177
+          "used": "float",
+          "cap": "int",
+          "exceeded": "bool",
+          "resetAt": "int"
         },
         "weekly": {
-          "used": 2.077076561,
-          "cap": 35,
-          "exceeded": false,
-          "resetAt": 1796294188177
+          "used": "float",
+          "cap": "int",
+          "exceeded": "bool",
+          "resetAt": "int"
         }
       },
-      "sandboxAccess": true,
+      "sandboxAccess": "bool",
       "sandboxMinutes": {
-        "usedMinutes": 0,
-        "limitMinutes": 0,
-        "overageUsd": 0,
-        "resetAt": 1796083200000
+        "usedMinutes": "int",
+        "limitMinutes": "int",
+        "overageUsd": "int",
+        "resetAt": "int"
       }
     }
   }

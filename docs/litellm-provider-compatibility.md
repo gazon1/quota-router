@@ -21,12 +21,13 @@ are sanitized: keys, request IDs, user/org identifiers and subscription IDs are
 | MiniMax: non-streaming + streaming with the Token Plan key | **BLOCKED ON QUOTA** — key authenticates, plan exhausted (`2056`) | [MiniMax inference](#minimax-inference) |
 | MiniMax: quota endpoint with the same credential, 5-hour and weekly mapping | **DONE** — captured and decoded, including how it disagrees with inference | [MiniMax quota](#minimax-token-plan-quota) |
 | Command Code: live catalogue, then correct path per model | **DONE** — 105 models with per-model `supported_endpoints` | [Command Code catalogue](#command-code-catalogue) |
-| Command Code: streaming, tool calls, cancellation, usage, errors | **DONE** | [Command Code behavior](#command-code-behavior) |
+| Command Code: streaming, tool calls, final usage, errors | **DONE, reproducible** — each case is asserted by `probe_providers.py` and fails the run on regression | [Command Code behavior](#command-code-behavior) |
+| Command Code: cancellation | **MANUALLY VERIFIED only** — measured once, not part of the committed matrix (`--cancellation`, spends quota) | [Cancellation](#command-code-behavior) |
 | Command Code: investigate `/alpha` quota routes as the #4 gate | **DONE — NOT a supported contract**; response schemas recorded | [Command Code quota](#command-code-quota-alpha-routes) |
-| Invalid, wrong-type, revoked, insufficient-plan credentials | **DONE** | [Credential matrix](#credential-matrix) |
+| Invalid, wrong-type, revoked, insufficient-plan credentials | **PARTIALLY reproducible** — the probe asserts invalid-key, wrong-master-key, plan-refusal and the 401-not-429 cooldown case; revoked-key and 5xx were recorded manually | [Credential matrix](#credential-matrix) |
 | 429/5xx/timeouts/malformed payloads, bounded retry | **PARTIAL** — 429 and malformed covered; 5xx not observed | [Error semantics](#error-semantics) |
 | Model aliases map to exact upstream IDs, no silent fallback | **DONE** — plus one shipped alias was rejected by LiteLLM (fixed) | [Defect 1](#defect-1-the-shipped-model_name-was-not-a-liteLLM-model-id) |
-| Internal LiteLLM auth; no secrets/prompts in logs or artifacts | **DONE** | [Internal auth](#internal-litellm-auth) |
+| Internal LiteLLM auth; no secrets/prompts in logs or artifacts | **DONE** — asserted by the probe; fixtures keep model ids and schema only, never billing figures or identity | [Internal auth](#internal-litellm-auth) |
 | Unsupported quota surfaces documented as `UNKNOWN`, not zero/AVAILABLE | **DONE** | [UNKNOWN surfaces](#unsupported-or-unverified-surfaces) |
 
 ## Pinned image
@@ -345,13 +346,49 @@ cd deploy && docker compose up -d --wait && cd ..
 LITELLM_MASTER_KEY=… MINIMAX_TOKEN_PLAN_KEY=… COMMAND_CODE_API_KEY=… \
   python3 docs/fixtures/smoke/probe_providers.py --out docs/fixtures/smoke --litellm
 
+# The 401 -> 429 cooldown regression needs a proxy whose upstream key is
+# rejected. Run a second proxy from the same config with a bogus MiniMax key:
+docker run -d --name qr-bad -p 127.0.0.1:4002:4000 \
+  -e LITELLM_MASTER_KEY="$LITELLM_MASTER_KEY" \
+  -e MINIMAX_TOKEN_PLAN_KEY=sk-invalid-probe-key \
+  -e COMMAND_CODE_API_KEY="$COMMAND_CODE_API_KEY" \
+  -v "$PWD/deploy/litellm-config.yaml:/app/config.yaml:ro" \
+  ghcr.io/berriai/litellm:v1.110.0@sha256:4295b064…b883c3 --config /app/config.yaml
+
+MINIMAX_TOKEN_PLAN_KEY=… COMMAND_CODE_API_KEY=… LITELLM_MASTER_KEY=… \
+  python3 docs/fixtures/smoke/probe_providers.py --out /tmp/smoke \
+  --litellm --litellm-invalid http://127.0.0.1:4002
+
 # Add the cancellation/billing measurement (spends a small amount of quota)
-.. python3 docs/fixtures/smoke/probe_providers.py --cancellation
+python3 docs/fixtures/smoke/probe_providers.py --cancellation
 ```
 
 The script exits non-zero when an expectation that must hold regresses — for
-example an alias LiteLLM rejects, a cooldown-masked provider error, or a
-model/endpoint mismatch that stops being rejected.
+example an alias LiteLLM rejects, a cooldown-masked provider error, a
+model/endpoint mismatch that stops being rejected, or a 200 from the MiniMax
+quota endpoint whose `base_resp.status_code` is an error. Cases the plan refuses
+are printed as `BLOCKED_BY_PLAN`, never folded into a bare success.
+
+`--out` points at a temporary directory in the commands above on purpose: running
+the gate must not rewrite the committed fixtures as a side effect. Copy them in
+deliberately, then check the diff before committing.
+
+## Reproducible vs manually measured
+
+`probe_providers.py` is the gate: a case it asserts fails the run when the
+behaviour regresses, and its exit status is the verdict. Everything below is one
+of these, and the table above is not allowed to blur them:
+
+| Kind | Meaning |
+|---|---|
+| **reproducible** | asserted by `probe_providers.py`, checked by its exit status |
+| **manually measured** | observed once with the same credentials; the fixture is the record, there is no assertion |
+| **BLOCKED_BY_PLAN** | the call reached the provider and was refused by the account's plan; recorded, never counted as a pass |
+| **UNKNOWN** | not observed at all |
+
+A run where a case is blocked says so instead of printing a bare success, and the
+`--litellm-invalid` proxy is required for the cooldown case: a proxy holding a
+valid provider key cannot reproduce a rejected one.
 
 ## Boundaries honored
 

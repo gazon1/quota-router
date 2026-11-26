@@ -1,0 +1,54 @@
+{
+  "case": "commandcode_tool_call",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 3700,
+    "body": {
+      "id": "gen_01M8C8PVS3WHJ6SHS7KP6KE2XX",
+      "object": "chat.completion",
+      "created": 1795708123,
+      "model": "stealth/glyph-cluster:free",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "**Getting SF weather**\n\nAlright, the user wants to know the weather in San Francisco. I need to use the tool to get that info. The tool requires a city name, and since SF is San Francisco, I\u2019ll just plug that in. I\u2019ll go ahead and call the tool now to fetch the weather details.",
+            "reasoning_details": [
+              {
+                "type": "reasoning.encrypted",
+                "data": "gwst1.cd5qC7SY_ushW4Hkffe50vNfhDTzOc-bfR2mNz-vzv42f5aT7h2---mbAwyQoTcSethXPxIzCjvUImgW9O4MKWp_XoQLIup5JOZO18QMmUVA-BioVUsXhnuwk7AldYQZrXg_IXdczHD6GAEw9YsLAy42q5CokiqUapOjAlM5dIIxv3jsVq1Ony-25pTcxhEd9Ou0GJy8EekHZsaQlQloFx7hyzpMwUmPPOhKh-M-AqP6j_UIvKUh8GhoeH-x2VzY7AFc0B-023eM-dqw60O4wuECpE9iVSqFj_sNEWAb93EbeHCg52Wq3adaMmoCZr5IBp1XqrPTdlxDdpYvqiEe3_oUCHaB1QehCtE_aNPjaYPTwiILOs0GZb2y_yEhG4qWnCKkRelZ4LkQoZ7oJC248w_KaO4kyYQkLzEIKQ1D8-z98RkbfXNQMSTBtiJK4_s52Oj99FRY8LXHstqcWFh798FwQOi9PsBK6beWp_by1AulWVb4mQKR2ZU68TSClCFooYzpNHsZm4ql0guuko_AlLuEtHq538f2ZELZp15_BB7dxHyFiAjlqx4a9V2LTWQA2GCVnbdkHrYL-IcKWRCbh8wn2EswvOWVb33Vvk1H6HXOwW8TlFO2XaB0zWYk4J4e5ZtfbZHuVevDGBMVuux1aCdqVohnpgSywZTTv2TARN721pJtNq6axGiPMHHG3c-ouayRmVDBtzzUK-GTn2NQNqW6YQff-t9evglZobzosp50tN75Duimk-zasQShUjwkE3mQU8_W1ID4K9NqAaRzA_tJJYLu4_YBSZFmRPaT765SD7stjA38EmzK7ba0ikCfkO4F-cSLXaP_6wUpOHnXtNahtkpfKd-tIemXVplnMrYh-FiyxseMETsg1AV6mBIWf8ZRf1x1Y98AkHleeKm50BAeBhJdHbEE84YrTLYo7HNOUubVfJ83X0h-SZQgJRE-gveuokl3v2peeZc5D_KpXYnASsBYOx0FgIGLWaLLWXibwWTelAzFdQVlmLrciym7YWvyQXCp-1dnGBsmt-9apnfJUMN6TLjeUZUcpqC81RE_65wMOND6T_FxPUfnK5vgrQRoUhq5mbcszK6F_bVlW6QVviahBzfWUr9HSirl9aLsF4POLHSXDOkmPJx_OVv6XBAFhajp0taE4jsUmv_hae6U6RZujyTDgjmpZ9lG8lhXqz8Np5xegnp-MdYAlKnJAAvM3Y88zhNHg4UKY8xJ99E5-enPf0iFXx51Ywaociy3EmxyPbFwwM21Nnh1Ia-FrU-vhfneElpd4YOqSGaB4M14P8ko3iAT3uBRgoKARYJe6CI1DSbatpEwy8f6Ji3XAQzwOoorD0X2HDq6fpMrUvWjIn5v9VfMSfDHe1nE9PNGK5jh_ThdOZwG8GQsd6X9ZhDYN4YIWP6J4w74mRAQqvfZD3y8LspiyHYm7k0UUpajZtT0-cNtT_UlAHfojLhrhNtMeBKkfnJL4R0TZ36wgGgTpdCV2_fH48CDl7yUxCCbX3KNYGOg55siq829DVg5eBG_uH5WWaN7POm89c9OXjjPVMBQK1Qxv6-j7b7ok-tkiGhdPua8neFyIMiKFd5g9bC8Drh5b5y45wcN",
+                "format": "stealth-v1",
+                "index": 0
+              }
+            ],
+            "tool_calls": [
+              {
+                "id": "***REDACTED***",
+                "type": "function",
+                "function": {
+                  "name": "***REDACTED***",
+                  "arguments": "{\"city\": \"SF\"}"
+                }
+              }
+            ]
+          },
+          "logprobs": null,
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 187,
+        "completion_tokens": 80,
+        "total_tokens": 267,
+        "prompt_tokens_details": "***REDACTED***",
+        "completion_tokens_details": "***REDACTED***",
+        "cache_creation_input_tokens": 0
+      },
+      "system_fingerprint": "fp_ldeourg4qo"
+    },
+    "verdict": "VERIFIED"
+  }
+}

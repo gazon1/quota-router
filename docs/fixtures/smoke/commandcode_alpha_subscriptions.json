@@ -3,31 +3,31 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 694,
+    "elapsed_ms": 702,
     "body": {
-      "success": true,
+      "success": "bool",
       "data": {
-        "id": "***REDACTED***",
-        "status": "active",
-        "userId": "***REDACTED***",
-        "orgId": null,
-        "createdAt": "2026-10-25T22:09:01.000Z",
-        "priceId": "***REDACTED***",
+        "id": "str",
+        "status": "str",
+        "userId": "str",
+        "orgId": "NoneType",
+        "createdAt": "str",
+        "priceId": "str",
         "metadata": {
-          "fbp": "***REDACTED***",
-          "commandCode": "true",
-          "commandCodeUserId": "***REDACTED***"
+          "fbp": "str",
+          "commandCode": "str",
+          "commandCodeUserId": "str"
         },
-        "quantity": 1,
-        "cancelAtPeriodEnd": false,
-        "currentPeriodStart": "2026-11-25T22:09:01.000Z",
-        "currentPeriodEnd": "2026-12-25T22:09:01.000Z",
-        "endedAt": null,
-        "cancelAt": null,
-        "canceledAt": null,
-        "planId": "***REDACTED***",
-        "pendingPhase": null,
-        "renewalPending": null
+        "quantity": "int",
+        "cancelAtPeriodEnd": "bool",
+        "currentPeriodStart": "str",
+        "currentPeriodEnd": "str",
+        "endedAt": "NoneType",
+        "cancelAt": "NoneType",
+        "canceledAt": "NoneType",
+        "planId": "str",
+        "pendingPhase": "NoneType",
+        "renewalPending": "NoneType"
       }
     }
   }

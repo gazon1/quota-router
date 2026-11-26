@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -54,6 +55,22 @@ MODEL_OBJECT_KEYS = {"object", "owned_by", "context_length", "supported_endpoint
                      "display_name", "created_at"}
 
 
+SECRET_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"),
+    re.compile(r"\b(sub|price|gen|resp|call)_[A-Za-z0-9]{6,}"),
+    re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"),
+)
+
+
+def scrub_text(text):
+    """A provider can echo a credential, an id or an address inside an error
+    message. Strings are not dicts, so the key-based rules never see them."""
+    for pattern in SECRET_PATTERNS:
+        text = pattern.sub("***REDACTED***", text)
+    return text
+
+
 def redact(obj):
     """Drops credentials and account identity, but keeps model ids: a model id is
     the evidence this file exists to record."""
@@ -75,6 +92,8 @@ def redact(obj):
         return out
     if isinstance(obj, list):
         return [redact(x) for x in obj]
+    if isinstance(obj, str):
+        return scrub_text(obj)
     return obj
 
 
@@ -113,7 +132,10 @@ def call(method, url, headers=None, body=None, timeout=60, stream=False):
             try:
                 parsed = json.loads(raw)
             except Exception:
-                parsed = raw.decode("utf-8", "replace")[:400]
+                # Raw provider text may echo a credential or prompt; only its
+                # size and a scrubbed prefix are kept.
+                parsed = {"non_json_body": scrub_text(
+                    raw.decode("utf-8", "replace")[:200])}
             return {"ok": True, "status": resp.status,
                     "elapsed_ms": round((time.time() - started) * 1000),
                     "body": redact(parsed)}
@@ -122,14 +144,15 @@ def call(method, url, headers=None, body=None, timeout=60, stream=False):
         try:
             parsed = json.loads(raw)
         except Exception:
-            parsed = raw.decode("utf-8", "replace")[:400]
+            parsed = {"non_json_body": scrub_text(
+                raw.decode("utf-8", "replace")[:200])}
         return {"ok": False, "status": e.code,
                 "elapsed_ms": round((time.time() - started) * 1000),
                 "body": redact(parsed)}
     except Exception as e:  # DNS, TLS, timeout
         return {"ok": False, "status": None,
                 "elapsed_ms": round((time.time() - started) * 1000),
-                "error_type": type(e).__name__, "error": str(e)[:200]}
+                "error_type": type(e).__name__, "error": scrub_text(str(e))[:200]}
 
 
 def main() -> int:
@@ -137,6 +160,10 @@ def main() -> int:
     ap.add_argument("--out", default="docs/fixtures/smoke")
     ap.add_argument("--litellm", action="store_true",
                     help="also probe the local proxy at LITELLM_BASE_URL")
+    ap.add_argument("--litellm-invalid", metavar="URL", default="",
+                    help="base URL of a proxy started with a deliberately invalid upstream "
+                         "MiniMax key; runs the 401 -> cooldown regression there. A normal "
+                         "proxy cannot test a rejected provider key: its own key is accepted.")
     ap.add_argument("--cancellation", action="store_true",
                     help="also cancel a live stream (spends a small amount of quota)")
     args = ap.parse_args()
@@ -150,11 +177,61 @@ def main() -> int:
 
     results: dict[str, dict] = {}
     failures: list[str] = []
+    blocked: list[str] = []
 
-    def record(name, payload, expect=None):
+    def shape(value):
+        """Field names and JSON types, without any value."""
+        if isinstance(value, dict):
+            return {k: shape(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [shape(value[0])] if value else []
+        return type(value).__name__
+
+    def record(name, payload, expect=None, expect_business=0, allow_plan_exhausted=False,
+               allow_refusal=False, schema_only=False):
+        """Records one case and enforces its expectation.
+
+        MiniMax answers an auth failure with HTTP 200 and a business error in the
+        body, so a transport-only check cannot see it: expect_business pins
+        base_resp.status_code (0 = success). Inference that the account's quota
+        cannot serve is not a compatibility pass, so it is asserted as the exact
+        documented plan error rather than silently accepted.
+        """
+        if schema_only:
+            payload = {**payload, "body": shape(payload.get("body"))}
         results[name] = payload
-        if expect is not None and payload.get("status") != expect:
-            failures.append(f"{name}: status {payload.get('status')}, expected {expect}")
+        status = payload.get("status")
+        body = payload.get("body") or {}
+        biz = (body.get("base_resp") or {}).get("status_code")
+        code = str((body.get("error") or {}).get("code") or "")
+        text = json.dumps(body)[:2000]
+
+        if expect is not None and status != expect:
+            failures.append(f"{name}: status {status}, expected {expect}")
+            return
+        if expect_business is not None and biz is not None and biz != expect_business:
+            failures.append(f"{name}: base_resp.status_code {biz}, expected {expect_business}")
+        if allow_plan_exhausted and status == 429:
+            # The account cannot serve this call; record it as blocked, not green.
+            results[name]["verdict"] = "BLOCKED_BY_PLAN"
+            blocked.append(name)
+        elif allow_plan_exhausted and status == 200:
+            results[name]["verdict"] = "VERIFIED"
+        elif allow_plan_exhausted:
+            failures.append(f"{name}: status {status}, expected 200 or the documented "
+                            f"plan exhaustion 429 (2056)")
+        if allow_refusal and not allow_plan_exhausted:
+            # A provider may legitimately refuse a model the plan does not cover
+            # (403 MODEL_NOT_IN_PLAN) or a free tier's daily cap (429). Either is
+            # recorded as blocked; a 400/401/5xx is still a regression.
+            if status == 200:
+                results[name]["verdict"] = "VERIFIED"
+            elif status in (403, 429):
+                results[name]["verdict"] = "BLOCKED_BY_PLAN"
+                blocked.append(name)
+            else:
+                failures.append(f"{name}: status {status}, expected 200 or a documented "
+                                f"plan refusal (403/429)")
 
     def write(name):
         (out / f"{name}.json").write_text(
@@ -164,7 +241,8 @@ def main() -> int:
     # --- MiniMax Token Plan: quota surface and inference are separate hosts.
     if mm_key:
         auth = {"Authorization": f"Bearer {mm_key}"}
-        record("minimax_token_plan_remains", call("GET", MINIMAX_QUOTA, auth), expect=200)
+        record("minimax_token_plan_remains", call("GET", MINIMAX_QUOTA, auth),
+               expect=200, expect_business=0)
         record("minimax_openai_models",
                call("GET", f"{MINIMAX_INFERENCE}/models", auth), expect=200)
         record("minimax_anthropic_models",
@@ -172,14 +250,20 @@ def main() -> int:
                     {"x-api-key": mm_key, "anthropic-version": "2023-06-01"}), expect=200)
         chat = {"model": MINIMAX_MODEL, "max_completion_tokens": 16,
                 "messages": [{"role": "user", "content": "Reply with exactly: pong"}]}
-        # 429 here is the documented plan-limit signal (2056), not a test bug.
-        record("minimax_openai_chat", call("POST", f"{MINIMAX_INFERENCE}/chat/completions", auth, chat))
+        # Inference is either served (200) or refused by the documented plan
+        # limit (429 / 2056). Anything else - a 401 after the key was accepted on
+        # /models, a 5xx - is a real compatibility regression and fails the run.
+        record("minimax_openai_chat",
+               call("POST", f"{MINIMAX_INFERENCE}/chat/completions", auth, chat),
+               allow_plan_exhausted=True)
         record("minimax_openai_chat_stream",
-               call("POST", f"{MINIMAX_INFERENCE}/chat/completions", auth, {**chat, "stream": True}, stream=True))
+               call("POST", f"{MINIMAX_INFERENCE}/chat/completions", auth,
+                    {**chat, "stream": True}, stream=True), allow_plan_exhausted=True)
         record("minimax_anthropic_messages",
                call("POST", f"{MINIMAX_ANTHROPIC}/v1/messages",
                     {"x-api-key": mm_key, "anthropic-version": "2023-06-01"},
-                    {"model": MINIMAX_MODEL, "max_tokens": 16, "messages": chat["messages"]}))
+                    {"model": MINIMAX_MODEL, "max_tokens": 16, "messages": chat["messages"]}),
+               allow_plan_exhausted=True)
         for name in list(results):
             write(name)
         q = results["minimax_token_plan_remains"]["body"]
@@ -214,21 +298,33 @@ def main() -> int:
         chat = {"model": CC_OPENAI_MODEL, "max_tokens": 16,
                 "messages": [{"role": "user", "content": "Reply with exactly: pong"}]}
         record("commandcode_chat",
-               call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth, chat, timeout=90))
+               call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth, chat, timeout=90), allow_refusal=True)
         record("commandcode_chat_stream",
                call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth, {**chat, "stream": True},
-                    timeout=90, stream=True))
+                    timeout=90, stream=True), allow_refusal=True)
+        # Free-tier model with a daily cap: the cap is the expected outcome, not a
+        # compatibility failure, but a 400/401 still is.
         record("commandcode_chat_second",
                call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth,
-                    {**chat, "model": CC_OPENAI_MODEL_2}, timeout=90))
+                    {**chat, "model": CC_OPENAI_MODEL_2}, timeout=90), allow_refusal=True)
         record("commandcode_responses",
                call("POST", f"{COMMANDCODE_BASE}/responses", auth,
-                    {"model": CC_OPENAI_MODEL, "input": "Reply with exactly: pong"}, timeout=90))
+                    {"model": CC_OPENAI_MODEL, "input": "Reply with exactly: pong"}, timeout=90), allow_refusal=True)
         record("commandcode_messages",
                call("POST", f"{COMMANDCODE_BASE}/messages",
                     {**auth, "anthropic-version": "2023-06-01"},
                     {"model": CC_ANTHROPIC_MODEL, "max_tokens": 16,
-                     "messages": chat["messages"]}, timeout=90))
+                     "messages": chat["messages"]}, timeout=90), allow_refusal=True)
+        record("commandcode_tool_call",
+               call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth,
+                    {"model": CC_OPENAI_MODEL, "max_tokens": 100,
+                     "messages": [{"role": "user", "content": "Weather in SF? Use the tool."}],
+                     "tools": [{"type": "function", "function": {
+                         "name": "get_weather", "description": "Get weather",
+                         "parameters": {"type": "object",
+                                        "properties": {"city": {"type": "string"}},
+                                        "required": ["city"]}}}]}, timeout=90),
+               allow_refusal=True)
         # Endpoint/model mismatch must be rejected, never silently rerouted. A
         # messages-only model is used so the OpenAi-side attempt cannot succeed.
         record("commandcode_mismatch_anthropic_on_chat",
@@ -241,13 +337,17 @@ def main() -> int:
                     {"model": CC_OPENAI_MODEL, "max_tokens": 8, "messages": chat["messages"]}),
                expect=400)
         # Undocumented quota routes: evidence only, never a supported contract.
+        # Their bodies carry this account's billing figures, so only the shape is
+        # kept: field names, types and status codes are the compatibility evidence,
+        # the amounts are private operational data.
         for name, path in (
             ("commandcode_alpha_whoami", "/alpha/whoami?limits=1"),
             ("commandcode_alpha_credits", "/alpha/billing/credits"),
             ("commandcode_alpha_subscriptions", "/alpha/billing/subscriptions"),
             ("commandcode_alpha_usage", "/alpha/usage/summary"),
         ):
-            record(name, call("GET", "https://api.commandcode.ai" + path, auth, timeout=30))
+            record(name, call("GET", "https://api.commandcode.ai" + path, auth, timeout=30),
+                   schema_only=True)
         for name in list(results):
             write(name)
     else:
@@ -273,38 +373,48 @@ def main() -> int:
                    expect=400)
             chat = {"model": "commandcode/" + CC_OPENAI_MODEL, "max_tokens": 16,
                     "messages": [{"role": "user", "content": "Reply with exactly: pong"}]}
-            record("litellm_chat", call("POST", f"{litellm}/v1/chat/completions", h, chat, timeout=90))
+            record("litellm_chat",
+                   call("POST", f"{litellm}/v1/chat/completions", h, chat, timeout=90),
+                   allow_refusal=True)
             record("litellm_chat_stream",
                    call("POST", f"{litellm}/v1/chat/completions", h, {**chat, "stream": True},
-                        timeout=90, stream=True))
+                        timeout=90, stream=True), allow_refusal=True)
             record("litellm_responses",
                    call("POST", f"{litellm}/v1/responses", h,
-                        {"model": "commandcode/" + CC_OPENAI_MODEL, "input": "ping"}, timeout=90))
+                        {"model": "commandcode/" + CC_OPENAI_MODEL, "input": "ping"}, timeout=90),
+                   allow_refusal=True)
             record("litellm_messages",
                    call("POST", f"{litellm}/v1/messages", h,
                         {"model": CC_LITELLM_MESSAGES_MODEL, "max_tokens": 16,
-                         "messages": chat["messages"]}, timeout=90))
-            # The regression that reads as rate limiting: a rejected provider key
-            # must stay 401 on every attempt, never become 429.
-            bad = {"Authorization": f"Bearer {master}"}
-            for i in (1, 2, 3):
-                record(f"litellm_repeat_{i}",
-                       call("POST", f"{litellm}/v1/chat/completions", bad,
-                            {"model": "minimax/" + MINIMAX_MODEL,
-                             "max_tokens": 8, "messages": chat["messages"]}, timeout=90))
+                         "messages": chat["messages"]}, timeout=90), allow_refusal=True)
             for name in list(results):
                 write(name)
-            codes = [results[f"litellm_repeat_{i}"].get("status") for i in (1, 2, 3)]
-            bodies = [json.dumps(results[f"litellm_repeat_{i}"].get("body", {})) for i in (1, 2, 3)]
-            # The provider's own verdict (401 rejected key, 429 exhausted plan) is
-            # fine as long as it repeats unchanged; a cooldown replaces it with a
-            # 429 "all deployments in cooldown" on the second attempt.
-            if len(set(codes)) != 1:
-                failures.append(f"litellm: repeated bad-key attempts returned {codes}; "
-                                "the first failure is masking the next (cooldown)")
+
+    # --- The cooldown regression needs a proxy whose upstream key is rejected.
+    # A 401 from the provider must repeat as 401; with LiteLLM's default router it
+    # becomes a 429 "all deployments in cooldown" on the next attempt, which reads
+    # as rate limiting and misdirects quota accounting.
+    if args.litellm_invalid:
+        if not master:
+            failures.append("litellm-invalid: LITELLM_MASTER_KEY is not set")
+        else:
+            bad = {"Authorization": f"Bearer {master}"}
+            codes = []
+            for i in (1, 2, 3):
+                name = f"litellm_invalid_repeat_{i}"
+                record(name, call("POST", f"{args.litellm_invalid.rstrip('/')}/v1/chat/completions", bad,
+                                  {"model": "minimax/" + MINIMAX_MODEL, "max_tokens": 8,
+                                   "messages": [{"role": "user", "content": "Reply with exactly: pong"}]},
+                                  timeout=90))
+                write(name)
+                codes.append(results[name].get("status"))
+            bodies = [json.dumps(results[f"litellm_invalid_repeat_{i}"].get("body", {})) for i in (1, 2, 3)]
             if any("cooldown" in b for b in bodies):
-                failures.append("litellm: a cooldown error masked the provider's real response")
-            print("litellm repeated bad-key statuses:", codes)
+                failures.append("litellm-invalid: a cooldown error masked the provider's rejection")
+            if codes != [401, 401, 401]:
+                failures.append(f"litellm-invalid: repeated rejected-key attempts returned {codes}, "
+                                "expected 401 every time (a 429 means cooldowns are masking it)")
+            print("litellm rejected-key statuses:", codes)
 
     if args.cancellation and cc_key:
         # A cancelled stream is billed for what was produced; recorded for the
@@ -343,6 +453,13 @@ def main() -> int:
         for f in failures:
             print("  -", f)
         return 1
+    # Blocked cases are neither passes nor failures: the account could not serve
+    # them. Saying "all expectations held" while holding them would overstate the
+    # evidence, so they are counted out loud.
+    if blocked:
+        print(f"expectations held for the cases that ran; {len(blocked)} case(s) "
+              f"BLOCKED_BY_PLAN and not verified: {', '.join(blocked)}")
+        return 0
     print("all expectations held")
     return 0
 

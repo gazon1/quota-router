@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestComposeContract guards the #6 acceptance criteria that would otherwise
@@ -179,57 +181,129 @@ func publishedPorts(block string) []string {
 // Each assertion encodes a failure measured against the pinned image, so a
 // regression fails here instead of surfacing as a confusing runtime error.
 func TestLiteLLMConfigContract(t *testing.T) {
+	cfg := readLiteLLMConfig(t)
+
+	// The full tuple per model, decoded rather than matched as text: quoting a
+	// value is legal YAML and must not fail the build, while a changed upstream
+	// provider, base URL or credential name must.
+	want := map[string]struct{ model, apiBase, apiKey string }{
+		"minimax/MiniMax-M2.7": {
+			model:   "openai/MiniMax-M2.7",
+			apiBase: "https://api.minimax.io/v1",
+			apiKey:  "os.environ/MINIMAX_TOKEN_PLAN_KEY",
+		},
+		"commandcode/recursive/flint-v1.0:free": {
+			model:   "openai/recursive/flint-v1.0:free",
+			apiBase: "https://api.commandcode.ai/provider/v1",
+			apiKey:  "os.environ/COMMAND_CODE_API_KEY",
+		},
+		"commandcode/stealth/glyph-cluster:free": {
+			model:   "openai/stealth/glyph-cluster:free",
+			apiBase: "https://api.commandcode.ai/provider/v1",
+			apiKey:  "os.environ/COMMAND_CODE_API_KEY",
+		},
+		"commandcode/deepseek-v4.1-flash": {
+			model: "anthropic/deepseek/deepseek-v4.1-flash",
+			// LiteLLM appends /v1/messages to an anthropic api_base, so a trailing
+			// /v1 produces .../v1/v1/messages and a 404. Verified on the image.
+			apiBase: "https://api.commandcode.ai/provider",
+			apiKey:  "os.environ/COMMAND_CODE_API_KEY",
+		},
+	}
+	if len(cfg.models) != len(want) {
+		t.Errorf("litellm-config.yaml: %d models configured, expected %d", len(cfg.models), len(want))
+	}
+	for _, m := range cfg.models {
+		want, ok := want[m.name]
+		if !ok {
+			t.Errorf("litellm-config.yaml: unexpected model %q", m.name)
+			continue
+		}
+		if m.model != want.model {
+			t.Errorf("litellm-config.yaml: %s model = %q, want %q", m.name, m.model, want.model)
+		}
+		if m.apiBase != want.apiBase {
+			t.Errorf("litellm-config.yaml: %s api_base = %q, want %q", m.name, m.apiBase, want.apiBase)
+		}
+		if m.apiKey != want.apiKey {
+			t.Errorf("litellm-config.yaml: %s api_key = %q, want %q (never a literal)", m.name, m.apiKey, want.apiKey)
+		}
+		// An anthropic provider with no api_base would fall through to the vendor's
+		// default host, which is not this account's provider.
+		if strings.HasPrefix(m.model, "anthropic/") && m.apiBase == "" {
+			t.Errorf("litellm-config.yaml: %s needs an explicit api_base", m.name)
+		}
+	}
+
+	// Inference and quota are different hosts. A quota host used as api_base
+	// would make every model request a quota lookup.
+	for _, m := range cfg.models {
+		if strings.Contains(m.apiBase, "www.minimax.io") {
+			t.Errorf("litellm-config.yaml: %s api_base uses the quota host, not the inference host", m.name)
+		}
+	}
+	// Verified: without disable_cooldowns, one rejected provider key marks the
+	// deployment unhealthy and the next request answers 429, which reads as rate
+	// limiting; num_retries must stay 0 so a retry cannot repeat a tool call.
+	if !cfg.router.DisableCooldowns {
+		t.Error("litellm-config.yaml: router_settings.disable_cooldowns must be true")
+	}
+	if cfg.router.NumRetries != 0 {
+		t.Errorf("litellm-config.yaml: router_settings.num_retries = %d, want 0", cfg.router.NumRetries)
+	}
+}
+
+// liteLLMConfig is the slice of the proxy config these tests assert on.
+type liteLLMConfig struct {
+	raw    string
+	models []liteLLMModel
+	router struct {
+		DisableCooldowns bool `yaml:"disable_cooldowns"`
+		NumRetries       int  `yaml:"num_retries"`
+	}
+}
+
+type liteLLMModel struct {
+	name    string
+	model   string
+	apiBase string
+	apiKey  string
+}
+
+// readLiteLLMConfig decodes litellm-config.yaml with the YAML parser the project
+// already depends on through koanf, so a quoted or reflowed value is judged by
+// meaning rather than by spelling.
+func readLiteLLMConfig(t *testing.T) liteLLMConfig {
+	t.Helper()
 	raw, err := os.ReadFile("litellm-config.yaml")
 	if err != nil {
 		t.Fatalf("read litellm-config.yaml: %v", err)
 	}
-	doc := stripComments(string(raw))
-
-	// LiteLLM resolves a request by model_name, so a bare alias is an unknown
-	// model: `/v1/models` lists it, but POSTing it returns 400.
-	if !strings.Contains(doc, "model_name: minimax/MiniMax-M2.7") {
-		t.Error("litellm-config.yaml: minimax model_name must be minimax/MiniMax-M2.7")
+	var doc struct {
+		ModelList []struct {
+			ModelName  string `yaml:"model_name"`
+			Parameters struct {
+				Model   string `yaml:"model"`
+				APIBase string `yaml:"api_base"`
+				APIKey  string `yaml:"api_key"`
+			} `yaml:"litellm_params"`
+		} `yaml:"model_list"`
+		Router struct {
+			DisableCooldowns bool `yaml:"disable_cooldowns"`
+			NumRetries       int  `yaml:"num_retries"`
+		} `yaml:"router_settings"`
 	}
-	// Free-tier ids carry a slash and a colon. LiteLLM routes them as-is, but a
-	// quoted or escaped form would change the string a client must send, so the
-	// exact ids are asserted. The paid model they replaced is gone.
-	if !strings.Contains(doc, "model_name: commandcode/stealth/glyph-cluster:free") ||
-		!strings.Contains(doc, "model_name: commandcode/recursive/flint-v1.0:free") {
-		t.Error("litellm-config.yaml: expected the glyph-cluster:free and flint-v1.0:free model names")
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse litellm-config.yaml: %v", err)
 	}
-	if strings.Contains(doc, "gpt-5.6-sol") {
-		t.Error("litellm-config.yaml: gpt-5.6-sol was replaced by the free-tier models")
+	cfg := liteLLMConfig{raw: string(raw), router: doc.Router}
+	for _, m := range doc.ModelList {
+		cfg.models = append(cfg.models, liteLLMModel{
+			name: m.ModelName, model: m.Parameters.Model,
+			apiBase: m.Parameters.APIBase, apiKey: m.Parameters.APIKey,
+		})
 	}
-	// Verified: without disable_cooldowns, one rejected key marks the deployment
-	// unhealthy and the next request answers 429, which reads as rate limiting.
-	if !strings.Contains(doc, "disable_cooldowns: true") {
-		t.Error("litellm-config.yaml: disable_cooldowns must be true or a 401 resurfaces as a 429")
-	}
-	// Verified: LiteLLM appends /v1/messages to an anthropic api_base, so a
-	// trailing /v1 produces .../v1/v1/messages and a 404.
-	for _, block := range strings.Split(doc, "- model_name:")[1:] {
-		if !strings.Contains(block, "model: anthropic/") {
-			continue
-		}
-		var base string
-		for _, line := range strings.Split(block, "\n") {
-			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "api_base: "); ok {
-				base = v
-			}
-		}
-		if strings.HasSuffix(base, "/v1") {
-			t.Errorf("litellm-config.yaml: anthropic api_base %q must not end in /v1", base)
-		}
-	}
-	// Inference and quota are different hosts. A quota host used as api_base
-	// would make every model request a quota lookup.
-	if strings.Contains(doc, "www.minimax.io") {
-		t.Error("litellm-config.yaml: api_base must use the inference host api.minimax.io, not the quota host www.minimax.io")
-	}
-	// Every credential is injected, never committed.
-	if strings.Contains(doc, "sk-") {
-		t.Error("litellm-config.yaml: a literal credential is committed; use os.environ/")
-	}
+	return cfg
 }
 
 // TestEnvExampleCoversConfig reads the variables litellm-config.yaml injects and

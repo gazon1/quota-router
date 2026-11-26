@@ -3,7 +3,7 @@
   "response": {
     "ok": false,
     "status": 429,
-    "elapsed_ms": 688,
+    "elapsed_ms": 677,
     "body": {
       "type": "error",
       "error": {
@@ -11,6 +11,7 @@
         "message": "Token Plan usage limit reached: Upgrade your Token Plan or purchase Credits for more usage. (2056)"
       },
       "request_id": "***REDACTED***"
-    }
+    },
+    "verdict": "BLOCKED_BY_PLAN"
   }
 }
