@@ -1,0 +1,12 @@
+{
+  "case": "authenticated_tests_skipped",
+  "reason": "MINIMAX_API_KEY not set; authenticated, streaming-success, tool-call, and quota-consumption tests were not run.",
+  "required_env": [
+    "MINIMAX_API_KEY"
+  ],
+  "optional_env": [
+    "MINIMAX_ANTHROPIC_KEY",
+    "MINIMAX_BASE_URL",
+    "MINIMAX_ANTHROPIC_BASE"
+  ]
+}

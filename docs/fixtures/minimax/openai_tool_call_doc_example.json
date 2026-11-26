@@ -1,0 +1,35 @@
+{
+  "case": "openai_tool_call_doc_example",
+  "source": "https://platform.minimax.io/docs/guides/text-m3-function-call.md (Anthropic example) and https://platform.minimax.io/docs/api-reference/text-chat-openai.md (Tool Use request example)",
+  "live_capture": false,
+  "note": "Documentation example, not a live API response captured in this environment. Included because authenticated tool-call execution was skipped (no MINIMAX_API_KEY).",
+  "request_example": {
+    "model": "MiniMax-M3.1-Flash",
+    "messages": [
+      {"role": "user", "content": "How's the weather in San Francisco?"}
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Get weather of a location, the user should supply a location first.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "location": {"type": "string", "description": "The city and state, e.g. San Francisco, US"}
+            },
+            "required": ["location"]
+          }
+        }
+      }
+    ],
+    "reasoning_effort": "max"
+  },
+  "expected_response_shape": {
+    "choices[0].message.tool_calls[0].function.name": "get_weather",
+    "choices[0].message.tool_calls[0].function.arguments": "{\"location\":\"San Francisco, US\"}",
+    "choices[0].finish_reason": "tool_calls",
+    "choices[0].message.reasoning_content": "present when model emits thinking; preserve in multi-turn tool loop"
+  }
+}

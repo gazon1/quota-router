@@ -1,0 +1,34 @@
+{
+  "case": "token_plan_remains_bad_auth",
+  "request": {
+    "endpoint": "token_plan_remains_bad_auth",
+    "auth": "none/bad-key as named"
+  },
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 915,
+    "headers": {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": "144",
+      "Trace-Id": "***REDACTED***",
+      "alb_receive_time": "***REDACTED***",
+      "alb_request_id": "***REDACTED***",
+      "Expires": "***REDACTED***",
+      "Cache-Control": "max-age=0, no-cache, no-store",
+      "Pragma": "no-cache",
+      "Date": "***REDACTED***",
+      "Connection": "close",
+      "Akamai-GRN": "***REDACTED***",
+      "Access-Control-Allow-Origin": "*",
+      "X-From": "***REDACTED***",
+      "Set-Cookie": "***REDACTED***"
+    },
+    "body": {
+      "base_resp": {
+        "status_code": 1004,
+        "status_msg": "login fail: Please carry the API secret key in the 'Authorization' field of the request header"
+      }
+    }
+  }
+}

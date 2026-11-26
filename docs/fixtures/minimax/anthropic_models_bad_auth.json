@@ -1,0 +1,36 @@
+{
+  "case": "anthropic_models_bad_auth",
+  "request": {
+    "endpoint": "anthropic_models_bad_auth",
+    "auth": "none/bad-key as named"
+  },
+  "response": {
+    "ok": false,
+    "status": 401,
+    "elapsed_ms": 821,
+    "headers": {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": "207",
+      "Trace-Id": "***REDACTED***",
+      "Minimax-Request-Id": "***REDACTED***",
+      "alb_receive_time": "***REDACTED***",
+      "alb_request_id": "***REDACTED***",
+      "Expires": "***REDACTED***",
+      "Cache-Control": "max-age=0, no-cache, no-store",
+      "Pragma": "no-cache",
+      "Date": "***REDACTED***",
+      "Connection": "close",
+      "Access-Control-Allow-Origin": "*",
+      "X-From": "***REDACTED***"
+    },
+    "body": {
+      "type": "error",
+      "error": {
+        "type": "authentication_error",
+        "message": "login fail: Please carry the API secret key in the 'X-Api-Key' field of the request header"
+      },
+      "request_id": "***REDACTED***"
+    },
+    "error_type": "HTTPError"
+  }
+}
