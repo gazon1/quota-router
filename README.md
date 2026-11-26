@@ -97,10 +97,16 @@ JSON logs, and `json.Marshal`; an invalid URL is reported without echoing it, so
 a `user:password@host` cannot reach a log. `.env` is loaded only by Docker
 Compose for local development, never by the service.
 
+The config file accepts no credentials: a `Secret` there (`auth.token`,
+`providers.<name>.api_key`) is a startup error naming the setting, because the
+file is meant to be copied into a deployment or a repository. Use the
+environment or a mounted secret file.
+
 Permissions on mounted secret files are the operator's responsibility, and the
 controller only requires the file to be readable by the process — it does not
 inspect the mode. Mount them `0644` or stricter, owned by the container user
-(`65532` in `Dockerfile.controller`); `0600` is the safe choice. A
+(`65532` in [deploy/Dockerfile.controller](./deploy/Dockerfile.controller)); `0600` is
+the safe choice. A
 world-readable secret is accepted silently, so check it in the deployment, not
 here.
 

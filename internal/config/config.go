@@ -141,6 +141,9 @@ func Load() (Config, error) {
 		if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
 			return Config{}, fmt.Errorf("config file %s: %w", path, err)
 		}
+		if err := rejectSecretsInFile(k, path); err != nil {
+			return Config{}, err
+		}
 	}
 	// Secret files are an alternative source for the same environment-level
 	// values, so they load before them: an explicit QUOTA_ROUTER_..._API_KEY

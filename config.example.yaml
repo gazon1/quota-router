@@ -7,8 +7,10 @@
 # Precedence is defaults < this file < environment variables. Point the service
 # at a file with QUOTA_ROUTER_CONFIG_FILE=config.yaml.
 #
-# Real credentials do not belong in this file. Set them through the environment
-# or a mounted secret file; only placeholders belong here. See README.md.
+# Real credentials do not belong in this file, and the service rejects any
+# Secret field here as a startup error. Set them through the environment
+# (QUOTA_ROUTER_AUTH__TOKEN, QUOTA_ROUTER_PROVIDERS__<NAME>__API_KEY) or a
+# mounted secret file. See README.md.
 
 server:
   addr: ":8080"

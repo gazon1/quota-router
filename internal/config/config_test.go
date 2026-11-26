@@ -111,7 +111,6 @@ litellm:
 providers:
   minimax:
     base_url: https://api.minimax.io/v1
-    api_key: file-placeholder
 `))
 
 	cfg, err := Load()
@@ -121,8 +120,50 @@ providers:
 	if cfg.LiteLLM.ModelAliases["fast"] != "minimax/MiniMax-M3.1-Flash" {
 		t.Fatalf("ModelAliases = %v, want the fast alias", cfg.LiteLLM.ModelAliases)
 	}
-	if got := cfg.Providers["minimax"]; got.BaseURL != "https://api.minimax.io/v1" || got.APIKey != "file-placeholder" {
+	if got := cfg.Providers["minimax"]; got.BaseURL != "https://api.minimax.io/v1" {
 		t.Fatalf("Providers = %v, want minimax from the file", cfg.Providers)
+	}
+}
+
+func TestLoadRejectsCredentialsInConfigFile(t *testing.T) {
+	for _, tt := range []struct{ name, body, want string }{
+		{"provider key", "providers:\n  minimax:\n    api_key: file-secret", "providers.minimax.api_key"},
+		{"controller token", "auth:\n  token: file-secret", "auth.token"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cleanEnv(t)
+			path := writeConfig(t, tt.body)
+			t.Setenv(ConfigFileEnv, path)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatal("expected a rejection for a credential in the config file")
+			}
+			if !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), path) {
+				t.Fatalf("error %q must name the setting and the file", err)
+			}
+			if strings.Contains(err.Error(), "file-secret") {
+				t.Fatalf("error %q leaked the credential", err)
+			}
+		})
+	}
+}
+
+func TestSecretFileBeatsConfigFile(t *testing.T) {
+	cleanEnv(t)
+	secretFile := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(secretFile, []byte("from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(ConfigFileEnv, writeConfig(t, "providers:\n  minimax:\n    base_url: https://api.minimax.io/v1"))
+	t.Setenv("QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY_FILE", secretFile)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Providers["minimax"].APIKey != "from-file" {
+		t.Fatalf("api_key = %q, want the mounted secret", cfg.Providers["minimax"].APIKey)
 	}
 }
 

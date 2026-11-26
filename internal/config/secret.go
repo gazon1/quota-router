@@ -52,13 +52,16 @@ func loadSecretFiles(k *koanf.Koanf) error {
 		if !ok || path == "" || name == ConfigFileEnv || !strings.HasPrefix(name, EnvPrefix) || !strings.HasSuffix(name, "_FILE") {
 			continue
 		}
-		if os.Getenv(strings.TrimSuffix(name, "_FILE")) != "" {
-			continue // the plain variable overrides this file
-		}
 		key := strings.TrimSuffix(strings.TrimPrefix(name, EnvPrefix), "_FILE")
 		key = strings.ReplaceAll(strings.ToLower(key), EnvDelim, ".")
+		// The allowlist is checked first: a _FILE naming a non-secret setting is
+		// a configuration mistake and stays an error even when its plain
+		// counterpart is set, so it never goes silent.
 		if !matches(allowed, key) {
 			return fmt.Errorf("%s: not a secret setting; only %s can be set from a file", name, strings.Join(setKeys(allowed), ", "))
+		}
+		if os.Getenv(strings.TrimSuffix(name, "_FILE")) != "" {
+			continue // the plain variable overrides this file
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
@@ -133,4 +136,19 @@ func setKeys(m map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// rejectSecretsInFile keeps credentials out of a committed artifact: the config
+// file may be copied into a deployment or a repository, so a Secret there is a
+// startup error that names the setting, never the value. Use the environment or
+// a mounted secret file instead.
+func rejectSecretsInFile(k *koanf.Koanf, path string) error {
+	allowed := secretPaths()
+	for _, key := range k.Keys() {
+		if !matches(allowed, key) || k.Get(key) == nil {
+			continue
+		}
+		return fmt.Errorf("config file %s: %s must not be set there; use the environment or a mounted secret file", path, key)
+	}
+	return nil
 }
