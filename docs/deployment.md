@@ -22,7 +22,7 @@ serving when the Controller is stopped.
 
 ```sh
 cd deploy
-cp .env.example .env                     # then fill in both keys
+install -m 600 .env.example .env         # 0600: the file holds keys
 sed -i "s/^LITELLM_MASTER_KEY=/LITELLM_MASTER_KEY=$(openssl rand -hex 24)/" .env
 docker compose up -d --build --wait
 ```
@@ -119,21 +119,29 @@ curl -s http://127.0.0.1:4000/health/readiness
 The controller is built locally from this checkout, so upgrading it is
 `git pull && docker compose up -d --build --wait quota-controller`.
 
-## Compatibility note: v1.110.0 ships Rust, but runs it only when asked
+## Compatibility note: what is Rust in v1.110.0, and what is not
 
 Issue #6 asks for the Rust Router candidate to be evaluated rather than assumed.
-Findings for `v1.110.0` (checked 2026-11-26, image
-`@sha256:4295b064…b883c3`):
+Measured in the pinned image `@sha256:4295b064…b883c3` (2026-11-26):
 
 - The proxy is **Python 3.13.18** (`/app/.venv/bin/litellm --version` → `1.110.0`).
-- It **does** ship compiled Rust: `litellm/rust_bridge/_native.abi3.so` is a
-  45 MB native extension (1100+ `rustc`/`/rust/` symbols) that imports cleanly
-  and exports the routing core — `RouterCoreHandle`, `NativeDatabase`,
-  `NativeRedisClient`, `NativeRateLimits`, `TokenCounter`, plus `acompletion`,
-  `aembedding`, `amessages`, `aresponses`, `aocr`.
-- **The Rust path is opt-in and off by default.** `litellm.rust_bridge.configuration`
-  reads `LITELLM_RUST`; unset or `false` yields `Decision.PYTHON`, `true` yields
-  `Decision.RUST_WITH_FALLBACK`. Measured in the image:
+- It **does** ship compiled Rust: `litellm/rust_bridge/_native.abi3.so`, a 45 MB
+  native extension (1100+ `rustc`/`/rust/` symbols) importing cleanly and
+  exporting `RouterCoreHandle`, `NativeDatabase`, `NativeRedisClient`,
+  `NativeRateLimits`, `TokenCounter` and `acompletion`/`amessages`/`aresponses`.
+- **Which route runs on Rust is a per-route decision**, not a global switch.
+  `litellm.rust_bridge.catalog.RULES` in this image:
+
+  | Route | Rollout | Meaning |
+  |---|---|---|
+  | `chat_completions` | `PYTHON_ONLY` | always Python |
+  | `embeddings`, `responses`, `token_counter`, `tokenizer` | `PYTHON_ONLY` | always Python |
+  | `messages` (non-Anthropic) | `PYTHON_ONLY` | always Python |
+  | `messages` (provider `anthropic`) | `RUST_OPT_IN` | Rust if enabled |
+  | `ocr` | `RUST_REQUIRED` | always Rust |
+  | `transcription` (provider `bedrock`) | `RUST_REQUIRED` | always Rust |
+
+- `RUST_OPT_IN` is driven by `LITELLM_RUST`, measured in the image:
 
   | `LITELLM_RUST` | `rust_enabled()` | decision |
   |---|---|---|
@@ -141,15 +149,13 @@ Findings for `v1.110.0` (checked 2026-11-26, image
   | `true` | `True` | `RUST_WITH_FALLBACK` |
   | `false` | `False` | `PYTHON` |
 
-- `RUST_WITH_FALLBACK` falls back to Python when the native call declines, so
-  enabling it is not a hard cutover.
-- No separate Rust image tag exists on GHCR or Docker Hub (`litellm:rust`,
-  `litellm-rust:latest`, `litellm:main-rust` all 404); the one image carries both.
+  `RUST_WITH_FALLBACK` still falls back to Python when the native call declines.
 
-So this deployment runs the **Python path by default** and does not set
-`LITELLM_RUST`. Enabling Rust is an untested change here: measure it under real
-load before adopting it, and do not assume the Rust router is inactive merely
-because the image is tagged as a Python proxy.
+So for **this** deployment — chat completions through `openai/MiniMax-M3.1-Flash` —
+the request path is **Python regardless of `LITELLM_RUST`**, because the route is
+`PYTHON_ONLY`. Rust is load-bearing only for `ocr` and Bedrock `transcription`.
+Setting `LITELLM_RUST=true` adds Rust to Anthropic `messages`; that is untested
+here and should be measured before adoption.
 
 `Dockerfile.controller` builds against the `go 1.22.0` / `toolchain go1.24.0`
 directive in `go.mod` and pins `golang:1.24-alpine`.

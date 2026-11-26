@@ -35,11 +35,11 @@ func TestComposeContract(t *testing.T) {
 		{"controller restart policy", strings.Contains(services["quota-controller"], "restart: unless-stopped")},
 		{"controller 128m memory limit", strings.Contains(services["quota-controller"], "mem_limit: 128m")},
 		{"controller cpu limit", strings.Contains(services["quota-controller"], "cpus:")},
-		{"controller healthcheck", strings.Contains(services["quota-controller"], "healthcheck:")},
+		{"controller health probes /health", strings.Contains(services["quota-controller"], "127.0.0.1:8080/health")},
 		{"litellm restart policy", strings.Contains(services["litellm"], "restart: unless-stopped")},
 		{"litellm memory limit", strings.Contains(services["litellm"], "mem_limit:")},
 		{"litellm cpu limit", strings.Contains(services["litellm"], "cpus:")},
-		{"litellm healthcheck", strings.Contains(services["litellm"], "healthcheck:")},
+		{"litellm health probes liveliness", strings.Contains(services["litellm"], "127.0.0.1:4000/health/liveliness")},
 	} {
 		if !c.ok {
 			t.Errorf("compose.yaml: missing %s", c.what)

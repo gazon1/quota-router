@@ -30,9 +30,10 @@ services:
     # (issue #12). Add one mounted at the DB path when that lands.
 
   litellm:
-    # Pinned by tag and digest. v1.110.0 is a Python 3.13 proxy that also ships
-    # a compiled Rust routing core, opt-in via LITELLM_RUST (off by default).
-    # Never use latest/stable here. See docs/deployment.md.
+    # Pinned by tag and digest. v1.110.0 is a Python 3.13 proxy that ships a
+    # compiled Rust core; per its route table, chat_completions is PYTHON_ONLY,
+    # so this deployment's request path is Python. Never use latest/stable.
+    # See docs/deployment.md for the measured route matrix.
     image: ghcr.io/berriai/litellm:v1.110.0@sha256:4295b064b22eb88f9530e616afc812edd47048891ba64896bfc3fa74e2b883c3
     restart: unless-stopped
     command: ["--config", "/app/config.yaml"]

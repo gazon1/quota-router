@@ -35,7 +35,7 @@ Empty duration variables use defaults. `QUOTA_ROUTER_ADDR` must not be empty whe
 
 ```sh
 cd deploy
-cp .env.example .env      # then fill in BOTH keys; master key must be non-empty
+install -m 600 .env.example .env   # holds keys; fill in BOTH
 docker compose up -d --build --wait
 ```
 
