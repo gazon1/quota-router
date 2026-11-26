@@ -133,7 +133,8 @@ a success.
 | `ErrIO` | `SQLITE_IOERR`, `SQLITE_CORRUPT`, `SQLITE_NOTADB`, `SQLITE_CANTOPEN` | I/O or corruption; not retryable in-process |
 | `ErrReadOnly` | `SQLITE_READONLY` | the file is not writable |
 
-A migration failure is fatal at startup; it is not retried in-process.
+A migration failure is fatal at startup; it is not retried in-process. A
+retention failure is not, unless it is `ErrFull` — see [Retention](#retention).
 
 ## Retention
 
@@ -145,11 +146,20 @@ A migration failure is fatal at startup; it is not retried in-process.
 | `retention.provider_health` | 30 days |
 | `retention.usage_records` | 90 days |
 
-Cleanup runs at startup and **never removes what routing reads**: the newest
+Cleanup runs at startup and then **hourly while the controller serves**, so a
+long-running process cannot accumulate history the configuration says it dropped;
+the interval is not configurable because a tick per hour is far cheaper than the
+polls that fill the tables. Cleanup never removes what routing reads: the newest
 snapshot per provider and the newest health row per provider always survive, even
 when they are older than the bound. Usage has no such rule because routing does
-not read it. Cleanup is one transaction, and a failure is a startup error — a
-full disk is exactly what cleanup exists to avoid.
+not read it. Each run is one transaction.
+
+A failed run does not stop the controller: the schema is current and the database
+readable, so it keeps routing, logs a warning, and retries at the next tick.
+**Only `SQLITE_FULL` is fatal at startup** — a database that cannot grow will
+fail every write anyway, and that is what cleanup exists to prevent. A transient
+lock or I/O error at startup must not turn into a restart loop for a service that
+could serve.
 
 ## Backup and restore
 
