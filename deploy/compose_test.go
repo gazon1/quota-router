@@ -125,17 +125,33 @@ func serviceBlocks(doc string) (map[string]string, bool) {
 }
 
 // dependsOn returns the services the block depends on, space-joined, or "".
+// Both Compose syntaxes are read: `depends_on: [a, b]` and the block list
+// under a bare `depends_on:`.
 func dependsOn(block string) string {
+	var names []string
+	in := false
 	for _, line := range strings.Split(block, "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "depends_on:") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "depends_on:") {
+			inline := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "depends_on:")), "[]")
+			names = append(names, strings.Split(inline, ",")...)
+			in = inline == ""
 			continue
 		}
-		v := strings.TrimSpace(strings.TrimPrefix(line, "depends_on:"))
-		v = strings.Trim(v, "[]")
-		return strings.Join(strings.Split(v, ","), " ")
+		if !in {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "- "):
+			names = append(names, strings.TrimPrefix(trimmed, "- "))
+		case strings.HasSuffix(trimmed, ":") && strings.HasPrefix(line, "      "):
+			// Long syntax: depends_on: {service: {condition: ...}}
+			names = append(names, strings.TrimSuffix(trimmed, ":"))
+		default:
+			return strings.Join(strings.Fields(strings.Join(names, " ")), " ")
+		}
 	}
-	return ""
+	return strings.Join(strings.Fields(strings.Join(names, " ")), " ")
 }
 
 // publishedPorts returns the port mappings of a block, in file order.

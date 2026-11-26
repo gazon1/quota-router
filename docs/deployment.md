@@ -32,10 +32,16 @@ host firewall rule that drops inbound `tcp/4000`.
 
 ```sh
 cd deploy
-install -m 600 .env.example .env         # 0600: the file holds keys
-sed -i "s/^LITELLM_MASTER_KEY=/LITELLM_MASTER_KEY=$(openssl rand -hex 24)/" .env
+test -f .env || install -m 600 .env.example .env   # only on first setup
+grep -q '^LITELLM_MASTER_KEY=.\+' .env || \
+  sed -i "s/^LITELLM_MASTER_KEY=/LITELLM_MASTER_KEY=$(openssl rand -hex 24)/" .env
+$EDITOR .env                            # set MINIMAX_API_KEY (and keep the master key)
 docker compose up -d --build --wait
 ```
+
+Both commands are idempotent on purpose: re-running setup must not overwrite an
+existing `.env`. A plain copy would blank `MINIMAX_API_KEY` and rotate the master
+key, breaking every client that already holds it.
 
 `LITELLM_MASTER_KEY` must not be empty: LiteLLM refuses to start without it
 rather than accept unauthenticated requests. `.env.example` ships it empty on
