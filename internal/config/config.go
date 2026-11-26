@@ -174,11 +174,31 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// envKey maps QUOTA_ROUTER_SERVER__ADDR to server.addr. The double delimiter
-// leaves single underscores free for field names such as base_url.
+// legacyEnvKeys maps the flat variable names this service shipped before the
+// nested model to their current paths, so an existing deployment keeps working.
+// The new name wins when both are set. Documented as deprecated in README.md.
+var legacyEnvKeys = map[string]string{
+	"addr":                "server__addr",
+	"shutdown_timeout":    "server__shutdown_timeout",
+	"read_header_timeout": "server__read_header_timeout",
+	"read_timeout":        "server__read_timeout",
+	"write_timeout":       "server__write_timeout",
+	"idle_timeout":        "server__idle_timeout",
+}
+
+// envKey maps QUOTA_ROUTER_SERVER__ADDR to server.addr, and the deprecated
+// flat QUOTA_ROUTER_ADDR to the same place. The double delimiter leaves single
+// underscores free for field names such as base_url.
 func envKey(key, value string) (string, any) {
 	if value == "" || key == ConfigFileEnv || strings.HasSuffix(key, "_FILE") {
 		return "", nil // empty value means unset; _FILE is handled separately
 	}
-	return strings.ToLower(strings.TrimPrefix(key, EnvPrefix)), value
+	name := strings.ToLower(strings.TrimPrefix(key, EnvPrefix))
+	if current, ok := legacyEnvKeys[name]; ok {
+		if os.Getenv(EnvPrefix+strings.ToUpper(current)) != "" {
+			return "", nil // the current name wins over its deprecated alias
+		}
+		return current, value
+	}
+	return name, value
 }

@@ -62,6 +62,14 @@ Durations use Go syntax (`5s`, `1m30s`). An empty variable counts as unset, so
 it falls through to the file and then the default. The matching YAML structure
 and every default are in [config.example.yaml](./config.example.yaml).
 
+The six flat server variables this service used before the nested model
+(`QUOTA_ROUTER_ADDR`, `QUOTA_ROUTER_SHUTDOWN_TIMEOUT`,
+`QUOTA_ROUTER_READ_HEADER_TIMEOUT`, `QUOTA_ROUTER_READ_TIMEOUT`,
+`QUOTA_ROUTER_WRITE_TIMEOUT`, `QUOTA_ROUTER_IDLE_TIMEOUT`) still work as
+deprecated aliases for their `QUOTA_ROUTER_SERVER__*` equivalents, so an
+existing deployment keeps starting. The nested name wins when both are set.
+Migrate and drop the flat names; they are removed in a later change.
+
 ### Secrets
 
 Secrets are injected at runtime and never committed: they are read from an
@@ -76,12 +84,12 @@ QUOTA_ROUTER_AUTH__TOKEN_FILE=/run/secrets/controller_token
 
 The file must exist and be readable, or startup fails and names it; the path is
 never used as the value. A `_FILE` variable loads with the same precedence as
-its plain counterpart, so an explicit `QUOTA_ROUTER_AUTH__TOKEN` wins over
-`QUOTA_ROUTER_AUTH__TOKEN_FILE`. Credentials print as `[REDACTED]` through `%s`,
-`%v`, `%#v`, `slog` text and JSON logs, and `json.Marshal`; an invalid URL is
-reported without echoing it, so a `user:password@host` cannot reach a log.
-`.env` is loaded only by Docker Compose for local development, never by the
-service.
+its plain counterpart: when `QUOTA_ROUTER_AUTH__TOKEN` is set, the token file is
+not read at all, so an unreadable file cannot fail a configured value.
+Credentials print as `[REDACTED]` through `%s`, `%v`, `%#v`, `slog` text and
+JSON logs, and `json.Marshal`; an invalid URL is reported without echoing it, so
+a `user:password@host` cannot reach a log. `.env` is loaded only by Docker
+Compose for local development, never by the service.
 
 Permissions on mounted secret files are the operator's responsibility, and the
 controller only requires the file to be readable by the process — it does not

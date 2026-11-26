@@ -338,6 +338,58 @@ func TestLoadSecretsFromEnvironmentAndFiles(t *testing.T) {
 	}
 }
 
+func TestLegacyFlatEnvNamesStillWork(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("QUOTA_ROUTER_ADDR", "127.0.0.1:7001")
+	t.Setenv("QUOTA_ROUTER_READ_TIMEOUT", "7s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v, want the deprecated flat names to keep working", err)
+	}
+	if cfg.Server.Addr != "127.0.0.1:7001" || cfg.Server.ReadTimeout != 7*time.Second {
+		t.Fatalf("Server = %+v, want the deprecated flat names applied", cfg.Server)
+	}
+}
+
+func TestNestedNameBeatsLegacyFlatName(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("QUOTA_ROUTER_ADDR", "127.0.0.1:7001")
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", "127.0.0.1:7002")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Server.Addr != "127.0.0.1:7002" {
+		t.Fatalf("Server.Addr = %q, want the current name to win over the alias", cfg.Server.Addr)
+	}
+}
+
+func TestEmptyEnvFallsThroughToFile(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv(ConfigFileEnv, writeConfig(t, "server:\n  addr: \"127.0.0.1:7000\""))
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", "") // empty is unset, not an override
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Server.Addr != "127.0.0.1:7000" {
+		t.Fatalf("Server.Addr = %q, want the file value", cfg.Server.Addr)
+	}
+}
+
+func TestEnvSecretMakesUnreadableSecretFileIrrelevant(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN", "env-token")
+	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN_FILE", filepath.Join(t.TempDir(), "absent"))
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() error = %v, want the configured value to win over the missing file", err)
+	}
+}
+
 func TestEnvSecretBeatsSecretFile(t *testing.T) {
 	cleanEnv(t)
 	path := filepath.Join(t.TempDir(), "token")

@@ -43,13 +43,17 @@ func (s *Secret) UnmarshalText(b []byte) error {
 // QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY_FILE=/run/secrets/minimax_api_key
 // sets providers.minimax.api_key. Only Secret fields are accepted, so no
 // arbitrary variable is ever read as a path; the file must exist and be
-// readable, and its path is never used as the value itself.
+// readable, and its path is never used as the value itself. A plain variable
+// that is already set wins, so an unusable file never fails a configured value.
 func loadSecretFiles(k *koanf.Koanf) error {
 	allowed := secretPaths()
 	for _, kv := range os.Environ() {
 		name, path, ok := strings.Cut(kv, "=")
 		if !ok || path == "" || name == ConfigFileEnv || !strings.HasPrefix(name, EnvPrefix) || !strings.HasSuffix(name, "_FILE") {
 			continue
+		}
+		if os.Getenv(strings.TrimSuffix(name, "_FILE")) != "" {
+			continue // the plain variable overrides this file
 		}
 		key := strings.TrimSuffix(strings.TrimPrefix(name, EnvPrefix), "_FILE")
 		key = strings.ReplaceAll(strings.ToLower(key), EnvDelim, ".")
