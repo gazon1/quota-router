@@ -1,0 +1,13 @@
+{
+  "case": "openai_chat_timeout",
+  "request": {
+    "endpoint": "openai_chat_timeout",
+    "auth": "none/bad-key as named"
+  },
+  "response": {
+    "ok": false,
+    "elapsed_ms": 6,
+    "error_type": "URLError",
+    "error": "<urlopen error timed out>"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "case": "openai_chat_stream_doc_example",
+  "source": "https://platform.minimax.io/docs/api-reference/text-openai-api.md#streaming-response",
+  "live_capture": false,
+  "note": "Documentation example, not a live API response captured in this environment. Authenticated streaming was skipped (no MINIMAX_API_KEY). Bad-auth streaming request returned HTTP 401 JSON error; see openai_chat_bad_auth_stream.json.",
+  "request_example": {
+    "model": "MiniMax-M3.1-Flash",
+    "reasoning_effort": "max",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Hi, how are you?"}
+    ],
+    "stream": true
+  },
+  "expected_stream_shape": {
+    "event_format": "SSE data: {json} lines, terminated by data: [DONE]",
+    "delta.reasoning_content": "incremental thinking fragments",
+    "delta.content": "incremental text fragments"
+  }
+}

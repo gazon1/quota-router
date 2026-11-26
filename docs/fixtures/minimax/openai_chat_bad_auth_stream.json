@@ -1,0 +1,36 @@
+{
+  "case": "openai_chat_bad_auth_stream",
+  "request": {
+    "endpoint": "openai_chat_bad_auth_stream",
+    "auth": "none/bad-key as named"
+  },
+  "response": {
+    "ok": false,
+    "status": 401,
+    "headers": {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": "232",
+      "Trace-Id": "***REDACTED***",
+      "Minimax-Request-Id": "***REDACTED***",
+      "alb_receive_time": "***REDACTED***",
+      "alb_request_id": "***REDACTED***",
+      "Expires": "***REDACTED***",
+      "Cache-Control": "max-age=0, no-cache, no-store",
+      "Pragma": "no-cache",
+      "Date": "***REDACTED***",
+      "Connection": "close",
+      "Access-Control-Allow-Origin": "*",
+      "X-From": "***REDACTED***"
+    },
+    "body": {
+      "type": "error",
+      "error": {
+        "type": "authorized_error",
+        "message": "login fail: Please carry the API secret key in the 'Authorization' field of the request header (1004)",
+        "http_code": "401"
+      },
+      "request_id": "***REDACTED***"
+    },
+    "error_type": "HTTPError"
+  }
+}
