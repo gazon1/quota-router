@@ -35,8 +35,8 @@ Empty duration variables use defaults. `QUOTA_ROUTER_ADDR` must not be empty whe
 
 ```sh
 cd deploy
-cp .env.example .env      # set LITELLM_MASTER_KEY and MINIMAX_API_KEY
-docker compose up -d --build
+cp .env.example .env      # then fill in BOTH keys; master key must be non-empty
+docker compose up -d --build --wait
 ```
 
 LiteLLM listens on `127.0.0.1:4000`; the controller is internal-only. See

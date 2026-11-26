@@ -16,22 +16,26 @@ serving when the Controller is stopped.
 | `litellm-config.yaml` | LiteLLM model list and master key |
 | `.env.example` | Template for `.env` (secrets; `deploy/.gitignore` excludes it) |
 | `compose_test.go` | Contract test for the acceptance criteria below |
+| `../.dockerignore` | Keeps `.git` and `deploy/.env` out of the controller's build context |
 
 ## Setup
 
 ```sh
 cd deploy
-cp .env.example .env      # then set LITELLM_MASTER_KEY and MINIMAX_API_KEY
-docker compose up -d --build
+cp .env.example .env                     # then fill in both keys
+sed -i "s/^LITELLM_MASTER_KEY=/LITELLM_MASTER_KEY=$(openssl rand -hex 24)/" .env
+docker compose up -d --build --wait
 ```
 
-Set `LITELLM_MASTER_KEY` to a random value you keep (`openssl rand -hex 24`).
-LiteLLM refuses to start without it rather than accept unauthenticated requests.
+`LITELLM_MASTER_KEY` must not be empty: LiteLLM refuses to start without it
+rather than accept unauthenticated requests. `.env.example` ships it empty on
+purpose — a placeholder like `sk-change-me` is a *working* credential, so a
+forgotten replacement would silently authenticate anyone who guessed it.
 
 ## Startup, shutdown, logs
 
 ```sh
-docker compose up -d                  # start both, wait for healthy
+docker compose up -d --wait           # start both and block until healthy
 docker compose ps                     # status incl. health
 docker compose logs -f litellm        # follow proxy logs
 docker compose logs -f quota-controller
@@ -106,14 +110,14 @@ docker buildx imagetools inspect ghcr.io/berriai/litellm:vX.Y.Z
 
 # 3. Pull, restart, verify
 docker compose pull litellm
-docker compose up -d litellm
+docker compose up -d --wait litellm
 curl -s http://127.0.0.1:4000/health/readiness
 
 # 4. Roll back by restoring the previous image line and re-running step 3
 ```
 
 The controller is built locally from this checkout, so upgrading it is
-`git pull && docker compose up -d --build quota-controller`.
+`git pull && docker compose up -d --build --wait quota-controller`.
 
 ## Compatibility note: v1.110.0 is Python, not Rust
 
