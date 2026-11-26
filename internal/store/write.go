@@ -116,12 +116,12 @@ func (s *Store) ControllerState(ctx context.Context, key string) (value string, 
 }
 
 // LatestQuotaSnapshot returns the newest snapshot per provider with its windows.
-// It is routing state, not history: retention keeps these rows.
+// It is routing state, not history: retention keeps these rows. The row is
+// chosen by newestPerProvider, the same predicate retention spares.
 func (s *Store) LatestQuotaSnapshot(ctx context.Context) ([]QuotaSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, provider, state, unknown_reason, source, confidence, observed_at, error
-		 FROM quota_snapshots q
-		 WHERE observed_at = (SELECT MAX(observed_at) FROM quota_snapshots WHERE provider = q.provider)`)
+		 FROM quota_snapshots WHERE `+newestPerProvider("quota_snapshots", true))
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -199,8 +199,7 @@ func (s *Store) windows(ctx context.Context, snapshotID int64) ([]QuotaWindow, e
 func (s *Store) LatestProviderHealth(ctx context.Context) ([]HealthRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT provider, state, observed_at, error
-		 FROM provider_health h
-		 WHERE observed_at = (SELECT MAX(observed_at) FROM provider_health WHERE provider = h.provider)`)
+		 FROM provider_health WHERE `+newestPerProvider("provider_health", true))
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -244,21 +243,27 @@ func (s *Store) Prune(ctx context.Context, r Retention, now time.Time) (deleted 
 	deleted = map[string]int64{}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
 		for _, p := range []struct {
-			table  string
-			age    time.Duration
-			newest string
+			table string
+			age   time.Duration
+			stmt  string
 		}{
 			// quota_windows go with their snapshot through ON DELETE CASCADE.
-			{"quota_snapshots", r.QuotaSnapshots, newestPerProvider("quota_snapshots")},
-			{"provider_health", r.ProviderHealth, newestPerProvider("provider_health")},
-			{"usage_records", r.UsageRecords, "1 = 1"},
+			// The spared ids are materialized: inside a DELETE the window
+			// function would otherwise be re-evaluated as rows disappear, and
+			// a later row would take the top rank and be spared too.
+			{"quota_snapshots", r.QuotaSnapshots,
+				"WITH spared AS MATERIALIZED (" + newestPerProvider("quota_snapshots", false) + ") " +
+					"DELETE FROM quota_snapshots WHERE observed_at < ? AND id NOT IN (SELECT id FROM spared)"},
+			{"provider_health", r.ProviderHealth,
+				"WITH spared AS MATERIALIZED (" + newestPerProvider("provider_health", false) + ") " +
+					"DELETE FROM provider_health WHERE observed_at < ? AND id NOT IN (SELECT id FROM spared)"},
+			{"usage_records", r.UsageRecords,
+				"DELETE FROM usage_records WHERE observed_at < ?"},
 		} {
 			if p.age <= 0 {
 				continue
 			}
-			res, err := tx.ExecContext(ctx,
-				"DELETE FROM "+p.table+" WHERE observed_at < ? AND "+p.newest,
-				ts(now.Add(-p.age)))
+			res, err := tx.ExecContext(ctx, p.stmt, ts(now.Add(-p.age)))
 			if err != nil {
 				return classify(err)
 			}
@@ -292,12 +297,17 @@ func (s *Store) tx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	return nil
 }
 
-// newestPerProvider builds the NOT IN clause that spares the row
-// LatestQuotaSnapshot and LatestProviderHealth read: max observed_at, ties
-// broken by max id, per provider.
-func newestPerProvider(table string) string {
-	return "id NOT IN (SELECT id FROM " + table + " WHERE (provider, observed_at) IN " +
-		"(SELECT provider, MAX(observed_at) FROM " + table + " GROUP BY provider))"
+// newestPerProvider is the one row per provider that the latest readers return:
+// the newest observed_at, ties broken by the highest id. Retention spares
+// exactly that row and the readers select it, so cleanup can never delete what
+// routing depends on. usedAsPredicate reads the row condition the readers put
+// after WHERE; the bare form selects the ids for retention's NOT IN.
+func newestPerProvider(table string, usedAsPredicate bool) string {
+	ranked := "(SELECT id, ROW_NUMBER() OVER (PARTITION BY provider ORDER BY observed_at DESC, id DESC) rn FROM " + table + ")"
+	if usedAsPredicate {
+		return "id IN (SELECT id FROM " + ranked + " WHERE rn = 1)"
+	}
+	return "SELECT id FROM " + ranked + " WHERE rn = 1"
 }
 
 func parseTS(v string) (time.Time, error) {

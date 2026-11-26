@@ -178,6 +178,11 @@ a file you can reach, or call `Store.Backup` from Go:
 sqlite3 quota-router.db "VACUUM INTO '/backup/quota-router-$(date +%F).db'"
 ```
 
+`Store.Backup(path)` never overwrites: it snapshots to a private temporary file
+and publishes it with a hard link, which fails if `path` appeared meanwhile. It
+returns an error naming the target instead of replacing an existing backup, and a
+failed run removes only its own temporary file.
+
 Either way the result is a single file. Do **not** back up with a plain `cp`
 while the controller runs: rows still in `-wal` are missed.
 

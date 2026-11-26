@@ -560,6 +560,178 @@ func TestBackupIsConsistentUnderWAL(t *testing.T) {
 	}
 }
 
+func TestConcurrentBackupsToOneTargetKeepTheWinner(t *testing.T) {
+	// Review finding: a failed VACUUM INTO used to remove the destination
+	// unconditionally, so a racing loser could delete the winner's good backup.
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	if err := s.SaveControllerState(ctx, "mode", "active", time.Now()); err != nil {
+		t.Fatalf("SaveControllerState: %v", err)
+	}
+	target := filepath.Join(t.TempDir(), "daily.db")
+
+	const racers = 4
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = s.Backup(ctx, target)
+		}(i)
+	}
+	wg.Wait()
+
+	winners := 0
+	for i, err := range errs {
+		if err == nil {
+			winners++
+			continue
+		}
+		if !strings.Contains(err.Error(), "already exists") && !strings.Contains(err.Error(), "file exists") {
+			t.Fatalf("racer %d: unexpected error %v", i, err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers succeeded, want exactly 1", winners)
+	}
+	// The surviving file must be a complete backup, not a deleted or truncated one.
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the winning backup is gone: %v", err)
+	}
+	bdb, err := sql.Open("sqlite", "file:"+target+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer bdb.Close()
+	var got string
+	if err := bdb.QueryRow("SELECT value FROM controller_state WHERE key='mode'").Scan(&got); err != nil {
+		t.Fatalf("read backup: %v", err)
+	}
+	if got != "active" {
+		t.Fatalf("backup value = %q, want active", got)
+	}
+	// No private temporary file was left behind.
+	entries, err := os.ReadDir(filepath.Dir(target))
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".backup-") {
+			t.Errorf("temporary file %q survived", e.Name())
+		}
+	}
+}
+
+func TestDSNKeepsURISpecialCharactersInThePath(t *testing.T) {
+	// Review finding: the path was concatenated into the SQLite URI, so "?" began
+	// the query and the driver opened a different file than the one Migrate locks.
+	for _, name := range []string{"qa?archive.db", "a#b.db", "with space.db", "100%.db", "plus+sign.db"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, name)
+			s, err := Open(Config{Path: path, BusyTimeout: time.Second}, testLog())
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := s.Migrate(context.Background()); err != nil {
+				t.Fatalf("Migrate: %v", err)
+			}
+			if err := s.SaveControllerState(context.Background(), "k", "v", time.Now()); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			s.Close()
+
+			// The file must exist under the configured name, and no other file may
+			// have been created from the truncated URI.
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("database not created at %q: %v", name, err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("read dir: %v", err)
+			}
+			for _, e := range entries {
+				base := e.Name()
+				if base == name || base == name+"-wal" || base == name+"-shm" || base == name+".lock" {
+					continue
+				}
+				t.Errorf("unexpected file %q: the path was cut at a URI delimiter", base)
+			}
+			// And the migration lock pointed at the same file, so serialization holds.
+			if _, err := os.Stat(path + ".lock"); err != nil {
+				t.Errorf("migration lock is not beside the database: %v", err)
+			}
+		})
+	}
+}
+
+func TestReadersAndRetentionAgreeOnTimestampTies(t *testing.T) {
+	// Review finding: the readers returned every row sharing the maximum
+	// timestamp while retention kept all of them, so one provider could report
+	// two conflicting current states.
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Two snapshots and two health rows for one provider at the same instant.
+	for _, state := range []QuotaState{QuotaAvailable, QuotaExhausted} {
+		if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+			Provider: "minimax", State: state, Source: "s", Confidence: Reported, ObservedAt: at,
+		}); err != nil {
+			t.Fatalf("SaveQuotaSnapshot: %v", err)
+		}
+	}
+	for _, state := range []HealthState{Healthy, Unavailable} {
+		if err := s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: state, ObservedAt: at}); err != nil {
+			t.Fatalf("SaveProviderHealth: %v", err)
+		}
+	}
+
+	for i := 0; i < 5; i++ { // the tie must resolve the same way every time
+		snaps, err := s.LatestQuotaSnapshot(ctx)
+		if err != nil {
+			t.Fatalf("LatestQuotaSnapshot: %v", err)
+		}
+		if len(snaps) != 1 {
+			t.Fatalf("snapshots = %d, want exactly 1 per provider", len(snaps))
+		}
+		health, err := s.LatestProviderHealth(ctx)
+		if err != nil {
+			t.Fatalf("LatestProviderHealth: %v", err)
+		}
+		if len(health) != 1 {
+			t.Fatalf("health = %d, want exactly 1 per provider", len(health))
+		}
+	}
+
+	// Retention must spare exactly the row the readers return, no more.
+	before, err := s.LatestQuotaSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LatestQuotaSnapshot: %v", err)
+	}
+	if _, err := s.Prune(ctx, Retention{QuotaSnapshots: time.Hour, ProviderHealth: time.Hour}, at.Add(90*24*time.Hour)); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	after, err := s.LatestQuotaSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LatestQuotaSnapshot after prune: %v", err)
+	}
+	if len(after) != 1 || after[0].State != before[0].State {
+		t.Fatalf("reader returned %+v before prune and %+v after: they disagree on the tie", before, after)
+	}
+	var snapshots, health int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM quota_snapshots").Scan(&snapshots); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM provider_health").Scan(&health); err != nil {
+		t.Fatalf("count health: %v", err)
+	}
+	if snapshots != 1 || health != 1 {
+		t.Fatalf("retention kept %d snapshots and %d health rows, want 1 each", snapshots, health)
+	}
+}
+
 func TestDiskFullIsReportedAndLeavesNoRows(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)

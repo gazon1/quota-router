@@ -81,7 +81,10 @@ func dsn(cfg Config) string {
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Set("_txlock", "immediate")
-	return "file:" + filepath.ToSlash(cfg.Path) + "?" + q.Encode()
+	// url.URL escapes the path, so a "?", "#", "%" or space in a valid file
+	// name stays part of the file name instead of becoming URI syntax. Without
+	// it the driver opens a different file than the one Migrate locks.
+	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(cfg.Path), RawQuery: q.Encode()}).String()
 }
 
 // Close releases the pool.
