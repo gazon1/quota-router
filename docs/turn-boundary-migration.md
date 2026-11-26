@@ -76,7 +76,8 @@ required" stays valid.
 For `Bearer`, the rule refuses rather than guesses, and the scheme name is
 case-insensitive (RFC 7235 §2.1): anything after it that is not a placeholder is
 refused, including inside diagnostic text
-(`bearer abcdefghijklmnop was rejected`). Character, vowel, length and
+(`bearer abcdefghijklmnop was rejected`). The scheme is found by tokenising on any
+whitespace, so a tab or a newline after it hides nothing. Character, vowel, length and
 grammar-shape heuristics were each tried and each either missed a real value or
 refused ordinary prose, because a summary is free text and this is not a parser.
 So the word `bearer` is **reserved** in a checkpoint: prose that needs it is

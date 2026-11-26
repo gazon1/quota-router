@@ -283,20 +283,20 @@ func anyValueAfter(lower, needle string) bool {
 // the scheme belongs in the caller's own logs, and prose that needs the word
 // rephrases it. That cost is recoverable; a leaked credential is not.
 func anyBearerToken(lower string) bool {
-	for from := 0; ; {
-		i := strings.Index(lower[from:], "bearer ")
-		if i < 0 {
-			return false
+	// Tokenize on any whitespace: the scheme and its value may be separated by a
+	// space, a tab or a newline in a log line, and searching for "bearer " only
+	// would miss the rest. Words are compared after trimWord, so punctuation
+	// around the scheme ("(bearer)") does not hide it either.
+	words := strings.Fields(lower)
+	for i, w := range words {
+		if trimWord(w) != "bearer" || i+1 >= len(words) {
+			continue
 		}
-		fields := strings.Fields(lower[from+i+len("bearer "):])
-		if len(fields) > 0 && !placeholders[trimWord(fields[0])] {
+		if next := trimWord(words[i+1]); !placeholders[next] {
 			return true
 		}
-		from += i + len("bearer ")
-		if from >= len(lower) {
-			return false
-		}
 	}
+	return false
 }
 
 // urlsIn returns the http(s) URLs s mentions, including one inside a sentence.

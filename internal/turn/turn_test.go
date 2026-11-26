@@ -285,6 +285,9 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		"the bearer of sk-live-1",
 		"a bearer of sk-live-abcdef123",
 		"request failed: the Bearer of sk-live-1 was rejected",
+		// Any whitespace separates the scheme from its value, not only a space.
+		"request failed: bearer\tsk-live-abcdef123",
+		"bearer\nsk-live-1",
 	} {
 		if err := (Checkpoint{Goal: raw}).Validate(); err == nil {
 			t.Errorf("Validate() let %q through", raw)
