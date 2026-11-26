@@ -74,10 +74,13 @@ that is not a placeholder (`none`, `unset`, `empty`, `optional`, `required`,
 required" stays valid. For `Bearer`, the side fails closed and the scheme is
 matched **case-insensitively** (RFC 7235 §2.1), so a credential after either
 spelling is refused, including inside diagnostic text
-(`bearer abcdefghijklmnop was rejected`). The only escape is a listed function
-word: "the bearer of this report" and "the bearer is the owner" are grammar. No
-character or vowel heuristic tries to read a value as a word — those could not
-separate `abcdefghijklmnop` from prose. The cost is that a summary mentioning the
+(`bearer abcdefghijklmnop was rejected`). The only escape is grammatical: an
+article **before** the word and a function word after it, as in "the bearer of this
+report" — so `Bearer the` and `Bearer of sk-live-1` stay refused, since neither
+reads as a sentence. A value spelled like a function word is still a value.
+Surrounding punctuation is ignored (`none!`, `(unset)`, `unset?`), so a placeholder
+is a placeholder in any sentence. No character or vowel heuristic tries to read a value
+as a word — those could not separate `abcdefghijklmnop` from prose. The cost is that a summary mentioning the
 scheme before any other word rephrases it; that cost is far below sending a live
 credential to the next model.
 

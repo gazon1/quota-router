@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode"
 )
 
 // Checkpoint is the agent-owned state a turn boundary carries into the next
@@ -236,8 +237,17 @@ func credentialShape(s string) string {
 	return ""
 }
 
-// functionWords are the grammar that can legitimately follow "bearer" in a
-// sentence. Anything else after the scheme is treated as a value.
+// trimWord drops the punctuation and quotes that surround a word in prose
+// ("none,", "(sk-1)", "`unset`"), so a placeholder is recognised in any sentence.
+func trimWord(w string) string {
+	return strings.TrimFunc(w, func(r rune) bool {
+		return unicode.IsPunct(r) || unicode.IsSymbol(r) || unicode.IsSpace(r) || r == '"'
+	})
+}
+
+// functionWords are the grammar that can legitimately follow an article and
+// "bearer" in a sentence ("the bearer of ..."). Anything else after the scheme is
+// treated as a value.
 var functionWords = map[string]bool{
 	"a": true, "an": true, "the": true, "of": true, "is": true, "are": true,
 	"was": true, "were": true, "as": true, "in": true, "on": true, "to": true,
@@ -260,7 +270,7 @@ func anyValueAfter(lower, needle string) bool {
 			return false
 		}
 		rest := strings.Fields(lower[from+i+len(needle):])
-		if len(rest) > 0 && !placeholders[strings.Trim(rest[0], "\"'`(),.;:")] {
+		if len(rest) > 0 && !placeholders[trimWord(rest[0])] {
 			return true
 		}
 		from += i + len(needle)
@@ -275,24 +285,27 @@ func anyValueAfter(lower, needle string) bool {
 // (RFC 7235 §2.1), so "bearer abcdefghijklmnop was rejected" is a credential in a
 // log line just as much as "Bearer abcdefghijklmnop".
 //
-// Nothing here tries to decide whether a value is a credential or an English
-// word: character, vowel and length heuristics could not separate
-// "abcdefghijklmnop" from prose, and a wrong guess sends a live credential to the
-// next model. The rule fails closed instead, with one narrow escape: a listed
-// function word ("the bearer of this report", "the bearer is the owner") is
-// grammar, never a credential. Everything else after the scheme is refused, and
-// prose that needs more rephrases — a documented and recoverable cost, unlike a
-// leaked credential.
+// No character, vowel or length heuristic here tries to read a value as a word:
+// they could not separate "abcdefghijklmnop" from prose, and "abc" is a valid
+// short token. The rule fails closed with a single grammatical escape — an
+// article before the word and a function word after it, as in "the bearer of this
+// report". A credential is never written that way, while "Bearer of sk-live-1" is
+// not grammar and stays refused.
 func anyBearerToken(lower string) bool {
 	for from := 0; ; {
 		i := strings.Index(lower[from:], "bearer ")
 		if i < 0 {
 			return false
 		}
-		fields := strings.Fields(lower[from+i+len("bearer "):])
-		if len(fields) > 0 {
-			w := strings.Trim(fields[0], "\"'`(),.;:")
-			if !placeholders[w] && !functionWords[w] {
+		before := strings.Fields(trimWord(lower[:from+i]))
+		after := strings.Fields(lower[from+i+len("bearer "):])
+		if len(after) > 0 {
+			prev, next := "", trimWord(after[0])
+			if len(before) > 0 {
+				prev = before[len(before)-1]
+			}
+			grammatical := (prev == "the" || prev == "a" || prev == "an") && functionWords[next]
+			if !placeholders[next] && !grammatical {
 				return true
 			}
 		}

@@ -259,7 +259,7 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 	for _, prose := range []string{
 		"the bearer of this report is the owner",
 		"the bearer is the owner",
-		"bearer may be absent in config",
+		"the bearer may be absent from config",
 	} {
 		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
 			t.Errorf("Validate() rejected prose %q: %v", prose, err)
