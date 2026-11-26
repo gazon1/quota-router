@@ -14,9 +14,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -33,9 +35,23 @@ const (
 	// subscription quota.
 	Source = "GET https://www.minimax.io/v1/token_plan/remains"
 
-	// maxBody bounds the response this adapter will read. The measured body is
-	// about 1 KiB; anything far larger is not the documented response.
+	// maxBody bounds the response this adapter will accept. The measured body is
+	// about 1 KiB; anything larger is not the documented response, and the read is
+	// capped one byte past this so an oversized answer is detected, not truncated.
 	maxBody = 1 << 20
+
+	// quotaHost is the only origin permitted to receive the Token Plan
+	// credential. Loopback is the one other accepted origin, so a test or a local
+	// interposer needs no production backdoor.
+	quotaHost = "www.minimax.io"
+)
+
+var (
+	// errUnsafeOrigin means the configured endpoint would carry the credential to
+	// an origin that is not the documented quota host.
+	errUnsafeOrigin = errors.New("quota endpoint is not the documented Global Token Plan host")
+	// errOversizedBody means the answer was larger than the documented response.
+	errOversizedBody = errors.New("response body exceeds the documented quota response size")
 )
 
 // Adapter polls the Token Plan quota endpoint. One attempt produces two
@@ -60,7 +76,8 @@ type Adapter struct {
 	// scarce; zero disables the classification.
 	LowFraction float64
 
-	// mu guards lastGood, since a poller and an on-demand refresh may overlap.
+	// mu guards lastGood and haveGood, since a poller and an on-demand refresh may
+	// overlap.
 	mu       sync.Mutex
 	lastGood quota.Snapshot
 	haveGood bool
@@ -74,13 +91,48 @@ const path = "/token_plan/remains"
 // api_base: MiniMax serves quota and inference from different hosts, so an
 // adapter pointed at the inference host would poll nothing and report UNKNOWN
 // forever.
-func New(p config.Provider, lowFraction float64, timeout time.Duration) *Adapter {
+//
+// A base URL that would not carry the Token Plan key to the documented quota
+// host is an error here rather than a poll that leaks the credential somewhere
+// else, so a misconfiguration fails at startup the way config validation does.
+func New(p config.Provider, lowFraction float64, timeout time.Duration) (*Adapter, error) {
+	raw := strings.TrimSuffix(p.BaseURL, "/") + path
+	if err := checkOrigin(raw); err != nil {
+		return nil, fmt.Errorf("providers.%s.base_url: %w", Provider, err)
+	}
 	return &Adapter{
-		URL:         strings.TrimSuffix(p.BaseURL, "/") + path,
+		URL:         raw,
 		Key:         p.APIKey,
 		LowFraction: lowFraction,
 		Timeout:     timeout,
+	}, nil
+}
+
+// checkOrigin reports whether raw may receive the Token Plan credential: the
+// documented Global quota host on https at the documented path, or a loopback
+// address for tests and local interposition. The URL is never echoed, because a
+// base URL can carry userinfo.
+func checkOrigin(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil {
+		return errUnsafeOrigin
 	}
+	if loopback(u.Hostname()) {
+		return nil
+	}
+	if u.Scheme != "https" || u.Host != quotaHost || u.Path != "/v1"+path {
+		return errUnsafeOrigin
+	}
+	return nil
+}
+
+// loopback reports whether host is a local address.
+func loopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Fetch performs one bounded poll of the documented quota endpoint. When this
@@ -94,7 +146,11 @@ func (a *Adapter) Fetch(ctx context.Context) (quota.Snapshot, quota.ProviderStat
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if snap.Confidence != quota.ConfidenceNone {
-		a.lastGood, a.haveGood = snap, true
+		// An attempt that started earlier but finished later must not replace a
+		// newer observation: retained quota would silently go backwards.
+		if !a.haveGood || !snap.ObservedAt.Before(a.lastGood.ObservedAt) {
+			a.lastGood, a.haveGood = snap, true
+		}
 		return snap, state
 	}
 	if !a.haveGood {
@@ -110,6 +166,12 @@ func (a *Adapter) observe(ctx context.Context) (quota.Snapshot, quota.ProviderSt
 	at := time.Now().UTC()
 	status, body, err := a.get(ctx)
 	if err != nil {
+		// A refused request or an oversized answer is not a transport failure and
+		// not a quota claim: nothing useful came back either way.
+		if errors.Is(err, errUnsafeOrigin) || errors.Is(err, errOversizedBody) {
+			return quota.Failed(Provider, Source, at, quota.MalformedResponse),
+				quota.NewProviderState(Provider, quota.Degraded, quota.ReasonServerError, at)
+		}
 		snap := quota.Failed(Provider, Source, at, quota.TransientFetchFailure)
 		return snap, quota.NewProviderState(Provider, quota.Unavailable, transportReason(err), at)
 	}
@@ -141,6 +203,11 @@ func (a *Adapter) get(ctx context.Context) (int, []byte, error) {
 	if timeout <= 0 {
 		timeout = time.Minute
 	}
+	// Checked before the credential is attached, so a URL set directly on an
+	// Adapter cannot send the key to another origin either.
+	if err := checkOrigin(a.URL); err != nil {
+		return 0, nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -158,9 +225,12 @@ func (a *Adapter) get(ctx context.Context) (int, []byte, error) {
 		return 0, nil, err
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, maxBody))
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBody+1))
 	if err != nil {
 		return 0, nil, err
+	}
+	if len(body) > maxBody {
+		return 0, nil, errOversizedBody
 	}
 	return res.StatusCode, body, nil
 }

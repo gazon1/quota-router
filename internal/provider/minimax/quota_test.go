@@ -1,8 +1,10 @@
 package minimax
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -268,7 +270,10 @@ func TestNoCredentialLeaks(t *testing.T) {
 }
 
 func TestNewUsesTheQuotaHost(t *testing.T) {
-	a := New(config.Provider{BaseURL: "https://www.minimax.io/v1", APIKey: config.Secret(key)}, 0.1, 10*time.Second)
+	a, err := New(config.Provider{BaseURL: "https://www.minimax.io/v1", APIKey: config.Secret(key)}, 0.1, 10*time.Second)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
 	if got, want := a.URL, "https://www.minimax.io/v1/token_plan/remains"; got != want {
 		t.Errorf("URL = %s, want %s", got, want)
 	}
@@ -326,5 +331,124 @@ func TestFetchBoundsItself(t *testing.T) {
 	}
 	if state.Reason() != quota.ReasonTimeout {
 		t.Errorf("health reason = %s, want TIMEOUT", state.Reason())
+	}
+}
+
+// A configuration mistake must not carry the Token Plan key to another origin:
+// the inference host is the realistic one, since it is the neighbouring setting.
+func TestNewRejectsUnsafeOrigins(t *testing.T) {
+	bad := []struct{ name, baseURL string }{
+		{"inference host", "https://api.minimax.io/v1"},
+		{"anthropic inference host", "https://api.minimax.io/anthropic"},
+		{"plain http quota host", "http://www.minimax.io/v1"},
+		{"lookalike host", "https://www.minimax.io.evil.example/v1"},
+		{"other host", "https://example.com/v1"},
+		{"wrong path", "https://www.minimax.io/v2"},
+		{"embedded credentials", "https://user:pass@www.minimax.io/v1"},
+		{"not a URL", "://"},
+	}
+	for _, tc := range bad {
+		if _, err := New(config.Provider{BaseURL: tc.baseURL, APIKey: config.Secret(key)}, 0.1, time.Second); !errors.Is(err, errUnsafeOrigin) {
+			t.Errorf("%s: New() error = %v, want errUnsafeOrigin", tc.name, err)
+		}
+	}
+
+	// Loopback stays available for tests and local interposition.
+	for _, ok := range []string{"http://127.0.0.1:8080/v1", "http://localhost:8080/v1", "http://[::1]:8080/v1"} {
+		if _, err := New(config.Provider{BaseURL: ok}, 0.1, time.Second); err != nil {
+			t.Errorf("%s: New() error = %v, want a loopback origin to be accepted", ok, err)
+		}
+	}
+}
+
+// The check also guards an Adapter built by hand, and it runs before any request:
+// the transport must never be reached, so the key cannot leave the process even
+// if the host resolves.
+func TestUnsafeOriginNeverSendsTheKey(t *testing.T) {
+	transport := &countingTransport{}
+	a := &Adapter{
+		Client:  &http.Client{Transport: transport},
+		URL:     "https://api.minimax.io/v1" + path, // the inference host
+		Key:     config.Secret(key),
+		Timeout: time.Second,
+	}
+	snap, state := a.Fetch(context.Background())
+	if got, reason := snap.State(); got != quota.QuotaUnknown || reason != quota.MalformedResponse {
+		t.Errorf("quota = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
+	}
+	if state.Health != quota.Degraded {
+		t.Errorf("health = %s, want DEGRADED", state.Health)
+	}
+	if n := transport.calls.Load(); n != 0 {
+		t.Errorf("transport was called %d times, want 0: the key must not leave the process", n)
+	}
+}
+
+// countingTransport records whether any request was attempted at all.
+type countingTransport struct{ calls atomic.Int32 }
+
+func (c *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.calls.Add(1)
+	return nil, errors.New("transport must not be reached")
+}
+
+// An answer past the documented size is rejected, not silently truncated into a
+// plausible-looking body.
+func TestFetchRejectsOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(bytes.Repeat([]byte(" "), maxBody+1))
+	}))
+	defer srv.Close()
+
+	a := &Adapter{URL: srv.URL + path, Key: config.Secret(key), Timeout: time.Second}
+	snap, _ := a.Fetch(context.Background())
+	if got, reason := snap.State(); got != quota.QuotaUnknown || reason != quota.MalformedResponse {
+		t.Errorf("quota = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
+	}
+}
+
+// A slower, older attempt must not overwrite a newer observation: retained
+// last-known-good quota would silently go backwards.
+func TestSlowerOlderFetchDoesNotOverwriteNewer(t *testing.T) {
+	release := make(chan struct{})
+	var first atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if first.CompareAndSwap(false, true) {
+			// The older attempt holds the response until the newer one is stored.
+			<-release
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"model_remains":[{"model_name":"general",` +
+				`"current_interval_remaining_percent":20,"current_weekly_remaining_percent":20}],` +
+				`"base_resp":{"status_code":0}}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(fixture(t))
+	}))
+	defer srv.Close()
+
+	a := &Adapter{URL: srv.URL + path, Key: config.Secret(key), LowFraction: 0.1, Timeout: 5 * time.Second}
+	older := make(chan quota.Snapshot, 1)
+	go func() {
+		snap, _ := a.Fetch(context.Background())
+		older <- snap
+	}()
+
+	// Give the first request time to start and block, then take the newer one.
+	time.Sleep(50 * time.Millisecond)
+	newer, _ := a.Fetch(context.Background())
+	close(release)
+	<-older
+
+	// The fixture is EXHAUSTED (weekly 0%); the older body is LOW_QUOTA (20%).
+	a.mu.Lock()
+	retained := a.lastGood
+	a.mu.Unlock()
+	if state, _ := retained.State(); state != quota.Exhausted {
+		t.Fatalf("retained = %s, want the newer EXHAUSTED observation", state)
+	}
+	if newer.ObservedAt.Before(retained.ObservedAt) {
+		t.Fatalf("retained observation is newer than the latest fetch, want the latest kept")
 	}
 }

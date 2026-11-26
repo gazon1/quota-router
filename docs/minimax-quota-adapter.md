@@ -24,6 +24,14 @@ Authorization: Bearer <Token Plan subscription key>
 This is the documented **Global** Token Plan interface. No regional substitution
 is made and no other quota path is tried.
 
+The origin is enforced, not just documented. `New` rejects any base URL that would
+not carry the key to `https://www.minimax.io/v1/token_plan/remains` — a wrong
+host, `http`, a lookalike host such as `www.minimax.io.evil.example`, embedded
+userinfo, or the wrong path — and `Fetch` re-checks before attaching the
+credential, so an `Adapter` built by hand is covered too. A rejected origin never
+sends a request, so the key cannot leave the process. Loopback is the one accepted
+alternative, for tests and a local interposer.
+
 The host matters: quota lives on `www.minimax.io`, while inference lives on
 `api.minimax.io` (OpenAI-compatible at `/v1`, Anthropic-compatible at
 `/anthropic`). `providers.<name>.base_url` configures the quota surface and
@@ -99,6 +107,8 @@ figure:
 | 401 / 403 | `AUTHENTICATION_OR_PERMISSION_FAILURE` | `UNAVAILABLE` / auth |
 | 429 | `TRANSIENT_FETCH_FAILURE` | `DEGRADED` / rate limited |
 | 5xx or other status | `TRANSIENT_FETCH_FAILURE` | `UNAVAILABLE` / provider error |
+| unsafe configured origin (refused before any request) | `MALFORMED_RESPONSE` | `DEGRADED` / provider error |
+| body larger than 1 MiB (refused, not truncated) | `MALFORMED_RESPONSE` | `DEGRADED` / provider error |
 | network error | `TRANSIENT_FETCH_FAILURE` | `UNAVAILABLE` / unreachable |
 | context deadline or `Adapter.Timeout` exceeded | `TRANSIENT_FETCH_FAILURE` | `UNAVAILABLE` / timeout |
 | percentage absent, outside `0..100`, or not a number | that window is unreported, so the snapshot is `MALFORMED_RESPONSE` | `DEGRADED` |
@@ -110,7 +120,9 @@ stored anywhere in the model; only the reason codes leave the adapter.
 ## Freshness and stale data
 
 `Fetch` keeps the last observation that established quota and, when a later
-attempt does not, returns it with `Stale` set. That copy is diagnostics only:
+attempt does not, returns it with `Stale` set. Only a strictly newer observation
+replaces it: when two attempts overlap and the older one finishes last, the newer
+one stays retained, so quota cannot silently go backwards. That copy is diagnostics only:
 `Snapshot.StateAt(now, maxAge)` reports `UNKNOWN` / `STALE_OBSERVATION` for it, so
 no consumer can route on stale quota. Health always describes the attempt that
 just ran. First-attempt failures have no last-known-good copy to return.
