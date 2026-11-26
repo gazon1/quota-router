@@ -16,29 +16,33 @@ func TestComposeContract(t *testing.T) {
 		t.Fatalf("read compose.yaml: %v", err)
 	}
 	doc := string(raw)
-	services := serviceBlocks(t, doc)
+	services, ok := serviceBlocks(doc)
+	if !ok {
+		t.Fatal("compose.yaml: no top-level services: mapping")
+	}
 
 	for _, name := range []string{"quota-controller", "litellm"} {
 		if _, ok := services[name]; !ok {
 			t.Fatalf("compose.yaml: service %q missing", name)
 		}
 	}
-	// Every service block ends at the next top-level "  <name>:" key, so a
-	// per-service assertion cannot be satisfied by another service's field.
-	for _, name := range []string{"quota-controller", "litellm"} {
-		body := services[name]
-		for _, c := range []struct {
-			what string
-			ok   bool
-		}{
-			{"restart policy", strings.Contains(body, "restart: unless-stopped")},
-			{"memory limit", strings.Contains(body, "mem_limit:")},
-			{"cpu limit", strings.Contains(body, "cpus:")},
-			{"healthcheck", strings.Contains(body, "healthcheck:")},
-		} {
-			if !c.ok {
-				t.Errorf("service %q: missing %s", name, c.what)
-			}
+	// Values are asserted, not just field presence: issue #6 names 128 MiB for
+	// the controller, so a silent raise or drop must fail the build.
+	for _, c := range []struct {
+		what string
+		ok   bool
+	}{
+		{"controller restart policy", strings.Contains(services["quota-controller"], "restart: unless-stopped")},
+		{"controller 128m memory limit", strings.Contains(services["quota-controller"], "mem_limit: 128m")},
+		{"controller cpu limit", strings.Contains(services["quota-controller"], "cpus:")},
+		{"controller healthcheck", strings.Contains(services["quota-controller"], "healthcheck:")},
+		{"litellm restart policy", strings.Contains(services["litellm"], "restart: unless-stopped")},
+		{"litellm memory limit", strings.Contains(services["litellm"], "mem_limit:")},
+		{"litellm cpu limit", strings.Contains(services["litellm"], "cpus:")},
+		{"litellm healthcheck", strings.Contains(services["litellm"], "healthcheck:")},
+	} {
+		if !c.ok {
+			t.Errorf("compose.yaml: missing %s", c.what)
 		}
 	}
 
@@ -63,11 +67,11 @@ func TestComposeContract(t *testing.T) {
 	}
 }
 
-// serviceBlocks splits the services mapping into one block per service name.
-func serviceBlocks(t *testing.T, doc string) map[string]string {
-	t.Helper()
-	lines := strings.Split(doc, "\n")
+// serviceBlocks returns one block per service name declared under the
+// top-level services: mapping. Names outside that mapping are ignored.
+func serviceBlocks(doc string) (map[string]string, bool) {
 	blocks := map[string]string{}
+	inServices, sawServices := false, false
 	name := ""
 	var body []string
 	flush := func() {
@@ -75,10 +79,24 @@ func serviceBlocks(t *testing.T, doc string) map[string]string {
 			blocks[name] = strings.Join(body, "\n")
 		}
 	}
-	for _, line := range lines {
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, " ") {
+			// A new top-level key ends the services mapping.
+			flush()
+			name, body = "", nil
+			inServices = line == "services:"
+			sawServices = sawServices || inServices
+			continue
+		}
+		if !inServices {
+			continue
+		}
 		// A service key is indented exactly two spaces and ends with a colon.
 		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") &&
-			strings.HasSuffix(line, ":") && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			strings.HasSuffix(line, ":") {
 			flush()
 			name = strings.TrimSuffix(strings.TrimSpace(line), ":")
 			body = nil
@@ -89,5 +107,5 @@ func serviceBlocks(t *testing.T, doc string) map[string]string {
 		}
 	}
 	flush()
-	return blocks
+	return blocks, sawServices
 }
