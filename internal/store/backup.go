@@ -31,22 +31,21 @@ func (s *Store) Backup(ctx context.Context, path string) error {
 		return fmt.Errorf("backup: %s already exists", path)
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".backup-*.db")
+	// VACUUM INTO creates its file with the process umask, and a Chmod only after
+	// it finished would leave the snapshot readable while it is being written.
+	// Giving SQLite a path inside a private directory protects it for the whole
+	// write, without touching the process-wide umask.
+	tmpDir, err := os.MkdirTemp(filepath.Dir(path), ".backup-*")
 	if err != nil {
 		return fmt.Errorf("backup to %s: %w", path, err)
 	}
-	tmpPath := tmp.Name()
-	tmp.Close()
-	// VACUUM INTO needs to create the file itself.
-	if err := os.Remove(tmpPath); err != nil {
-		return fmt.Errorf("backup to %s: %w", path, err)
-	}
+	defer os.RemoveAll(tmpDir)
+	tmpPath := filepath.Join(tmpDir, "snapshot.db")
 
 	// The path is interpolated into SQL, and SQLite string literals escape a
 	// single quote by doubling it.
 	_, err = s.db.ExecContext(ctx, "VACUUM INTO '"+sqlQuote(tmpPath)+"'")
 	if err != nil {
-		os.Remove(tmpPath) // a failed VACUUM INTO can leave a partial file behind
 		return fmt.Errorf("backup to %s: %w", path, classify(err))
 	}
 	// VACUUM INTO creates the file with the process umask (0644 under 0022) and

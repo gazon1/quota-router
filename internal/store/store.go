@@ -103,7 +103,9 @@ func busyMillis(d time.Duration) int64 {
 // escapePath percent-encodes the characters that would otherwise be URI syntax,
 // and nothing else, so a "?", "#", "%" or space in a valid file name stays part
 // of the name. Without it the driver opens a different file than the one
-// Migrate locks.
+// Migrate locks. A leading "./" keeps SQLite from reading the path as a special
+// URI such as ":memory:": that form silently opens an in-memory database, which
+// would drop every persisted observation on restart.
 //
 // url.URL is not used here for the opposite reason: with a relative path such as
 // the default "quota-router.db" it renders "file://quota-router.db" — an
@@ -111,6 +113,9 @@ func busyMillis(d time.Duration) int64 {
 // Slashes stay literal so relative paths keep working.
 func escapePath(p string) string {
 	var b strings.Builder
+	if strings.HasPrefix(p, ":") {
+		b.WriteString("./")
+	}
 	for i := 0; i < len(p); i++ {
 		switch c := p[i]; c {
 		case '?', '#', '%', ' ':
@@ -191,6 +196,16 @@ func chmodDB(path string) error {
 			return errors.Join(ErrReadOnly, err)
 		}
 		return errors.Join(ErrIO, err)
+	}
+	// OpenFile accepts an existing directory on some systems, and chmod on one
+	// would strip its execute permission. Refuse anything that is not a regular
+	// file before touching its mode.
+	st, err := os.Stat(path)
+	if err != nil {
+		return errors.Join(ErrIO, err)
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("open sqlite %q: not a regular file", path)
 	}
 	if err := os.Chmod(path, dbPerm); err != nil {
 		return errors.Join(ErrIO, err)

@@ -63,6 +63,11 @@ func (c Config) validate() error {
 		"routing.low_quota_threshold must be in (0, 1], got %v", c.Routing.LowQuotaThreshold)
 
 	check(c.SQLite.Path != "", "sqlite.path must not be empty")
+	// ":memory:" and "file:" are SQLite URI forms that open a database which
+	// disappears on restart, silently defeating the persistence this setting
+	// exists for. #12 requires restart persistence, so refuse them.
+	check(!strings.HasPrefix(c.SQLite.Path, ":"),
+		"sqlite.path must be a file path, not a SQLite special name like %q (it would not persist)", c.SQLite.Path)
 	check(c.SQLite.BusyTimeout > 0, "sqlite.busy_timeout must be > 0, got %s", c.SQLite.BusyTimeout)
 	// Zero disables pruning for that table; a negative value is a typo.
 	for _, d := range []struct {

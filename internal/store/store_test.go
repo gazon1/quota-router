@@ -908,6 +908,105 @@ func TestSubMillisecondObservationsDoNotTie(t *testing.T) {
 	}
 }
 
+func TestMemoryPathStillPersists(t *testing.T) {
+	// Review finding: a path STARTING with ":" is a SQLite URI form, so a
+	// relative ":memory:" opened an in-memory database while the controller
+	// believed it had a file — every observation was lost on restart, with no
+	// startup error. It has to be a relative path to reproduce: an absolute
+	// "/tmp/x/:memory:" is an ordinary file name.
+	ctx := context.Background()
+	saved, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(saved)
+
+	s, err := Open(Config{Path: ":memory:", BusyTimeout: time.Second}, testLog())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if err := s.SaveControllerState(ctx, "k", "v", time.Now()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s.Close()
+
+	// A new process must see the row: that is the whole point of the setting.
+	again, err := Open(Config{Path: ":memory:", BusyTimeout: time.Second}, testLog())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer again.Close()
+	v, ok, err := again.ControllerState(ctx, "k")
+	if err != nil {
+		t.Fatalf("ControllerState: %v", err)
+	}
+	if !ok || v != "v" {
+		t.Fatal("state did not survive the reopen: the path opened an in-memory database")
+	}
+}
+
+func TestBackupSnapshotIsPrivateWhileItIsWritten(t *testing.T) {
+	// Review finding: the in-progress snapshot was created with the process umask
+	// and only chmodded after VACUUM INTO finished, so it was readable while the
+	// backup ran.
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	dir := t.TempDir()
+
+	old := syscall.Umask(0o022)
+	defer syscall.Umask(old)
+
+	target := filepath.Join(dir, "backup.db")
+	if err := s.Backup(ctx, target); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	// Nothing private may be left behind, and the published file is owner-only.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".backup-") {
+			t.Errorf("temporary backup %q survived", e.Name())
+		}
+	}
+	st, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := st.Mode().Perm(); got != 0o600 {
+		t.Fatalf("backup mode = %04o, want 0600", got)
+	}
+}
+
+func TestDirectoryPathKeepsItsMode(t *testing.T) {
+	// Review finding: chmodDB could chmod a misconfigured directory path. It must
+	// refuse before changing anything.
+	dir := filepath.Join(t.TempDir(), "adir")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if _, err := Open(Config{Path: dir, BusyTimeout: time.Second}, testLog()); err == nil {
+		t.Fatal("Open succeeded on a directory")
+	}
+	st, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := st.Mode().Perm(); got != 0o700 {
+		t.Fatalf("directory mode = %04o after a failed Open, want 0700 (unchanged)", got)
+	}
+}
+
 func TestDiskFullIsReportedAndLeavesNoRows(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)
