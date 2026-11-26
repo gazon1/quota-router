@@ -43,8 +43,10 @@ Three details worth knowing before using the model:
 - `StateAt` takes a freshness bound and fails closed: a non-positive `maxAge`
   is `UNKNOWN`, not "any age". Pass the bound the caller actually intends.
 - `Observed` copies its windows (and normalizes reset times to UTC), so mutating
-  the values you passed cannot leave a `Snapshot` whose `State` disagrees with
-  its `Windows`. Non-finite numbers (NaN, infinities) are `MALFORMED_RESPONSE`.
+  the values you passed cannot change a `Snapshot`. Non-finite numbers (NaN,
+  infinities) are `MALFORMED_RESPONSE`.
+- There is no stored state to disagree with the windows: `Snapshot.State()`
+  derives the state from `Windows` on every read.
 
 ## Configuration
 

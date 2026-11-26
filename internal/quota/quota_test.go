@@ -72,13 +72,13 @@ func TestDeriveNeverInventsQuota(t *testing.T) {
 
 func TestObservedRecordsConfidenceAndProvenance(t *testing.T) {
 	full := Observed("minimax", "token_plan/remains", now, []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
-	if full.State != Available || full.Confidence != ConfidenceHigh || full.Unknown != "" {
-		t.Fatalf("Observed(full) = %+v, want AVAILABLE/HIGH", full)
+	if state, reason := full.State(); state != Available || reason != "" || full.Confidence != ConfidenceHigh {
+		t.Fatalf("Observed(full) = %s/%s %+v, want AVAILABLE/HIGH", state, reason, full)
 	}
 
 	// A window missing used/reset is usable but lowers confidence.
 	sparse := Observed("minimax", "token_plan/remains", now, []Window{{Limit: f(100), Remaining: f(90)}}, 0.1)
-	if sparse.State != Available || sparse.Confidence != ConfidenceLow {
+	if state, _ := sparse.State(); state != Available || sparse.Confidence != ConfidenceLow {
 		t.Fatalf("Observed(sparse) = %+v, want AVAILABLE/LOW", sparse)
 	}
 
@@ -94,7 +94,7 @@ func TestObservedRecordsConfidenceAndProvenance(t *testing.T) {
 
 func TestFailedCarriesNoValues(t *testing.T) {
 	s := Failed("commandcode", "none", now, UnsupportedNoQuotaAPI)
-	if s.State != QuotaUnknown || s.Unknown != UnsupportedNoQuotaAPI || s.Windows != nil || s.Confidence != ConfidenceNone {
+	if state, reason := s.State(); state != QuotaUnknown || reason != UnsupportedNoQuotaAPI || s.Windows != nil || s.Confidence != ConfidenceNone {
 		t.Fatalf("Failed() = %+v, want UNKNOWN with no windows", s)
 	}
 	if got, reason := s.StateAt(now, time.Hour); got != QuotaUnknown || reason != UnsupportedNoQuotaAPI {
@@ -125,7 +125,7 @@ func TestStateAtRejectsUntrustworthyObservations(t *testing.T) {
 		at   time.Time
 		age  time.Duration
 	}{
-		{"never observed", Snapshot{State: Available}, time.Time{}, time.Hour},
+		{"never observed", Snapshot{}, time.Time{}, time.Hour},
 		{"stale beyond max age", Observed("p", "src", now.Add(-2*time.Hour), fresh.Windows, 0.1), now, time.Hour},
 		{"marked stale", stale, now, time.Hour},
 		{"dated in the future beyond skew", Observed("p", "src", now.Add(10*time.Minute), fresh.Windows, 0.1), now, time.Hour},
@@ -180,11 +180,30 @@ func TestObservedIsImmuneToCallerMutation(t *testing.T) {
 	s.Windows[0].ResetsAt = now.In(loc) // exercise the copy, not the caller's value
 
 	rem = 0
-	if s.State != Available {
-		t.Fatalf("State = %s, want AVAILABLE", s.State)
+	if state, _ := s.State(); state != Available {
+		t.Fatalf("State() = %s, want AVAILABLE", state)
 	}
 	if *s.Windows[0].Remaining != 90 {
 		t.Fatalf("Windows[0].Remaining = %v, want 90: the snapshot shares the caller's pointer", *s.Windows[0].Remaining)
+	}
+}
+
+// State is derived on every read, so a snapshot edited after construction cannot
+// keep claiming a state its windows no longer support. There is no stored copy
+// to disagree with.
+func TestStateFollowsWindowsAfterMutation(t *testing.T) {
+	s := Observed("p", "src", now, []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
+	*s.Windows[0].Remaining = 0
+	if state, _ := s.State(); state != Exhausted {
+		t.Fatalf("State() = %s, want EXHAUSTED after the window was exhausted", state)
+	}
+
+	// A hand-built snapshot with no windows establishes nothing.
+	if state, _ := (Snapshot{ObservedAt: now}).State(); state != QuotaUnknown {
+		t.Fatalf("State() = %s for an empty snapshot, want UNKNOWN", state)
+	}
+	if state, _ := (Snapshot{ObservedAt: now, Windows: []Window{remaining(90, 100, now.Add(time.Hour))}}).StateAt(now, time.Hour); state != Available {
+		t.Fatalf("StateAt() = %s, want AVAILABLE derived from the windows", state)
 	}
 }
 

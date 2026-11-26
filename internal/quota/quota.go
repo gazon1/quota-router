@@ -77,13 +77,16 @@ const (
 )
 
 // Snapshot is one observation of subscription quota for one provider.
+//
+// Windows is the only source of truth for the quota state: State derives from
+// it on every read, so a snapshot cannot claim a state its windows do not
+// support. The remaining fields are set by Observed and Failed, never by a
+// caller, which is why they are unexported.
 type Snapshot struct {
 	Provider   string
 	Source     string // documented provider quota source, never an inference endpoint
 	ObservedAt time.Time
 	Windows    []Window
-	State      QuotaState
-	Unknown    UnknownReason // set exactly when State is QuotaUnknown
 	Confidence Confidence
 	// Provenance maps a normalized field to the raw provider field it came from,
 	// for example "remaining" -> "weekly.remaining_credits".
@@ -91,30 +94,40 @@ type Snapshot struct {
 	// Stale marks a last-known-good copy kept for diagnostics after a later
 	// observation failed. Consumers must not route on it.
 	Stale bool
+
+	lowFraction float64       // threshold State derives with
+	unknown     UnknownReason // why this snapshot carries no quota at all
 }
 
-// Observed builds the snapshot of one successful observation and derives State
-// from the reported windows, so the recorded state cannot disagree with them.
-// lowFraction is the remaining-quota fraction at or below which a window counts
-// as scarce; zero or less disables the classification.
+// State derives the quota state from the windows this snapshot carries.
+func (s Snapshot) State() (QuotaState, UnknownReason) {
+	if s.unknown != "" {
+		return QuotaUnknown, s.unknown
+	}
+	return Derive(s.Windows, s.lowFraction)
+}
+
+// Observed builds the snapshot of one successful observation. It records only
+// what the provider reported; State derives from those windows on every read,
+// so the two cannot disagree. lowFraction is the remaining-quota fraction at or
+// below which a window counts as scarce; zero or less disables the
+// classification.
 func Observed(provider, source string, at time.Time, windows []Window, lowFraction float64) Snapshot {
 	windows = cloneWindows(windows)
-	state, reason := Derive(windows, lowFraction)
 	confidence := ConfidenceHigh
-	switch {
+	switch state, _ := Derive(windows, lowFraction); {
 	case state == QuotaUnknown:
 		confidence = ConfidenceNone
 	case partial(windows):
 		confidence = ConfidenceLow
 	}
 	return Snapshot{
-		Provider:   provider,
-		Source:     source,
-		ObservedAt: at,
-		Windows:    windows,
-		State:      state,
-		Unknown:    reason,
-		Confidence: confidence,
+		Provider:    provider,
+		Source:      source,
+		ObservedAt:  at,
+		Windows:     windows,
+		Confidence:  confidence,
+		lowFraction: lowFraction,
 	}
 }
 
@@ -147,9 +160,8 @@ func Failed(provider, source string, at time.Time, reason UnknownReason) Snapsho
 		Provider:   provider,
 		Source:     source,
 		ObservedAt: at,
-		State:      QuotaUnknown,
-		Unknown:    reason,
 		Confidence: ConfidenceNone,
+		unknown:    reason,
 	}
 }
 
@@ -229,11 +241,12 @@ func rank(s QuotaState) int {
 	}
 }
 
-// StateAt reports the state a consumer may act on at now. A snapshot dated in
-// the future beyond clockSkewTolerance, older than maxAge, marked stale, or
-// never observed is UNKNOWN, whatever State says. A non-positive maxAge is
-// UNKNOWN too: a freshness bound that nobody set must not silently accept a
-// day-old observation as available quota.
+// StateAt reports the state a consumer may act on at now. The state always
+// comes from the windows this snapshot carries, never from a stored copy, so a
+// snapshot cannot claim more than its windows show. A snapshot dated in the
+// future beyond clockSkewTolerance, older than maxAge, marked stale, or never
+// observed is UNKNOWN. A non-positive maxAge is UNKNOWN too: a freshness bound
+// that nobody set must not accept a day-old observation as available quota.
 func (s Snapshot) StateAt(now time.Time, maxAge time.Duration) (QuotaState, UnknownReason) {
 	switch {
 	case maxAge <= 0:
@@ -242,13 +255,8 @@ func (s Snapshot) StateAt(now time.Time, maxAge time.Duration) (QuotaState, Unkn
 		return QuotaUnknown, NotYetObserved
 	case s.Stale, untrusted(s.ObservedAt, now, maxAge):
 		return QuotaUnknown, StaleObservation
-	case s.State == QuotaUnknown || s.State == "":
-		if s.Unknown == "" {
-			return QuotaUnknown, MalformedResponse
-		}
-		return QuotaUnknown, s.Unknown
 	}
-	return s.State, ""
+	return s.State()
 }
 
 // untrusted reports an observation whose timestamp cannot be believed: dated in
