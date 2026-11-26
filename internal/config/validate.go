@@ -78,10 +78,16 @@ func (c Config) validate() error {
 }
 
 // checkURL never echoes the value: a URL may carry user:password credentials.
+// Credentials are rejected rather than accepted, because a base URL is a plain
+// string that a log line or a JSON dump would print in full; callers set the
+// credential on the matching Secret field instead.
 func checkURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("must be an absolute http:// or https:// URL")
+	}
+	if u.User != nil {
+		return errors.New("must not embed credentials in the URL; use the api_key or token setting instead")
 	}
 	return nil
 }

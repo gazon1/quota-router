@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -15,8 +16,13 @@ import (
 
 func main() {
 	level := new(slog.LevelVar)
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
-	os.Exit(run(context.Background(), log, level))
+	os.Exit(run(context.Background(), newLogger(os.Stdout, level), level))
+}
+
+// newLogger builds the production logger: JSON, filtered by level. Tests use it
+// too, so a change to this wiring is covered rather than duplicated.
+func newLogger(w io.Writer, level *slog.LevelVar) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level}))
 }
 
 func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {

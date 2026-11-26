@@ -457,11 +457,14 @@ func TestValidationURLErrorHidesCredentials(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_LITELLM__BASE_URL", "http://user:hunter2@example.com")
 
 	_, err := Load()
-	if err != nil {
-		// user:password@host is a valid URL, so this must load without leaking.
-		if strings.Contains(err.Error(), "hunter2") {
-			t.Fatalf("error %q leaked a URL credential", err)
-		}
+	if err == nil {
+		t.Fatal("a URL with userinfo must be rejected, not accepted and later logged")
+	}
+	if !strings.Contains(err.Error(), "must not embed credentials") {
+		t.Fatalf("error %q does not explain the URL rule", err)
+	}
+	if strings.Contains(err.Error(), "hunter2") {
+		t.Fatalf("error %q leaked a URL credential", err)
 	}
 
 	cleanEnv(t)

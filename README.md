@@ -62,6 +62,11 @@ Durations use Go syntax (`5s`, `1m30s`). An empty variable counts as unset, so
 it falls through to the file and then the default. The matching YAML structure
 and every default are in [config.example.yaml](./config.example.yaml).
 
+A `base_url` must be an absolute `http://` or `https://` URL with no embedded
+credentials: `https://user:password@host` is a startup error, because the base
+URL is an ordinary string that a log line or a JSON dump prints in full. Put the
+credential in `api_key` or `auth.token` instead.
+
 The six flat server variables this service used before the nested model
 (`QUOTA_ROUTER_ADDR`, `QUOTA_ROUTER_SHUTDOWN_TIMEOUT`,
 `QUOTA_ROUTER_READ_HEADER_TIMEOUT`, `QUOTA_ROUTER_READ_TIMEOUT`,

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,14 +29,15 @@ func TestRunAppliesConfiguredLogLevel(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
 	t.Setenv("QUOTA_ROUTER_OBSERVABILITY__LEVEL", "error")
 
-	// Wire the handler to the LevelVar exactly as main does, so a debug record
-	// is dropped before the configuration applies and emitted after it.
+	// The production constructor, so a change to main's wiring fails here.
 	level := new(slog.LevelVar)
-	var buf strings.Builder
-	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level}))
+	level.Set(slog.LevelDebug) // the handler must honour the LevelVar
+	var buf synchronizedBuffer
+	log := newLogger(&buf, level)
+
 	log.Debug("before")
-	if buf.Len() != 0 {
-		t.Fatal("debug record was emitted before the configured level applied")
+	if !strings.Contains(buf.String(), "before") {
+		t.Fatal("the handler does not follow the LevelVar at all")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -49,14 +51,45 @@ func TestRunAppliesConfiguredLogLevel(t *testing.T) {
 	if level.Level() != slog.LevelError {
 		t.Fatalf("level = %s, want error from the configuration", level.Level())
 	}
+
+	buf.Reset()
 	log.Debug("still dropped")
-	if strings.Contains(buf.String(), "still dropped") {
-		t.Fatal("the handler ignored the configured level")
+	log.Error("kept")
+	got := buf.String()
+	if strings.Contains(got, "still dropped") {
+		t.Fatalf("the handler ignored the configured level: %q", got)
+	}
+	if !strings.Contains(got, "kept") {
+		t.Fatalf("the error record was dropped too, got %q", got)
 	}
 	cancel()
 	if code := <-done; code != 0 {
 		t.Fatalf("run() = %d, want 0", code)
 	}
+}
+
+// synchronizedBuffer is a bytes.Buffer safe for the server goroutine's writes.
+type synchronizedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *synchronizedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 func TestRunListenError(t *testing.T) {
