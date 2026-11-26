@@ -70,6 +70,31 @@ budget, and a full-transcript replay without a named decision. See
 for the stage table and why a model switch is a context rebuild, not a
 continuation.
 
+## Polling
+
+[internal/poll](./internal/poll) polls every configured provider on its own
+supervised loop: one goroutine per provider, `polling.interval` between polls of
+the same provider, and `polling.request_timeout` bounding each attempt inside the
+adapter.
+
+- A failing or hung provider never delays another provider's polls or writes.
+- One poll at a time per provider: the interval is a wait *after* a poll, not a
+  ticker, so a slow poll cannot overlap the next one and an outage resumes with
+  one poll rather than a burst of catch-up polls.
+- Transient failures (timeout, unreachable, 5xx, 429) are retried up to three
+  attempts with exponential, jittered, capped backoff. Permanent failures — a
+  rejected credential or an unusable body — are persisted and not retried.
+- Each attempt persists the observation, its health and `poll_state`: last
+  attempt always moves, last success only on an attempt that established quota.
+- The persisted state comes from `Snapshot.StateAt`, so a success is not
+  `AVAILABLE` by default: an exhausted provider stays `EXHAUSTED`, and an
+  observation older than three intervals becomes `UNKNOWN` / `stale` with its
+  windows kept for diagnostics.
+
+A configured provider this build has no adapter for, or one with no `api_key`,
+is a startup error rather than a silently unmonitored provider. Polling is
+unrelated to local usage accounting, which is event or report driven.
+
 ## Configuration
 
 Configuration is loaded by [koanf v2](https://github.com/knadh/koanf) into typed

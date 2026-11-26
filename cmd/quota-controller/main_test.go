@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -363,3 +364,162 @@ func TestRetentionIsFatalOnlyWhenFull(t *testing.T) {
 }
 
 var errTest = errors.New("wrapped transient failure")
+
+// The poller is wired into run(), not only tested on its own: a configured
+// provider is polled, its observation persisted, and both timestamps recorded.
+func TestRunPollsConfiguredProvider(t *testing.T) {
+	quota := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model_remains":[{"model_name":"general",` +
+			`"current_interval_remaining_percent":80,"current_weekly_remaining_percent":80}],` +
+			`"base_resp":{"status_code":0}}`))
+	}))
+	defer quota.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "poll.db")
+	addr := freeAddr(t)
+	t.Setenv("QUOTA_ROUTER_SQLITE__PATH", path)
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
+	t.Setenv("QUOTA_ROUTER_POLLING__INTERVAL", "50ms")
+	t.Setenv("QUOTA_ROUTER_POLLING__REQUEST_TIMEOUT", "20ms")
+	t.Setenv("QUOTA_ROUTER_PROVIDERS__MINIMAX__BASE_URL", quota.URL+"/v1")
+	t.Setenv("QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY", "sk-cp-test-key")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	go func() { done <- run(ctx, log, new(slog.LevelVar)) }()
+
+	waitForHTTP(t, "http://"+addr+"/health", 5*time.Second)
+
+	// The first poll is immediate, so the state must appear without waiting for
+	// an interval to elapse.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		attempt, success, err := pollState(path, "minimax")
+		if err == nil && !attempt.IsZero() && !success.IsZero() {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("poll state = %s/%s (err %v), want both timestamps", attempt, success, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("run() = %d, want 0", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("run() did not exit: the poller outlived the shutdown")
+	}
+
+	// The persisted observation is quota the provider reported, with windows.
+	snapshots, err := latestSnapshots(path)
+	if err != nil {
+		t.Fatalf("read snapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots = %d, want 1 for one provider", len(snapshots))
+	}
+	if got := snapshots[0].state; got != "AVAILABLE" {
+		t.Fatalf("state = %q, want AVAILABLE from the reported 80%% windows", got)
+	}
+	if got := snapshots[0].windows; got != 2 {
+		t.Fatalf("windows = %d, want the 5h and weekly windows persisted", got)
+	}
+}
+
+// An unset api_key would otherwise start a controller that polls nothing.
+func TestPollingTargetsRejectsUnsupportedAndIncomplete(t *testing.T) {
+	full := config.Provider{BaseURL: "https://www.minimax.io/v1", APIKey: "sk-cp-test"}
+
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+		want string
+	}{
+		{"no adapter", config.Config{Providers: map[string]config.Provider{"other": full}}, "no quota adapter"},
+		{"no key", config.Config{Providers: map[string]config.Provider{"minimax": {BaseURL: full.BaseURL}}}, "api_key is not set"},
+		{"wrong host", config.Config{Providers: map[string]config.Provider{"minimax": {BaseURL: "https://api.minimax.io/v1", APIKey: full.APIKey}}}, "base_url"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := pollingTargets(tc.cfg)
+			if err == nil {
+				t.Fatalf("expected a rejection naming %q", tc.want)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q missing %q", err, tc.want)
+			}
+		})
+	}
+
+	if _, err := pollingTargets(config.Config{}); err != nil {
+		t.Fatalf("an unconfigured controller must start idle, got %v", err)
+	}
+	targets, err := pollingTargets(config.Config{Providers: map[string]config.Provider{"minimax": full}})
+	if err != nil {
+		t.Fatalf("pollingTargets: %v", err)
+	}
+	if len(targets) != 1 || targets[0].Name != "minimax" {
+		t.Fatalf("targets = %+v, want one named minimax", targets)
+	}
+}
+
+// pollState reads the poll bookkeeping through its own connection, so the test
+// sees what was persisted rather than what the controller held.
+func pollState(path, provider string) (attempt, success time.Time, err error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	defer db.Close()
+	var a string
+	var s sql.NullString
+	err = db.QueryRow(`SELECT last_attempt_at, last_success_at FROM poll_state WHERE provider = ?`, provider).Scan(&a, &s)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if attempt, err = time.Parse("2006-01-02T15:04:05.000000000Z", a); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if s.Valid {
+		if success, err = time.Parse("2006-01-02T15:04:05.000000000Z", s.String); err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+	}
+	return attempt, success, nil
+}
+
+type persistedSnapshot struct {
+	state   string
+	windows int
+}
+
+func latestSnapshots(path string) ([]persistedSnapshot, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT s.state, (SELECT COUNT(*) FROM quota_windows w WHERE w.snapshot_id = s.id)
+		FROM quota_snapshots s ORDER BY s.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []persistedSnapshot
+	for rows.Next() {
+		var s persistedSnapshot
+		if err := rows.Scan(&s.state, &s.windows); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}

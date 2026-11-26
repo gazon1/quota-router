@@ -42,8 +42,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 1 {
-		t.Fatalf("version = %d, want 1", v)
+	if v != 2 {
+		t.Fatalf("version = %d, want 2", v)
 	}
 
 	// A restart must not re-apply or fail: this is the existing-database path.
@@ -1215,8 +1215,8 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 1 {
-		t.Fatalf("version = %d, want 1", v)
+	if v != 2 {
+		t.Fatalf("version = %d, want 2", v)
 	}
 	var applied int
 	if err := first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied); err != nil {
@@ -1379,5 +1379,58 @@ func TestReadOnlyFileFailsWritesWithErrReadOnly(t *testing.T) {
 	}
 	if !errors.Is(err, ErrReadOnly) && !errors.Is(err, ErrIO) && !errors.Is(err, ErrBusy) {
 		t.Fatalf("error = %v, want a classified storage error", err)
+	}
+}
+
+// Last attempt and last success are independent: a failure moves one and must
+// leave the other alone, and "never succeeded" stays distinguishable from zero.
+func TestPollStateTracksAttemptAndSuccessSeparately(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	attempt, success, err := s.PollState(ctx, "minimax")
+	if err != nil {
+		t.Fatalf("PollState on an unpolled provider: %v", err)
+	}
+	if !attempt.IsZero() || !success.IsZero() {
+		t.Fatalf("PollState = %s/%s, want zero times before any poll", attempt, success)
+	}
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	if err := s.SavePollState(ctx, "minimax", first, first); err != nil {
+		t.Fatalf("SavePollState: %v", err)
+	}
+	later := first.Add(time.Minute)
+	if err := s.SavePollState(ctx, "minimax", later, time.Time{}); err != nil {
+		t.Fatalf("SavePollState after a failure: %v", err)
+	}
+
+	attempt, success, err = s.PollState(ctx, "minimax")
+	if err != nil {
+		t.Fatalf("PollState: %v", err)
+	}
+	if !attempt.Equal(later) {
+		t.Fatalf("last attempt = %s, want the failed attempt's time %s", attempt, later)
+	}
+	if !success.Equal(first) {
+		t.Fatalf("last success = %s, want the earlier success %s: a failure must not erase it", success, first)
+	}
+
+	// Providers do not share a row.
+	if err := s.SavePollState(ctx, "other", later, time.Time{}); err != nil {
+		t.Fatalf("SavePollState: %v", err)
+	}
+	if a, succ, err := s.PollState(ctx, "other"); err != nil || !a.Equal(later) || !succ.IsZero() {
+		t.Fatalf("other = %s/%s (err %v), want its own attempt and no success", a, succ, err)
+	}
+	if a, _, _ := s.PollState(ctx, "minimax"); !a.Equal(later) {
+		t.Fatalf("minimax attempt = %s, want it untouched by another provider", a)
+	}
+
+	if err := s.SavePollState(ctx, "", later, later); err == nil {
+		t.Fatal("SavePollState accepted an empty provider")
+	}
+	if err := s.SavePollState(ctx, "minimax", time.Time{}, later); err == nil {
+		t.Fatal("SavePollState accepted a zero attempt time")
 	}
 }

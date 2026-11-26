@@ -133,9 +133,9 @@ just ran. First-attempt failures have no last-known-good copy to return.
 
 - **One bounded attempt, no retry.** `New` takes `polling.request_timeout` as the
   per-attempt bound, and the caller's context deadline also applies; the shorter
-  wins. Retry policy is not implemented here.
-- **Poll cadence and retry policy are not implemented here.** This adapter is one
-  bounded attempt; scheduling belongs to issue #13.
+  wins. This adapter never retries: the poller in
+  [internal/poll](../internal/poll) decides whether its answer is worth another
+  attempt, using the classification above.
 - **`Used` and the counts are never reported**, so confidence stays `LOW`.
 - **The percentage is the only quota figure.** If the endpoint ever adds a
   numerator, mapping it needs a new capture, not an inference.
