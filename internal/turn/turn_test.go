@@ -281,6 +281,10 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		// A placeholder must not hide a real value in the next occurrence.
 		"token= unset; token=sk-live-abc",
 		"api_key= optional, api_key=sk-live-1",
+		// An article does not buy an exception: the round 8 bypasses.
+		"the bearer of sk-live-1",
+		"a bearer of sk-live-abcdef123",
+		"request failed: the Bearer of sk-live-1 was rejected",
 	} {
 		if err := (Checkpoint{Goal: raw}).Validate(); err == nil {
 			t.Errorf("Validate() let %q through", raw)
