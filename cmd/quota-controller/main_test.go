@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,19 +26,32 @@ func TestRunConfigError(t *testing.T) {
 func TestRunAppliesConfiguredLogLevel(t *testing.T) {
 	addr := freeAddr(t)
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
-	t.Setenv("QUOTA_ROUTER_OBSERVABILITY__LEVEL", "debug")
+	t.Setenv("QUOTA_ROUTER_OBSERVABILITY__LEVEL", "error")
 
+	// Wire the handler to the LevelVar exactly as main does, so a debug record
+	// is dropped before the configuration applies and emitted after it.
 	level := new(slog.LevelVar)
+	var buf strings.Builder
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level}))
+	log.Debug("before")
+	if buf.Len() != 0 {
+		t.Fatal("debug record was emitted before the configured level applied")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- run(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), level)
+		done <- run(ctx, log, level)
 	}()
 
 	// The level is set right after config.Load, before the listener starts.
 	waitForTCP(t, addr, 2*time.Second)
-	if level.Level() != slog.LevelDebug {
-		t.Fatalf("level = %s, want debug from the configuration", level.Level())
+	if level.Level() != slog.LevelError {
+		t.Fatalf("level = %s, want error from the configuration", level.Level())
+	}
+	log.Debug("still dropped")
+	if strings.Contains(buf.String(), "still dropped") {
+		t.Fatal("the handler ignored the configured level")
 	}
 	cancel()
 	if code := <-done; code != 0 {
