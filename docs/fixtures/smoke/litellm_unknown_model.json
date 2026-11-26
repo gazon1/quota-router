@@ -3,7 +3,7 @@
   "response": {
     "ok": false,
     "status": 400,
-    "elapsed_ms": 13,
+    "elapsed_ms": 25,
     "body": {
       "error": {
         "message": "/chat/completions: Invalid model name passed in model=no-such-model. Call `/v1/models` to view available models for your key.",
@@ -14,6 +14,7 @@
           "error": "/chat/completions: Invalid model name passed in model=no-such-model. Call `/v1/models` to view available models for your key."
         }
       }
-    }
+    },
+    "verdict": "VERIFIED"
   }
 }

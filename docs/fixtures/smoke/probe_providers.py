@@ -49,6 +49,14 @@ USER_AGENT = "quota-router-smoke/1.0"
 
 REDACT_KEYS = ("key", "authorization", "cookie", "secret", "token",
                "userid", "priceid", "planid", "fbp", "subscription")
+# Provider-internal chain of thought and opaque artifacts are not compatibility
+# evidence: a fixture is a schema record, and a model's reasoning may describe the
+# prompt. Dropped entirely rather than redacted, so nothing is half-published.
+DROP_KEYS = {"reasoning", "reasoning_content", "reasoning_details", "reasoning_text",
+             "thinking", "thinking_content", "system_fingerprint", "instructions",
+             "previous_response_id", "encrypted_content"}
+# Item types that carry a model's chain of thought rather than a response.
+DROP_TYPES = {"reasoning", "reasoning_text", "thinking", "encrypted_content"}
 REDACT_VALUES = {"email", "name", "userName", "userId", "request_id",
                  "requestId", "orgId", "subscription", "customer"}
 # Fields only a model catalogue entry carries. "object" is NOT one of them: every
@@ -74,10 +82,17 @@ def scrub_text(text):
     return text
 
 
-def redact(obj):
+def redact(obj, _drop=False):
     """Drops credentials and account identity, but keeps model ids: a model id is
-    the evidence this file exists to record."""
+    the evidence this file exists to record. `_drop` prunes a whole subtree once
+    it is identified as provider reasoning, including its nested text."""
+    if _drop:
+        return None
     if isinstance(obj, dict):
+        # A whole reasoning item, including its nested text, is dropped rather
+        # than emptied: half-published provider internals are still published.
+        if str(obj.get("type") or "") in DROP_TYPES:
+            return None
         # "object" alone marks a model entry; the other catalogue fields only
         # count without a response-style object (a Responses body also has
         # created_at and model, but object: "response").
@@ -92,17 +107,26 @@ def redact(obj):
         out = {}
         for k, v in obj.items():
             lk = k.lower()
+            if lk in DROP_KEYS:
+                continue
+            # A Responses API item carries its chain of thought under
+            # type: "reasoning", not under a "reasoning" key; the whole item,
+            # including nested text, is dropped.
+            if isinstance(v, str) and v in DROP_TYPES:
+                continue
             if isinstance(v, (int, float, bool, type(None))):
                 out[k] = v
             elif k == "id":
                 out[k] = v if is_model else "***REDACTED***"
             elif any(p in lk for p in REDACT_KEYS) or k in REDACT_VALUES:
                 out[k] = "***REDACTED***"
+            elif isinstance(v, dict) and str(v.get("type") or "") in DROP_TYPES:
+                continue
             else:
                 out[k] = redact(v)
         return out
     if isinstance(obj, list):
-        return [redact(x) for x in obj]
+        return [x for x in (redact(i) for i in obj) if x is not None]
     if isinstance(obj, str):
         return scrub_text(obj)
     return obj
@@ -119,7 +143,7 @@ def call(method, url, headers=None, body=None, timeout=60, stream=False):
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if stream:
-                events, usage = [], None
+                events, usage, content, stream_error = [], None, [], None
                 for raw in resp:
                     line = raw.decode("utf-8", "replace").rstrip("\n")
                     if not line.startswith("data:"):
@@ -135,10 +159,25 @@ def call(method, url, headers=None, body=None, timeout=60, stream=False):
                         continue
                     if chunk.get("usage"):
                         usage = chunk["usage"]
+                    # A provider can report a business failure as an SSE error
+                    # event on a 200 response; that is not a served stream.
+                    if chunk.get("error") and stream_error is None:
+                        stream_error = chunk["error"]
+                    for choice in chunk.get("choices") or []:
+                        text = (choice.get("delta") or {}).get("content")
+                        if text:
+                            content.append(text)
                     events.append("data: <chunk>")
-                return {"ok": True, "status": resp.status,
-                        "elapsed_ms": round((time.time() - started) * 1000),
-                        "events": events, "final_usage": redact(usage)}
+                result = {"ok": True, "status": resp.status,
+                          "elapsed_ms": round((time.time() - started) * 1000),
+                          "events": events, "final_usage": redact(usage),
+                          # Scrubbed provider text is not evidence in a fixture;
+                          # only whether the stream produced any is.
+                          "assistant_deltas": len(content),
+                          "content_chars": sum(len(c) for c in content)}
+                if stream_error is not None:
+                    result["stream_error"] = redact(stream_error)
+                return result
             raw = resp.read()
             try:
                 parsed = json.loads(raw)
@@ -207,8 +246,11 @@ def main() -> int:
         return True
 
     def has_stream(body):
+        """Terminated, no error event, and it actually produced assistant text."""
         events = body.get("events") or []
-        return "data: [DONE]" in events and len(events) > 1
+        terminated = 'data: [DONE]' in events and len(events) > 1
+        return (terminated and not body.get("stream_error")
+                and body.get("assistant_deltas", 0) > 0)
 
     def has_stream_usage(body):
         return bool(body.get("final_usage") or body.get("usage"))
@@ -240,87 +282,101 @@ def main() -> int:
         return any(marker in text for marker in TRANSIENT_MARKERS)
 
     def is_plan_refusal(body) -> bool:
-        text = body_text(body)
-        if any(marker in text for marker in DAILY_CAP_MARKERS):
+        """Matches structured error fields, not a substring of the whole body: an
+        unrelated 2056 in a message or a trace id is not a plan code."""
+        error = body.get("error") or {}
+        fields = {str(error.get("code") or ""), str((body.get("base_resp") or {}).get("status_code") or "")}
+        # MiniMax reports the code inside its numeric status field and also writes
+        # "(2056)" into the message; the field is authoritative, the message is a
+        # fallback only for a body that has no structured code at all.
+        if not any(fields):
+            match = re.search(r"\b(\d{4})\b", str(error.get("message") or ""))
+            fields = {match.group(1)} if match else set()
+        if fields & set(PLAN_CODES):
             return True
-        codes = {str((body.get("error") or {}).get("code") or ""),
-                 str((body.get("error") or {}).get("type") or ""),
-                 str((body.get("base_resp") or {}).get("status_code") or "")}
-        blob = text + " " + " ".join(codes)
-        return any(code in blob for code in PLAN_CODES)
+        if str(error.get("type") or "") in ("permission_error", "insufficient_quota"):
+            # Command Code names the plan gate in the type and the message.
+            return True
+        message = str(error.get("message") or "")
+        return any(marker in message for marker in DAILY_CAP_MARKERS)
 
     def record(name, payload, expect=None, expect_business=None, need=None,
                allow_plan_exhausted=False, allow_refusal=False, schema_only=False):
         """Records one case and enforces its expectation.
 
-        MiniMax answers an auth failure with HTTP 200 and a business error in the
-        body, so a transport-only check cannot see it. Where a business status is
-        expected it must be present and equal, not merely absent.
+        A case is only VERIFIED when every assertion it carries passed: a failed
+        business status or shape leaves the case FAILED in its fixture, so a
+        reader of the committed evidence cannot see the opposite verdict.
 
-        `need` asserts the response semantics rather than the transport status: a
-        case that claims tool calls must contain one, a stream must terminate and
-        carry usage. A call the provider's plan refuses is recorded as
-        BLOCKED_BY_PLAN only when the body matches a documented plan code.
+        MiniMax answers an auth failure with HTTP 200 and a business error in the
+        body, so a transport-only check cannot see it. `need` asserts the payload
+        itself (a tool call, assistant text in a stream); a 200 alone is not
+        verification. A refusal counts as BLOCKED_BY_PLAN only when the body
+        carries a documented plan code.
         """
         if schema_only:
             payload = {**payload, "body": shape(payload.get("body"))}
-        results[name] = payload
         status = payload.get("status")
         body = payload.get("body") or {}
         biz = (body.get("base_resp") or {}).get("status_code")
+        problems = []
+
+        def fail(message, verdict="FAILED"):
+            problems.append(message)
+            payload["verdict"] = verdict
 
         if expect is not None and status != expect:
-            failures.append(f"{name}: status {status}, expected {expect}")
-            return
+            fail(f"status {status}, expected {expect}")
         if expect_business is not None and status == 200:
             if biz is None:
-                failures.append(f"{name}: no base_resp.status_code in the body; a missing "
-                                "business status is not a success")
+                fail("no base_resp.status_code; a missing business status is not a success")
             elif biz != expect_business:
-                failures.append(f"{name}: base_resp.status_code {biz}, expected {expect_business}")
+                fail(f"base_resp.status_code {biz}, expected {expect_business}")
 
-        if allow_plan_exhausted:
-            if status == 200 and biz in (None, 0):
-                results[name]["verdict"] = "VERIFIED"
-            elif status == 429 and is_plan_refusal(body):
-                results[name]["verdict"] = "BLOCKED_BY_PLAN"
-                blocked.append(name)
-            elif status in (429, 502, 503) and is_transient(body):
-                results[name]["verdict"] = "TRANSIENT"
-                blocked.append(name)
-            elif status in (429, 502, 503) and is_transient(body):
-                results[name]["verdict"] = "TRANSIENT"
-                blocked.append(name)
-            else:
-                failures.append(f"{name}: status {status}, expected 200 or the documented "
-                                f"plan-exhaustion error, got neither")
-            continue_checks = status == 200
-        elif allow_refusal:
-            if status == 200:
-                results[name]["verdict"] = "VERIFIED"
-                continue_checks = True
-            elif status in (403, 429) and is_plan_refusal(body):
-                results[name]["verdict"] = "BLOCKED_BY_PLAN"
-                blocked.append(name)
-                continue_checks = False
-            elif status in (429, 502, 503) and is_transient(body):
-                results[name]["verdict"] = "TRANSIENT"
-                blocked.append(name)
-                continue_checks = False
-            else:
-                failures.append(f"{name}: status {status}, and the body matches no documented "
-                                f"plan refusal (403/429 with a plan code)")
-                continue_checks = False
-        else:
-            continue_checks = status == (expect if expect is not None else 200)
+        checked = status == (expect if expect is not None else 200)
+        if not problems:
+            if allow_plan_exhausted:
+                if status == 200:
+                    checked = True
+                elif is_plan_refusal(body):
+                    payload["verdict"] = "BLOCKED_BY_PLAN"
+                    blocked.append(name)
+                    checked = False
+                elif is_transient(body):
+                    payload["verdict"] = "TRANSIENT"
+                    blocked.append(name)
+                    checked = False
+                else:
+                    fail(f"status {status}, expected 200 or a documented plan error")
+                    checked = False
+            elif allow_refusal:
+                if status == 200:
+                    checked = True
+                elif is_plan_refusal(body):
+                    payload["verdict"] = "BLOCKED_BY_PLAN"
+                    blocked.append(name)
+                    checked = False
+                elif is_transient(body):
+                    payload["verdict"] = "TRANSIENT"
+                    blocked.append(name)
+                    checked = False
+                else:
+                    fail(f"status {status} with no documented plan code")
+                    checked = False
 
-        if continue_checks and need:
+        if checked and need:
             what, ok = need
             # A stream payload carries events/final_usage beside "body", not in it.
             target = payload["body"] if payload.get("body") is not None else payload
             if not ok(target):
-                failures.append(f"{name}: response does not satisfy {what}; "
-                                "a status code alone is not verification")
+                fail(f"response does not satisfy {what}; a status code alone is not verification")
+
+        if problems:
+            payload["verdict"] = "FAILED"
+            failures.extend(f"{name}: {m}" for m in problems)
+        elif payload.get("verdict") is None:
+            payload["verdict"] = "VERIFIED"
+        results[name] = payload
 
     def write(name):
         (out / f"{name}.json").write_text(

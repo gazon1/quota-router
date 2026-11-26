@@ -3,13 +3,12 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 2807,
+    "elapsed_ms": 2640,
     "body": {
       "id": "***REDACTED***",
-      "created": 1795708889,
+      "created": 1795709528,
       "model": "commandcode/stealth/glyph-cluster:free",
       "object": "chat.completion",
-      "system_fingerprint": "fp_lizcn9jmaf",
       "choices": [
         {
           "finish_reason": "stop",
@@ -17,16 +16,7 @@
           "message": {
             "content": "pong",
             "role": "assistant",
-            "provider_specific_fields": {
-              "reasoning_details": [
-                {
-                  "type": "reasoning.encrypted",
-                  "data": "gwst1.IIxOMNa_zw18MNgubbPpnk_r6gOGP_EshlNyMcVmHPegK-cXxeyn3BUIaebyxaRgwglGGE5oNHfs3Td9W_doqpEofUs-4XjBsRYvwT60Gbyv0mMmq3OsRAMEgyKLKAkQ8CRZWQ66v7s-WcYXjKDdprH5Cz5ih3THx_0YATTbL-ZeMfMryfye1p5TBbWE4sY7WOuvH0Wv0jQYS8xWaL3T8K6KHjjend4dR2j3cU42NZNN3So-fUQdghZngDRbkPr8qIbm3bfpg20MSUpyBCRzkPh1LXl02yI0BaXFbA-2GL-nmDJhi1ILMEKmEWmV-UbME0rLNNI17EKYE9rG_-dNH5x0Md3KLIdIiIJRF5VUjv6tlwYcjbfNqgUxWLn1A0ItMQK87kzJKrEUOh3Pvw1S-D8_YN4V-BwKU-Ag6mjIBVxttKauCOtnA1DhiTecQF9mTLXEdwVDUxjXWUM8WWerGAr1y2zUODnjqj-RKSGICftniarM8pzjBJUxMp4SfO_JILMuDGcY92NNYWmhL0tSUWOH_gLQg6t58qVES_h5sev_mWhfoZ9UXa6fQunNlWY3PREY-1WxXYwH1M8t0V_DB-GN5bMwjh0HnbqfSoqLgUYkTzgaPLWz8pOzshqWhymsa2gGfsCdoNQf7gVDvtVhkJFkqsei-zi5jPJVH4WulzHeQgYLjTYq4F-XZ5cS87rSQVqlEaOJinUucUOD0Gve6m48AaH_QkuPmHL2516DXj8YqIe59jatJEXala033GTkpLcoWG8fnxh5sbFAWwX0NR4IdFbMRUN5sRwYc7N3efR7AdUsVzOUEWr25XA-QSjTJfNQJ4SZTdIovBaVIFT76-td_N_qMkAoCA8smpsgsv87YNnFku88oCtvU_PCWwfjjJpx4F85NjYS4hkExT5ag0MrD3wmKY_mGfFI7582gDFWhnpH5BHUBbAxOVrDQYoGRbSt2ZkjoIahby8Pc8DWHkGj4raM8z4DrHj8LNF-Ojm4sAe2EwxvDA",
-                  "format": "stealth-v1",
-                  "index": 0
-                }
-              ]
-            }
+            "provider_specific_fields": {}
           },
           "provider_specific_fields": {},
           "logprobs": null

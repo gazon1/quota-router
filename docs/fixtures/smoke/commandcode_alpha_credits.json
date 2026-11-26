@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1148,
+    "elapsed_ms": 1338,
     "body": {
       "credits": {
         "belowThreshold": "bool",
@@ -35,6 +35,7 @@
         "overageUsd": "int",
         "resetAt": "int"
       }
-    }
+    },
+    "verdict": "VERIFIED"
   }
 }

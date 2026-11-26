@@ -3,11 +3,11 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 3653,
+    "elapsed_ms": 4199,
     "body": {
       "id": "***REDACTED***",
       "object": "chat.completion",
-      "created": 1795708882,
+      "created": 1795709521,
       "model": "stealth/glyph-cluster:free",
       "choices": [
         {
@@ -15,22 +15,13 @@
           "message": {
             "role": "assistant",
             "content": null,
-            "reasoning": "**Considering weather tool use**\n\nAlright, the user wants to know the weather in San Francisco. I\u2019ll need to use the weather tool to get that info. It seems pretty straightforward: just pull up the current weather for SF. I\u2019ll make sure to get the most accurate and up-to-date details for them. Let\u2019s go ahead and do that!",
-            "reasoning_details": [
-              {
-                "type": "reasoning.encrypted",
-                "data": "gwst1.Ktie9CHLG-JdeE2Mx7clbgB4oAWkZfOxyjarvDNKIVE7p5JDA7ez98akhsAqrCFCwn8IwLzYHLqGYeUFQsnyfJS-mAxaewhZwUzPLfNddn12z4clAUjElfJsIZmdUqgat9JgtJEbSFvrY68Cx70vpX57QmE4X9H6W-4mlgffrgCgX7WzRCaVPhYuNS7nTCsxcIxjMKwJVyXRtSHgWh224l9a2GRbQCNlrbmANxavWdwKHdZ-n2D_TJAX0HRm1cq0ItgVVg8zgaC5BYvGPxYR04hbZ5z6YQwZJPjgvHhXubBBlJJYxwIZwXmSyjgeaKh56aEDTOTJX-AJCnhZK5AEKUwiKty4bAcbU-aNDRsrmiV_LCK9dDdT_aFg7KReuefBTK8QgFLzHYFLQb56LvT6nSuyZVV1yGnDNuIDzhvspNUzZDee1usK5F1LJzDM_apeFzWD0Mesh2G5dFcM3fY7AmHi4sEmuDn6UcojXh_HAsLnwvTkfQEMOs7XPnDIiof8yo0wOf_s6zO5EaaYTKiOtKLsL2U0Bao19qOtxWsokeKwKYqj80Od5heke7aHVzs4PX-PyDgzD9ZbAuyz4hCFl3Nb_dwWDvssV95j67ybbGXiLUlbAreHWhywlqvyLkkSxB8SRSctJO0RmmnPdDD5-JlZopt4gZsuWBKWV7lczor2Vkzf1mu1UUl4HLesrmPNLBWnkNoXGN50D91gfk1PEqBG0brgs3Rliyera_8RN4ZiL7VOpR4oAxN4M1r2T_ep3NmCYl-dsbf5QDmUp_wSRgVYq5rnicTZROFYw1Qg-0psb4Cxw1k51KHYjtWy9pIwDiDOuZNJ4TdGPvsrD4EhZVXmtsY8w9fANRBE72RhTZgunNpJor7A7jPVi7anaMe1Mw7ZaEMTSsIpIoWuNWbjfi4q_RZcaLq4VZ17zKqpL6FobFU8GlZOhjrEp5K5kdcFi71tnbAFz_PeFH8tRnhikk9aj1nTnSvSgAsasR3beb7r8wsTQsU6bKjxq9cGpITOgEdf_R66oXea8WzdcxmpRze8C40ytcEjKS49E5eVAzPc6Imhbbu2p7L3zZ_JdCPMRPJ9blYLO4rrKttj2HaTWkM5YmqAKBkd8gq9CYZfUe58QhAEf_8WV9WDAaBky5XHAU6ocWKrSjmhHVxKXyWgH4QLshyYwwIxsdrtczFZIwv93T0f6HZGpw4hMSurECMUAdrpczNdWLq9YdW7aCPS54o5NEW5njfYQkLvldF8eSKxrWmm5V3mKk0yET9bpTT-WKbJgg8Jle2sU1cwKJq85Vgmg74HANtwEr7_koqoIiknR3j_SbMrKNVihstM4U2eXNBkLR6z7Eg",
-                "format": "stealth-v1",
-                "index": 0
-              }
-            ],
             "tool_calls": [
               {
                 "id": "***REDACTED***",
                 "type": "function",
                 "function": {
                   "name": "***REDACTED***",
-                  "arguments": "{\"city\": \"SF\"}"
+                  "arguments": "{\"city\": \"San Francisco\"}"
                 }
               }
             ]
@@ -41,13 +32,12 @@
       ],
       "usage": {
         "prompt_tokens": 187,
-        "completion_tokens": 54,
-        "total_tokens": 241,
+        "completion_tokens": 91,
+        "total_tokens": 278,
         "prompt_tokens_details": "***REDACTED***",
         "completion_tokens_details": "***REDACTED***",
         "cache_creation_input_tokens": 0
-      },
-      "system_fingerprint": "fp_ecnzse1lzw"
+      }
     },
     "verdict": "VERIFIED"
   }

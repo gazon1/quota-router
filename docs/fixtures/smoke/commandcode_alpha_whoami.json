@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 743,
+    "elapsed_ms": 765,
     "body": {
       "success": "bool",
       "user": {
@@ -13,6 +13,7 @@
         "userName": "str"
       },
       "org": "NoneType"
-    }
+    },
+    "verdict": "VERIFIED"
   }
 }

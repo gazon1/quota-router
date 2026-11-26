@@ -3,41 +3,16 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 9769,
+    "elapsed_ms": 8183,
     "body": {
       "id": "***REDACTED***",
-      "created_at": 1795708901,
+      "created_at": 1795709539,
       "error": null,
       "incomplete_details": null,
-      "instructions": null,
       "metadata": {},
       "model": "commandcode/stealth/glyph-cluster:free",
       "object": "response",
       "output": [
-        {
-          "id": "***REDACTED***",
-          "summary": [],
-          "type": "reasoning",
-          "content": [
-            {
-              "text": "**Considering response to \"ping\"**\n\nOkay, the user just wrote \"ping,\" which is often a test message. I need to respond in character as Glyph Cluster, but I\u2019m not sure if I should just reply or do something more specific. The instructions say to follow the persona, but it\u2019s not clear if I should be more interactive or just acknowledge the ping. I\u2019ll keep it simple for now and respond in a way that fits the persona, without overthinking it too much.",
-              "type": "reasoning_text"
-            }
-          ],
-          "encrypted_content": "gwst1.2EL41TrA4XvryM-Ua34zi7dnJ9na0rXBIQiVNPhFrVqjYS3DNQug4g2iWIxbLrY4i9ZMLraVi5B357eytFIEAj1Payp8sCB-4Twtv3FdJNjd3NqyL_t--OFY25tUmbVQ2t0g5tNe_7PDDBmE-6DaFsA-mqnThy4gVwTj13feaf6iL_QbQgwYAf0cZ4Mn2-XkFcIanGDpZ8TyEVxm2p_BFOgS57u6BLQzjXLligPxe9bBEvXr9xAm9K5myljWdMoerjiqpE8CPq9DdlGjGoyVLT3aPpY0dnnLgcxrYTLFV_K8fxSW9LnLMIJHtp9fvxO73OZOcfepoGqV8qaspvOqCghg-St90ejMPlaS1VGO0cUr6BZJRwfbmfEYn42kvP2bN3qHO6dH7rN5-v6jEr6HPq-hpzvKs3W_lKxA11a9e85jh9y9Y258qd4qxWLWjqHh6L9fnfl3HKZ1t2xuKHzgpXqlrBgY0wKFE2DABr5j--EHVI2IcLsNFI67HT6Y5u-VF6pwf7D37W2niHjEwTTocE4dUSEeg20rL7_O5afvDIPTWiIvzFiJ9xIbJDllkNDnDU1y_3cdXImlugcLsr_-5usgDf_WLe6AKjDf-5-0C2vEGBFX_2vO512zE9GmNY5LGBu02esFnL5K17kDxOeJFblNK5r4TkE1L_NmSsMd_NtYpLtVInLqA0g6AgC2KNKlquWlzi2Q5EoqeZEUuKB6tIqglAbIn1JiVJ8uox-4NLyR2m34cow41l28Onvzi-R-YGNJvMT0hP1eExiky_1GlfNjJpbmPv1cn5Eb1idDz2hwEmCR5gPBOUT6ufpB7617_L1ISeJI_IxqwswfRR_RL1MlxqB8-vIRbk7-hQrS5KbSsBmlX8O3FY_eFvns6G88fr1LGR9XQ77_l9eWtfbiQr4W5kdQaUAfbWdGoiw-MEWv67QpOvH7r-MloRVNLgIzHioyjVHiz5NYiAlIK0D0aCtuj4ZuSJ77dF1KWjH8RHqWqY3oNt4LHeYOZr4p204AwvpYdS0pJPNust1aMyg7P4MTobAwLTSkNQjUKxRp6tiZ4bRDBuGRFPqB7Cm8bEkld3zASXoocTf4St7dLxflhsXWsKODrSDy4IhMCyDau7ynU_gR3YM61zcvRSq0aiTGGXdxJUH9K4zSn88jSOXUdjArqGVDM8_kJJrnj6Prj0X3ckgrZI4v4RR3DSiLeK9utNVmB-BazZ2hkZeMePb8ewSXYoaGKLTDT-9fbQaddAPMV-LKuD9UbvEX6vDXgFMFcuAWUmemya_dlUeDJ-Wl7dhwi1gVsatywmQg1sGyK45ujSskpTL2v2kQJ8SyZMXv8YiN4yc0_fl8LXMw7dRcAEmqXBo2Z9dZkMN-xV5qv7r4CiAOijgrgpk_zbtdq-MO7ybPOL8jXCRYmaPC9vE7wB4CslUXL_zZhmZNGuLcMmAJSJn4NSFVn87HmfsbXVhJg_sw9yN0Cil8BX5PNLGlx2bq3GH36yyLaRDUYLky45XDn84LuIOuDaeLwxSOkbAbEY-xGR2lQ6kzM2V3dETc3zZL2sjXXDnxOlYi0CiL9oQPbaDDgif6CzranpVwJbOUVtPb087qWgfnOoYKoShGIoaXCe9eM0l6t6BdPdtOmgh16H6VJm9aH1_qV3yXtHF5OAshlwEyeLMpIIv-QQmgzHJ39wNiKAClupihj3p8x_7_uL5P6hJIY-6RHPJYsAC8WMU_j28be5WPUCIh5qRiXbjiZkiKysVcrtZPIIRV6S30vuZTP-9snmEvrZvGH3litzHM98tEQcw9OQi-__ihinw4sXFw5sPeUVi1yMYHTzxY1vgt7O0UVgVmlxSVpE9l-eHL25MeWHvFhTikSkBjINngSbhquGcHKeYDZqH4ZQedqJseZZ5WWgFXz1e4QM69phXzslCeBkKaBYpfrCDDKm2UbMlXUUacPWBlN01LX9vehvZ8QRNkcAsJTtjeVeuKhmKS1YOAvx7PLuri4FhAmlFlO9AqnJ6Zx3RuiOTftIIxWopUsmyqGH58Mzs99fks-w8gb39-aT0H8k3JdWSnB3-yJMa43KXBGu905abKs-6X0E2v04aQzg2OeM4pXzhrYcnNi20OXUX3WY4oP2T64PHlW6WQOmcIgZWNz2vsbCckzw0UtEczeldHSmNyN_GB2O1ABXUY3afrtWHP6tZlcDzsmtvsRLb0s1iw_Ew0tqFqIUrHJ1wJ5CERvV2TJEn0HdCupDbQZHtSJpXlfg4to9m1J-WIfDmn4I8UVEBJuIBM90yq7RIyxBCt5niZCMdr62JsJhyTANA2ZhxKetm28khY_X-Do_JgY0pKpRcEYqw8AP21J5UqaChYpkyX6cDrveouTmp6hwndOBLYrDpvvBzzFAcU9bvPR8geKfnNGQByvHzoDyS-vR2HsHAmcrdjFUn_KJTvK-gEcqGsc-7uFCGo7D4aGxT9cExn5GXlnb9bjm6-qZOZaI1-il8DA20HWImPr0oMNKpOcMSilfJ2_m5i_L9iODrOxE7qYkUl1EDNpS0IF9hyF1Kv6C39WG4sZOcjMb4GOsomDnU3uIXw9lQRhW2LW3D0Cqv6ij87BQeEySn005U6LhOHjpEIaNnWH87-f9z2o0jwSvP1IK9fRf4pBwmwN2BNHDqTQno5W2XOAbxbUJnbunfWdcuxgeaBjSXww4p4wx4ajy9E94MLNpL-Hxsl3D6vK5uCQ42g6ZSjuZAN-ejqVYEFy0rwnGj58U_rXS9l2j6YxDt8gKbNEf3DmmE56gRMI_AeANX2iCHJMO_M9p7x650ki1M1EoYbZz09CjSBAsHSDW87XftT6N9eEPkt0NASCZSaFeKlf3uNYsynJXXm3PjRzNGeM6JqSrWi5IDfQ-E_g4RkN2apmdjb2sY-_F-Ma4VYHPS9bYN1L3d1Or1CLFpyXQ5NLVLLjDV20a6URCxoNv1WTa0U0E-NNn9eGDGw6_ay9NC90plySYlbio_Ek0vkIZttaa80aJ059hxo62IjXdIKxgqjcvKSCF5B4HD9Eh3pLURpDc4FVQxkb15zpEANl3_HlsNAQ1Z1X1V1oykG0ZaaWVn6XWtYFqM69Gobm28yt_7bWMC5GsEdvFq-vTY_Pg_SR57AU4p0Fj59zMxOgn7NklMx2lVEAr46-U1srqkttLgkWhqZDSR3hrwVomondkYtLu_Oa-Pz6zC8NJ8IM5vkljvTarOsBI_QieN3LPIbLg1FUL8kFBzbT9Z6xHQOfuETAw6IjN0VBLE231CbMWLUkwBXEB6Sbjy9k0vDEJW81nI4ighvd7eN3aRfB-N9W2hdpp-TWjWW_GMWNL6sr1n5OE-41TuUlIxO6Foh2WFFidjzVyKUjJyg3qnUf0NsM1-4Xi0Ssn9Or0czKfgCoOkcMa0UZrq-pmcNlW7Pjtnd-R2vNMZUQt7jBFTXPBK_-Beh7P3bZdy6zsosuSijAbj-k2vhZ_VjFlcorTsNu2m9c7dBllKyv1v4CRMdJ63XpNBNH4JlgWuYRcfGAcMSOPHvUXEuzb6G5WIx782i0ZvHE4ouKqhtO0wCwEf5qQ80vUQFMJgSPtpesiXYT8n79pb2wDYawpevmym0p2gBMA412Px8b4JASPZZbD6_GjsfIERRj_LqFHlr3wOBcuBcZXOD8f-Y3r8j_xCZ65DCn_wtyHkQGwtW0KcSCzwYBmr0zxmnSaRnRff_ulJuWarM4Zo5zLyGu-w-7VRaiJQoPM6Qm71boFzy2Xw3xZMQ_UMgNPDK84UZ6vROCrx8C9ER1RBeCKz8zNKJYA4CltkXiAYisRz3BwZjTjnn2X5iIEzW1I_SkL9_dbxtjxCY4yt8UTnxk81zDnDPAmiZicwsFYMomxELAxB9eTxxzzqsVALlD_Gxgrryuo_ehvqo_b1-uCida7Ss3QZ_BtjHKJW4VmCT6-T0kgVO-FTSuPKvdrEvRJ-Hca62xWfL29uWrWLtwiZLZr5Uffqu2-bxK2xaa-06qQEFGwqeBSt7DR3tCqFtpMl2pZeFryDJmZeOh11xgW9Z3bnzkiYLRAGuuTnlRlqi1AlXAFhhrLKrLpLHJAzgCnlUiuLbhZ-RLT7Vpu_MbpCMSaxk7qKMJx9PT3LTvD5exXyfOLERJAHe9Iqd2uCS5ntsQHb2sHjPiXgCcSOhKg3WfEoQVM5lgpex8Nb4AUcqVvylPItMyAwbuJ9oWAfWMQtvWt5sYpWCyk4twTJT5IeoSiQADAKbpcH3zqVlBaCBwXs1OaVlwqKOmVQlgQPyod9Pl8v3AwCGmVKCIU4BDN5VPtCdS89qNFRydNyr3fMSkLBeQN30WWNXH6oBC1FwbpCRep80iaWEKmmWFFfqWdS5BvFXucp6ig7HieES"
-        },
-        {
-          "id": "***REDACTED***",
-          "summary": [],
-          "type": "reasoning",
-          "content": [
-            {
-              "text": "**Deciding on response to \"ping\"**\n\nOkay, the user sent \"ping,\" and I need to respond as Glyph Cluster. Should I just say \"pong\" or add something like \"Glyph Cluster here\"? Hmm, I think keeping it simple is probably best. I don\u2019t want to overcomplicate it. A straightforward \"pong\" should work fine. It\u2019s clear, and it fits the context. I\u2019ll go with that.",
-              "type": "reasoning_text"
-            }
-          ],
-          "encrypted_content": "gwst1.2EL41TrA4XvryM-Ua34zi7dnJ9na0rXBIQiVNPhFrVqjYS3DNQug4g2iWIxbLrY4i9ZMLraVi5B357eytFIEAj1Payp8sCB-4Twtv3FdJNjd3NqyL_t--OFY25tUmbVQ2t0g5tNe_7PDDBmE-6DaFsA-mqnThy4gVwTj13feaf6iL_QbQgwYAf0cZ4Mn2-XkFcIanGDpZ8TyEVxm2p_BFOgS57u6BLQzjXLligPxe9bBEvXr9xAm9K5myljWdMoerjiqpE8CPq9DdlGjGoyVLT3aPpY0dnnLgcxrYTLFV_K8fxSW9LnLMIJHtp9fvxO73OZOcfepoGqV8qaspvOqCghg-St90ejMPlaS1VGO0cUr6BZJRwfbmfEYn42kvP2bN3qHO6dH7rN5-v6jEr6HPq-hpzvKs3W_lKxA11a9e85jh9y9Y258qd4qxWLWjqHh6L9fnfl3HKZ1t2xuKHzgpXqlrBgY0wKFE2DABr5j--EHVI2IcLsNFI67HT6Y5u-VF6pwf7D37W2niHjEwTTocE4dUSEeg20rL7_O5afvDIPTWiIvzFiJ9xIbJDllkNDnDU1y_3cdXImlugcLsr_-5usgDf_WLe6AKjDf-5-0C2vEGBFX_2vO512zE9GmNY5LGBu02esFnL5K17kDxOeJFblNK5r4TkE1L_NmSsMd_NtYpLtVInLqA0g6AgC2KNKlquWlzi2Q5EoqeZEUuKB6tIqglAbIn1JiVJ8uox-4NLyR2m34cow41l28Onvzi-R-YGNJvMT0hP1eExiky_1GlfNjJpbmPv1cn5Eb1idDz2hwEmCR5gPBOUT6ufpB7617_L1ISeJI_IxqwswfRR_RL1MlxqB8-vIRbk7-hQrS5KbSsBmlX8O3FY_eFvns6G88fr1LGR9XQ77_l9eWtfbiQr4W5kdQaUAfbWdGoiw-MEWv67QpOvH7r-MloRVNLgIzHioyjVHiz5NYiAlIK0D0aCtuj4ZuSJ77dF1KWjH8RHqWqY3oNt4LHeYOZr4p204AwvpYdS0pJPNust1aMyg7P4MTobAwLTSkNQjUKxRp6tiZ4bRDBuGRFPqB7Cm8bEkld3zASXoocTf4St7dLxflhsXWsKODrSDy4IhMCyDau7ynU_gR3YM61zcvRSq0aiTGGXdxJUH9K4zSn88jSOXUdjArqGVDM8_kJJrnj6Prj0X3ckgrZI4v4RR3DSiLeK9utNVmB-BazZ2hkZeMePb8ewSXYoaGKLTDT-9fbQaddAPMV-LKuD9UbvEX6vDXgFMFcuAWUmemya_dlUeDJ-Wl7dhwi1gVsatywmQg1sGyK45ujSskpTL2v2kQJ8SyZMXv8YiN4yc0_fl8LXMw7dRcAEmqXBo2Z9dZkMN-xV5qv7r4CiAOijgrgpk_zbtdq-MO7ybPOL8jXCRYmaPC9vE7wB4CslUXL_zZhmZNGuLcMmAJSJn4NSFVn87HmfsbXVhJg_sw9yN0Cil8BX5PNLGlx2bq3GH36yyLaRDUYLky45XDn84LuIOuDaeLwxSOkbAbEY-xGR2lQ6kzM2V3dETc3zZL2sjXXDnxOlYi0CiL9oQPbaDDgif6CzranpVwJbOUVtPb087qWgfnOoYKoShGIoaXCe9eM0l6t6BdPdtOmgh16H6VJm9aH1_qV3yXtHF5OAshlwEyeLMpIIv-QQmgzHJ39wNiKAClupihj3p8x_7_uL5P6hJIY-6RHPJYsAC8WMU_j28be5WPUCIh5qRiXbjiZkiKysVcrtZPIIRV6S30vuZTP-9snmEvrZvGH3litzHM98tEQcw9OQi-__ihinw4sXFw5sPeUVi1yMYHTzxY1vgt7O0UVgVmlxSVpE9l-eHL25MeWHvFhTikSkBjINngSbhquGcHKeYDZqH4ZQedqJseZZ5WWgFXz1e4QM69phXzslCeBkKaBYpfrCDDKm2UbMlXUUacPWBlN01LX9vehvZ8QRNkcAsJTtjeVeuKhmKS1YOAvx7PLuri4FhAmlFlO9AqnJ6Zx3RuiOTftIIxWopUsmyqGH58Mzs99fks-w8gb39-aT0H8k3JdWSnB3-yJMa43KXBGu905abKs-6X0E2v04aQzg2OeM4pXzhrYcnNi20OXUX3WY4oP2T64PHlW6WQOmcIgZWNz2vsbCckzw0UtEczeldHSmNyN_GB2O1ABXUY3afrtWHP6tZlcDzsmtvsRLb0s1iw_Ew0tqFqIUrHJ1wJ5CERvV2TJEn0HdCupDbQZHtSJpXlfg4to9m1J-WIfDmn4I8UVEBJuIBM90yq7RIyxBCt5niZCMdr62JsJhyTANA2ZhxKetm28khY_X-Do_JgY0pKpRcEYqw8AP21J5UqaChYpkyX6cDrveouTmp6hwndOBLYrDpvvBzzFAcU9bvPR8geKfnNGQByvHzoDyS-vR2HsHAmcrdjFUn_KJTvK-gEcqGsc-7uFCGo7D4aGxT9cExn5GXlnb9bjm6-qZOZaI1-il8DA20HWImPr0oMNKpOcMSilfJ2_m5i_L9iODrOxE7qYkUl1EDNpS0IF9hyF1Kv6C39WG4sZOcjMb4GOsomDnU3uIXw9lQRhW2LW3D0Cqv6ij87BQeEySn005U6LhOHjpEIaNnWH87-f9z2o0jwSvP1IK9fRf4pBwmwN2BNHDqTQno5W2XOAbxbUJnbunfWdcuxgeaBjSXww4p4wx4ajy9E94MLNpL-Hxsl3D6vK5uCQ42g6ZSjuZAN-ejqVYEFy0rwnGj58U_rXS9l2j6YxDt8gKbNEf3DmmE56gRMI_AeANX2iCHJMO_M9p7x650ki1M1EoYbZz09CjSBAsHSDW87XftT6N9eEPkt0NASCZSaFeKlf3uNYsynJXXm3PjRzNGeM6JqSrWi5IDfQ-E_g4RkN2apmdjb2sY-_F-Ma4VYHPS9bYN1L3d1Or1CLFpyXQ5NLVLLjDV20a6URCxoNv1WTa0U0E-NNn9eGDGw6_ay9NC90plySYlbio_Ek0vkIZttaa80aJ059hxo62IjXdIKxgqjcvKSCF5B4HD9Eh3pLURpDc4FVQxkb15zpEANl3_HlsNAQ1Z1X1V1oykG0ZaaWVn6XWtYFqM69Gobm28yt_7bWMC5GsEdvFq-vTY_Pg_SR57AU4p0Fj59zMxOgn7NklMx2lVEAr46-U1srqkttLgkWhqZDSR3hrwVomondkYtLu_Oa-Pz6zC8NJ8IM5vkljvTarOsBI_QieN3LPIbLg1FUL8kFBzbT9Z6xHQOfuETAw6IjN0VBLE231CbMWLUkwBXEB6Sbjy9k0vDEJW81nI4ighvd7eN3aRfB-N9W2hdpp-TWjWW_GMWNL6sr1n5OE-41TuUlIxO6Foh2WFFidjzVyKUjJyg3qnUf0NsM1-4Xi0Ssn9Or0czKfgCoOkcMa0UZrq-pmcNlW7Pjtnd-R2vNMZUQt7jBFTXPBK_-Beh7P3bZdy6zsosuSijAbj-k2vhZ_VjFlcorTsNu2m9c7dBllKyv1v4CRMdJ63XpNBNH4JlgWuYRcfGAcMSOPHvUXEuzb6G5WIx782i0ZvHE4ouKqhtO0wCwEf5qQ80vUQFMJgSPtpesiXYT8n79pb2wDYawpevmym0p2gBMA412Px8b4JASPZZbD6_GjsfIERRj_LqFHlr3wOBcuBcZXOD8f-Y3r8j_xCZ65DCn_wtyHkQGwtW0KcSCzwYBmr0zxmnSaRnRff_ulJuWarM4Zo5zLyGu-w-7VRaiJQoPM6Qm71boFzy2Xw3xZMQ_UMgNPDK84UZ6vROCrx8C9ER1RBeCKz8zNKJYA4CltkXiAYisRz3BwZjTjnn2X5iIEzW1I_SkL9_dbxtjxCY4yt8UTnxk81zDnDPAmiZicwsFYMomxELAxB9eTxxzzqsVALlD_Gxgrryuo_ehvqo_b1-uCida7Ss3QZ_BtjHKJW4VmCT6-T0kgVO-FTSuPKvdrEvRJ-Hca62xWfL29uWrWLtwiZLZr5Uffqu2-bxK2xaa-06qQEFGwqeBSt7DR3tCqFtpMl2pZeFryDJmZeOh11xgW9Z3bnzkiYLRAGuuTnlRlqi1AlXAFhhrLKrLpLHJAzgCnlUiuLbhZ-RLT7Vpu_MbpCMSaxk7qKMJx9PT3LTvD5exXyfOLERJAHe9Iqd2uCS5ntsQHb2sHjPiXgCcSOhKg3WfEoQVM5lgpex8Nb4AUcqVvylPItMyAwbuJ9oWAfWMQtvWt5sYpWCyk4twTJT5IeoSiQADAKbpcH3zqVlBaCBwXs1OaVlwqKOmVQlgQPyod9Pl8v3AwCGmVKCIU4BDN5VPtCdS89qNFRydNyr3fMSkLBeQN30WWNXH6oBC1FwbpCRep80iaWEKmmWFFfqWdS5BvFXucp6ig7HieES"
-        },
         {
           "id": "***REDACTED***",
           "content": [
@@ -60,8 +35,6 @@
       "tools": [],
       "top_p": 1.0,
       "max_output_tokens": null,
-      "previous_response_id": null,
-      "reasoning": null,
       "status": "completed",
       "text": {
         "format": {
@@ -72,14 +45,14 @@
       "usage": {
         "input_tokens": 143,
         "input_tokens_details": "***REDACTED***",
-        "output_tokens": 321,
+        "output_tokens": 268,
         "output_tokens_details": "***REDACTED***",
-        "total_tokens": 464,
+        "total_tokens": 411,
         "cost": null
       },
       "user": null,
       "store": false,
-      "completed_at": 1795708901,
+      "completed_at": 1795709539,
       "presence_penalty": 0,
       "frequency_penalty": 0,
       "top_logprobs": 0,

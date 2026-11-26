@@ -1,15 +1,65 @@
 {
   "case": "commandcode_responses",
   "response": {
-    "ok": false,
-    "status": 429,
-    "elapsed_ms": 2082,
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 3114,
     "body": {
-      "error": {
-        "message": "Upstream model provider is temporarily unavailable. Please try again in a moment.",
-        "type": "rate_limit_error"
-      }
+      "id": "***REDACTED***",
+      "object": "response",
+      "created_at": 1795709514,
+      "status": "completed",
+      "completed_at": 1795709514,
+      "incomplete_details": null,
+      "error": null,
+      "output": [
+        {
+          "type": "message",
+          "id": "***REDACTED***",
+          "status": "completed",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "pong",
+              "annotations": [],
+              "logprobs": []
+            }
+          ]
+        }
+      ],
+      "usage": {
+        "input_tokens": 147,
+        "output_tokens": 13,
+        "total_tokens": 160,
+        "input_tokens_details": "***REDACTED***",
+        "output_tokens_details": "***REDACTED***"
+      },
+      "model": "stealth/glyph-cluster:free",
+      "temperature": 1,
+      "top_p": 1,
+      "max_output_tokens": null,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "top_logprobs": 0,
+      "tools": [],
+      "tool_choice": "auto",
+      "parallel_tool_calls": true,
+      "max_tool_calls": null,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "truncation": "disabled",
+      "store": false,
+      "background": false,
+      "service_tier": "auto",
+      "metadata": {},
+      "safety_identifier": "d317eca2fec56075859d043bf5b2520c6006f74931b9597706dc29ef7ca9860f",
+      "prompt_cache_key": null,
+      "prompt_cache_retention": null
     },
-    "verdict": "TRANSIENT"
+    "verdict": "VERIFIED"
   }
 }

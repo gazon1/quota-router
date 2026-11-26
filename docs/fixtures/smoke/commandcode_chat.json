@@ -1,15 +1,34 @@
 {
   "case": "commandcode_chat",
   "response": {
-    "ok": false,
-    "status": 429,
-    "elapsed_ms": 2078,
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 4010,
     "body": {
-      "error": {
-        "message": "Upstream model provider is temporarily unavailable. Please try again in a moment.",
-        "type": "rate_limit_error"
+      "id": "***REDACTED***",
+      "object": "chat.completion",
+      "created": 1795709507,
+      "model": "stealth/glyph-cluster:free",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "pong"
+          },
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 147,
+        "completion_tokens": 13,
+        "total_tokens": 160,
+        "prompt_tokens_details": "***REDACTED***",
+        "completion_tokens_details": "***REDACTED***",
+        "cache_creation_input_tokens": 0
       }
     },
-    "verdict": "TRANSIENT"
+    "verdict": "VERIFIED"
   }
 }

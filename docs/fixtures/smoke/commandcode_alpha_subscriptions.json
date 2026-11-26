@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 705,
+    "elapsed_ms": 779,
     "body": {
       "success": "bool",
       "data": {
@@ -29,6 +29,7 @@
         "pendingPhase": "NoneType",
         "renewalPending": "NoneType"
       }
-    }
+    },
+    "verdict": "VERIFIED"
   }
 }

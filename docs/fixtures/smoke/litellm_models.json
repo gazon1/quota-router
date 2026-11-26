@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 12,
+    "elapsed_ms": 11,
     "body": {
       "data": [
         {
@@ -36,6 +36,7 @@
         }
       ],
       "object": "list"
-    }
+    },
+    "verdict": "VERIFIED"
   }
 }

@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 529,
+    "elapsed_ms": 537,
     "body": {
       "totalCount": "int",
       "totalCost": "float",
@@ -21,6 +21,7 @@
       "periodBasis": "str",
       "periodStart": "str",
       "daily": []
-    }
+    },
+    "verdict": "VERIFIED"
   }
 }
