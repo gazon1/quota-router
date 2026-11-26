@@ -1,0 +1,48 @@
+# Example quota controller configuration.
+#
+#   cp config.example.yaml config.yaml     # config.yaml is git-ignored
+#   chmod 600 config.yaml
+#
+# Every setting below is optional: the service starts from its built-in defaults.
+# Precedence is defaults < this file < environment variables. Point the service
+# at a file with QUOTA_ROUTER_CONFIG_FILE=config.yaml.
+#
+# Real credentials do not belong in this file. Set them through the environment
+# or a mounted secret file; only placeholders belong here. See README.md.
+
+server:
+  addr: ":8080"
+  shutdown_timeout: 10s
+  read_header_timeout: 5s
+  read_timeout: 5s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+litellm:
+  base_url: http://127.0.0.1:4000
+  model_aliases:
+    fast: minimax/MiniMax-M3.1-Flash
+
+providers:
+  minimax:
+    base_url: https://api.minimax.io/v1
+    # api_key: set QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY instead
+
+polling:
+  interval: 30s
+  request_timeout: 10s
+
+routing:
+  # Remaining-quota fraction at or below which a provider counts as scarce.
+  low_quota_threshold: 0.1
+
+sqlite:
+  path: quota-router.db
+  busy_timeout: 5s
+
+auth:
+  # Bearer token for the controller's own HTTP API (issues #18, #36).
+  # token: set QUOTA_ROUTER_AUTH__TOKEN instead
+
+observability:
+  level: info

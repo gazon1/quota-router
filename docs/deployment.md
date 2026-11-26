@@ -16,7 +16,26 @@ serving when the Controller is stopped.
 | `litellm-config.yaml` | LiteLLM model list and master key |
 | `.env.example` | Template for `.env` (secrets; `deploy/.gitignore` excludes it) |
 | `compose_test.go` | Contract test for the acceptance criteria below |
-| `../.dockerignore` | Keeps `.git` and `deploy/.env` out of the controller's build context |
+| `../.dockerignore` | Keeps `.git`, `deploy/.env` and `config.yaml` out of the controller's build context |
+| `../config.example.yaml` | Placeholder controller config; see [Configuration](../README.md#configuration) |
+
+## Controller configuration in containers
+
+The controller starts on built-in defaults and takes no config file here, so
+none is baked into the image. To change a setting, pass it as an environment
+variable and to inject a credential, mount it as a secret file:
+
+```yaml
+  quota-controller:
+    environment:
+      QUOTA_ROUTER_OBSERVABILITY__LEVEL: debug
+      QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY_FILE: /run/secrets/minimax_api_key
+    secrets:
+      - minimax_api_key
+```
+
+Secrets reach the container at runtime and never enter the image or the build
+context. `.env` is loaded by Compose for LiteLLM only; the controller ignores it.
 
 ## Prerequisites
 
@@ -173,8 +192,8 @@ the request path is **Python regardless of `LITELLM_RUST`**, because the route i
 Setting `LITELLM_RUST=true` adds Rust to Anthropic `messages`; that is untested
 here and should be measured before adoption.
 
-`Dockerfile.controller` builds against the `go 1.22.0` / `toolchain go1.24.0`
-directive in `go.mod` and pins `golang:1.24-alpine`.
+`Dockerfile.controller` builds against the `go 1.23.0` / `toolchain go1.24.0`
+directive in `go.mod` (koanf v2 requires 1.23) and pins `golang:1.24-alpine`.
 
 ## Backup and recovery
 

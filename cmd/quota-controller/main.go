@@ -14,25 +14,31 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	os.Exit(run(context.Background(), log))
+	level := new(slog.LevelVar)
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	os.Exit(run(context.Background(), log, level))
 }
 
-func run(ctx context.Context, log *slog.Logger) int {
+func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("configuration error", "error", err)
 		return 1
 	}
+	level.Set(cfg.Observability.SlogLevel())
 
-	srv := server.New(log)
+	return serve(ctx, log, cfg, server.New(log).Handler())
+}
+
+// serve runs the HTTP server until ctx is cancelled or the listener fails.
+func serve(ctx context.Context, log *slog.Logger, cfg config.Config, handler http.Handler) int {
 	httpServer := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-		ReadTimeout:       cfg.ReadTimeout,
-		WriteTimeout:      cfg.WriteTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
+		Addr:              cfg.Server.Addr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -40,7 +46,7 @@ func run(ctx context.Context, log *slog.Logger) int {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("http server starting", "addr", cfg.Addr)
+		log.Info("http server starting", "addr", cfg.Server.Addr)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -58,7 +64,7 @@ func run(ctx context.Context, log *slog.Logger) int {
 		return 0
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Error("graceful shutdown failed", "error", err)

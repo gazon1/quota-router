@@ -1,0 +1,7 @@
+# Local configuration and secrets. Tracked examples: config.example.yaml,
+# deploy/.env.example — placeholders only.
+.env
+config.yaml
+*.db
+*.db-wal
+*.db-shm
