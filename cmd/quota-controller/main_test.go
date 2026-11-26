@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,61 @@ func (b *synchronizedBuffer) Reset() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.buf.Reset()
+}
+
+// TestRunRefusesUnservedAlias is the acceptance criterion "validate aliases
+// against the LiteLLM configuration during startup": an alias the proxy does not
+// serve cannot work, so the controller must not start and serve.
+func TestRunRefusesUnservedAlias(t *testing.T) {
+	srv := modelList(t, http.StatusOK, `{"data":[{"id":"minimax/MiniMax-M3"}]}`)
+	t.Setenv("QUOTA_ROUTER_LITELLM__BASE_URL", srv.URL)
+	t.Setenv("QUOTA_ROUTER_LITELLM__API_KEY", "master-key")
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST__MODEL", "minimax/MiniMax-M2.7")
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", freeAddr(t))
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if code := run(context.Background(), log, new(slog.LevelVar)); code != 1 {
+		t.Fatalf("run() = %d, want 1 for an alias LiteLLM does not serve", code)
+	}
+}
+
+// TestRunServesWhileCatalogueUnavailable keeps the design rule from #6: the two
+// containers have no dependency edge, so a proxy that is not up yet must not
+// stop the controller.
+func TestRunServesWhileCatalogueUnavailable(t *testing.T) {
+	// Nothing listens here: a closed port is the "proxy not started yet" case.
+	closed := freeAddr(t)
+	t.Setenv("QUOTA_ROUTER_LITELLM__BASE_URL", "http://"+closed)
+	t.Setenv("QUOTA_ROUTER_LITELLM__API_KEY", "master-key")
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST__MODEL", "minimax/MiniMax-M2.7")
+
+	addr := freeAddr(t)
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() { done <- run(ctx, log, new(slog.LevelVar)) }()
+
+	waitForTCP(t, addr, 5*time.Second) // it started despite the unreachable proxy
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("run() = %d, want 0 when the catalogue is merely unavailable", code)
+	}
+}
+
+// modelList serves the given answer as LiteLLM's GET /v1/models.
+func modelList(t *testing.T, status int, body string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q, want /v1/models", r.URL.Path)
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func TestRunListenError(t *testing.T) {

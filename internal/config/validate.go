@@ -36,11 +36,37 @@ func (c Config) validate() error {
 	if err := checkURL(c.LiteLLM.BaseURL); err != nil {
 		errs = append(errs, fmt.Errorf("litellm.base_url: %w", err))
 	}
-	for alias, model := range c.LiteLLM.ModelAliases {
+	for alias, m := range c.LiteLLM.ModelAliases {
+		where := "litellm.model_aliases." + alias
 		if alias == "" {
 			errs = append(errs, errors.New("litellm.model_aliases must not contain an empty alias"))
-		} else if p, m, found := strings.Cut(model, "/"); !found || p == "" || m == "" {
-			errs = append(errs, fmt.Errorf("litellm.model_aliases.%s must be <provider>/<model>, got %q", alias, model))
+		} else if strings.ContainsAny(alias, "/ \t") {
+			// The alias is also an environment-variable segment and a routing key.
+			errs = append(errs, fmt.Errorf("litellm.model_aliases.%s must not contain a slash or whitespace", alias))
+		}
+		// The provider is the prefix of the model id, so one check covers both.
+		if _, name, found := strings.Cut(m.Model, "/"); m.Provider() == "" || !found || name == "" {
+			errs = append(errs, fmt.Errorf("%s.model must be <provider>/<model>, got %q", where, m.Model))
+		}
+		if m.ContextLimit < 0 {
+			errs = append(errs, fmt.Errorf("%s.context_limit must be >= 0 (0 means unverified), got %d", where, m.ContextLimit))
+		}
+		for name, cap := range map[string]Capability{
+			"streaming":         m.Capabilities.Streaming,
+			"tool_calling":      m.Capabilities.ToolCalling,
+			"structured_output": m.Capabilities.StructuredOutput,
+		} {
+			switch cap {
+			case CapabilityUnknown, CapabilitySupported, CapabilityUnsupported:
+			default:
+				errs = append(errs, fmt.Errorf("%s.capabilities.%s must be %q, %q or absent, got %q",
+					where, name, CapabilitySupported, CapabilityUnsupported, cap))
+			}
+		}
+		for _, task := range m.Tasks {
+			if strings.TrimSpace(task) == "" {
+				errs = append(errs, fmt.Errorf("%s.tasks must not contain an empty task class", where))
+			}
 		}
 	}
 
