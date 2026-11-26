@@ -294,9 +294,13 @@ def main() -> int:
             fields = {match.group(1)} if match else set()
         if fields & set(PLAN_CODES):
             return True
-        if str(error.get("type") or "") in ("permission_error", "insufficient_quota"):
-            # Command Code names the plan gate in the type and the message.
+        # A bare 403 permission_error is not a plan gate: Command Code names the
+        # plan in the type AND says so in the message, so require both.
+        kind = str(error.get("type") or "")
+        if kind == "insufficient_quota":
             return True
+        if kind == "permission_error":
+            return "PLAN" in str(error.get("message") or "").upper()
         message = str(error.get("message") or "")
         return any(marker in message for marker in DAILY_CAP_MARKERS)
 
@@ -408,7 +412,10 @@ def main() -> int:
         record("minimax_openai_chat_stream",
                call("POST", f"{MINIMAX_INFERENCE}/chat/completions", auth,
                     {**chat, "stream": True}, stream=True), allow_plan_exhausted=True,
-               need=("a terminated stream", has_stream))
+               # A stream carries no JSON body, so there is no base_resp to read:
+               # its business outcome is the error event and the assistant text.
+               need=("a [DONE]-terminated stream with assistant text and no error event",
+                     has_stream))
         record("minimax_anthropic_messages",
                call("POST", f"{MINIMAX_ANTHROPIC}/v1/messages",
                     {"x-api-key": mm_key, "anthropic-version": "2023-06-01"},
@@ -435,7 +442,20 @@ def main() -> int:
     if cc_key:
         auth = {"Authorization": f"Bearer {cc_key}"}
         catalog = call("GET", f"{COMMANDCODE_BASE}/models", auth, timeout=45)
-        record("commandcode_models", catalog, expect=200)
+        def catalogue_ok(body) -> bool:
+            """Configured models present, each advertises the endpoint we route to."""
+            listed = {m.get("id"): m.get("supported_endpoints") or [] for m in body.get("data") or []}
+            # CC_ANTHROPIC_MODEL and the proxy's model_name name the same upstream
+            # id: the proxy prefix is ours, not the provider's.
+            wanted = {
+                CC_OPENAI_MODEL: "/chat/completions",
+                CC_OPENAI_MODEL_2: "/chat/completions",
+                CC_ANTHROPIC_MODEL: "/messages",
+            }
+            return all(endpoint in listed.get(model, []) for model, endpoint in wanted.items())
+
+        record("commandcode_models", catalog, expect=200,
+               need=("the configured models with their advertised endpoints", catalogue_ok))
         endpoints = {}
         if catalog.get("ok"):
             for m in catalog["body"].get("data", []):
@@ -574,11 +594,20 @@ def main() -> int:
                 write(name)
                 codes.append(results[name].get("status"))
             bodies = [json.dumps(results[f"litellm_invalid_repeat_{i}"].get("body", {})) for i in (1, 2, 3)]
+            problems = []
             if any("cooldown" in b for b in bodies):
-                failures.append("litellm-invalid: a cooldown error masked the provider's rejection")
+                problems.append("a cooldown error masked the provider's rejection")
             if codes != [401, 401, 401]:
-                failures.append(f"litellm-invalid: repeated rejected-key attempts returned {codes}, "
+                problems.append(f"repeated rejected-key attempts returned {codes}, "
                                 "expected 401 every time (a 429 means cooldowns are masking it)")
+            if problems:
+                failures.extend(f"litellm-invalid: {m}" for m in problems)
+                # The fixtures are the committed evidence: they must not read as
+                # verified when the assertion over them failed.
+                for i in (1, 2, 3):
+                    name = f"litellm_invalid_repeat_{i}"
+                    results[name]["verdict"] = "FAILED"
+                    write(name)
             print("litellm rejected-key statuses:", codes)
 
     if args.cancellation and cc_key:

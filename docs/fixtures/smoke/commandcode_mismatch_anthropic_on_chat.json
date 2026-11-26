@@ -3,7 +3,7 @@
   "response": {
     "ok": false,
     "status": 400,
-    "elapsed_ms": 512,
+    "elapsed_ms": 1183,
     "body": {
       "error": {
         "message": "Model \"claude-sonnet-5\" must be called via /provider/v1/messages (Anthropic Messages shape).",

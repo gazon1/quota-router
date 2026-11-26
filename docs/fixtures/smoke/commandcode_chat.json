@@ -3,11 +3,11 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 4010,
+    "elapsed_ms": 3138,
     "body": {
       "id": "***REDACTED***",
       "object": "chat.completion",
-      "created": 1795709507,
+      "created": 1795709865,
       "model": "stealth/glyph-cluster:free",
       "choices": [
         {

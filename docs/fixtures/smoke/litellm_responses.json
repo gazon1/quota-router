@@ -3,10 +3,10 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 8183,
+    "elapsed_ms": 8090,
     "body": {
       "id": "***REDACTED***",
-      "created_at": 1795709539,
+      "created_at": 1795709897,
       "error": null,
       "incomplete_details": null,
       "metadata": {},
@@ -45,14 +45,14 @@
       "usage": {
         "input_tokens": 143,
         "input_tokens_details": "***REDACTED***",
-        "output_tokens": 268,
+        "output_tokens": 240,
         "output_tokens_details": "***REDACTED***",
-        "total_tokens": 411,
+        "total_tokens": 383,
         "cost": null
       },
       "user": null,
       "store": false,
-      "completed_at": 1795709539,
+      "completed_at": 1795709897,
       "presence_penalty": 0,
       "frequency_penalty": 0,
       "top_logprobs": 0,

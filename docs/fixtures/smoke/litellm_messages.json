@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 3380,
+    "elapsed_ms": 2616,
     "body": {
       "id": "***REDACTED***",
       "type": "message",
@@ -12,14 +12,14 @@
       "content": [
         {
           "type": "text",
-          "text": ""
+          "text": "pong"
         }
       ],
-      "stop_reason": "max_tokens",
+      "stop_reason": "end_turn",
       "stop_sequence": null,
       "usage": {
         "input_tokens": 36,
-        "output_tokens": 16,
+        "output_tokens": 15,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
       }

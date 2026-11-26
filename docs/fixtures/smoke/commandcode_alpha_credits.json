@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1338,
+    "elapsed_ms": 1199,
     "body": {
       "credits": {
         "belowThreshold": "bool",

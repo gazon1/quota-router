@@ -3,13 +3,13 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 3114,
+    "elapsed_ms": 2863,
     "body": {
       "id": "***REDACTED***",
       "object": "response",
-      "created_at": 1795709514,
+      "created_at": 1795709873,
       "status": "completed",
-      "completed_at": 1795709514,
+      "completed_at": 1795709873,
       "incomplete_details": null,
       "error": null,
       "output": [

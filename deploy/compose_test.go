@@ -213,6 +213,16 @@ func TestLiteLLMConfigContract(t *testing.T) {
 	if len(cfg.models) != len(want) {
 		t.Errorf("litellm-config.yaml: %d models configured, expected %d", len(cfg.models), len(want))
 	}
+	// A duplicate would otherwise pay for a missing model in the count check.
+	seen := map[string]int{}
+	for _, m := range cfg.models {
+		seen[m.name]++
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("litellm-config.yaml: model %q is configured %d times", name, n)
+		}
+	}
 	for _, m := range cfg.models {
 		want, ok := want[m.name]
 		if !ok {

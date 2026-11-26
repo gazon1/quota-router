@@ -64,6 +64,20 @@ Verdict: **REQUEST CHANGES**, no BLOCKING findings, 5 items to close.
 Role A also confirmed as fixed: the Go contract test (both prior defects), the
 `/alpha` billing figures, and the rejected-upstream-key test.
 
+## Round 4 — head `75a215e`
+
+Verdict: **REQUEST CHANGES**, no BLOCKING findings, 5 targeted items. Role A also
+re-audited the config and found no incorrect provider prefix, base URL or leaked
+credential, and confirmed the round-3 reasoning exposure is gone.
+
+| Finding | Resolution |
+|---|---|
+| Streaming checked without a business status | fixed — a stream has no JSON body, so its business outcome is the error event and the assistant text; the case now asserts both and says which it checks |
+| External assertions left fixtures `VERIFIED` while the run failed | fixed — the cooldown assertion now writes `verdict: FAILED` into all three fixtures it judges |
+| Plan-refusal classification accepted any `permission_error` | fixed — a `permission_error` must name the plan; a bare 403 is a failure |
+| A duplicate model could offset a missing one in the count check | fixed — each configured model must appear exactly once; mutation-checked |
+| The catalogue was never asserted, only fetched | fixed — every configured model must be listed with the endpoint the config routes to; verified it fails when a model or an endpoint is removed |
+
 ## What the reviews did not change
 
 Both roles accepted several decisions as intended rather than defective, and they

@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 2561,
+    "elapsed_ms": 2205,
     "body": {
       "id": "***REDACTED***",
       "type": "message",

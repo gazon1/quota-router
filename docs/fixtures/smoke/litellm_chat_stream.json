@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 2374,
+    "elapsed_ms": 2273,
     "events": [
       "data: <chunk>",
       "data: <chunk>",
