@@ -22,6 +22,29 @@ func TestRunConfigError(t *testing.T) {
 	}
 }
 
+func TestRunAppliesConfiguredLogLevel(t *testing.T) {
+	addr := freeAddr(t)
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
+	t.Setenv("QUOTA_ROUTER_OBSERVABILITY__LEVEL", "debug")
+
+	level := new(slog.LevelVar)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() {
+		done <- run(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), level)
+	}()
+
+	// The level is set right after config.Load, before the listener starts.
+	waitForTCP(t, addr, 2*time.Second)
+	if level.Level() != slog.LevelDebug {
+		t.Fatalf("level = %s, want debug from the configuration", level.Level())
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+}
+
 func TestRunListenError(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
