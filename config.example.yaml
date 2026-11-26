@@ -40,7 +40,14 @@ routing:
 
 sqlite:
   path: quota-router.db
+  # How long to wait for another writer before reporting a busy database.
   busy_timeout: 5s
+  # History kept locally. 0 keeps a table forever. The newest snapshot and
+  # health row per provider always survive, because routing reads them.
+  retention:
+    quota_snapshots: 720h   # 30 days
+    provider_health: 720h   # 30 days
+    usage_records: 2160h    # 90 days
 
 auth:
   # Bearer token for the controller's own HTTP API (issues #18, #36).

@@ -271,6 +271,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{"empty sqlite path", func(t *testing.T) {
 			t.Setenv(ConfigFileEnv, writeConfig(t, "sqlite:\n  path: \"\""))
 		}, "sqlite.path must not be empty"},
+		{"negative usage retention", setEnv("QUOTA_ROUTER_SQLITE__RETENTION__USAGE_RECORDS", "-1h"), "sqlite.retention.usage_records must be >= 0"},
 		{"unknown log level", setEnv("QUOTA_ROUTER_OBSERVABILITY__LEVEL", "verbose"), "observability.level"},
 	}
 	for _, tt := range tests {

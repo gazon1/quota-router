@@ -205,12 +205,14 @@ directive in `go.mod` (koanf v2 requires 1.23) and pins `golang:1.24-alpine`.
 
 ## Backup and recovery
 
-There is nothing to back up yet: no database is configured for LiteLLM, and the
-controller has no persisted state (no volume is mounted). Recovering the stack
+The only stateful data is the controller's SQLite database, in the
+`controller-db` named volume. LiteLLM has no database here. Recovering the stack
 means pulling the pinned LiteLLM image, rebuilding the controller from this
-checkout, and restoring `.env` — there is no data to restore. When SQLite
-persistence lands (issue #12), add a named volume for the controller and a real
-backup step here.
+checkout, restoring `.env`, and restoring the database volume.
+
+Back up with `VACUUM INTO` — a plain copy of the file misses rows still in
+`-wal`. The full procedure, the sidecar rules and the restore steps are in
+[storage.md](./storage.md#backup-and-restore).
 
 ## Known gaps
 

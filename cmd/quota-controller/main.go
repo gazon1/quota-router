@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/server"
+	"github.com/gazon1/quota-router/internal/store"
 )
 
 func main() {
@@ -33,7 +35,45 @@ func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 	}
 	level.Set(cfg.Observability.SlogLevel())
 
+	st, err := store.Open(store.Config{Path: cfg.SQLite.Path, BusyTimeout: cfg.SQLite.BusyTimeout}, log)
+	if err != nil {
+		log.Error("storage unavailable", "error", err)
+		return 1
+	}
+	defer st.Close()
+
+	// Migrations and cleanup finish before the listener starts: a database this
+	// build cannot migrate must fail startup, not serve with a stale schema.
+	if err := st.Migrate(ctx); err != nil {
+		log.Error("database migration failed", "error", err)
+		return 1
+	}
+	if err := prune(ctx, log, st, cfg.SQLite.Retention); err != nil {
+		log.Error("retention cleanup failed", "error", err)
+		return 1
+	}
+
 	return serve(ctx, log, cfg, server.New(log).Handler())
+}
+
+// prune applies the configured retention bounds. A failure is fatal at startup:
+// a full disk is exactly what cleanup exists to avoid, and continuing would hit
+// the write path with a database that cannot grow.
+func prune(ctx context.Context, log *slog.Logger, st *store.Store, r config.Retention) error {
+	deleted, err := st.Prune(ctx, store.Retention{
+		QuotaSnapshots: r.QuotaSnapshots,
+		ProviderHealth: r.ProviderHealth,
+		UsageRecords:   r.UsageRecords,
+	}, time.Now())
+	if err != nil {
+		return err
+	}
+	for table, n := range deleted {
+		if n > 0 {
+			log.Info("retention removed rows", "table", table, "rows", n)
+		}
+	}
+	return nil
 }
 
 // serve runs the HTTP server until ctx is cancelled or the listener fails.

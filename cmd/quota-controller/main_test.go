@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,19 @@ import (
 
 	"github.com/gazon1/quota-router/internal/config"
 )
+
+// TestMain keeps every test database inside a temporary directory: run() opens
+// the configured SQLite path, and the default would litter the package.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "quota-controller-test-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("QUOTA_ROUTER_SQLITE__PATH", filepath.Join(dir, "test.db"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func TestRunConfigError(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__READ_TIMEOUT", "bad")

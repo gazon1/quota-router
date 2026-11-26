@@ -64,6 +64,17 @@ func (c Config) validate() error {
 
 	check(c.SQLite.Path != "", "sqlite.path must not be empty")
 	check(c.SQLite.BusyTimeout > 0, "sqlite.busy_timeout must be > 0, got %s", c.SQLite.BusyTimeout)
+	// Zero disables pruning for that table; a negative value is a typo.
+	for _, d := range []struct {
+		name string
+		v    time.Duration
+	}{
+		{"quota_snapshots", c.SQLite.Retention.QuotaSnapshots},
+		{"provider_health", c.SQLite.Retention.ProviderHealth},
+		{"usage_records", c.SQLite.Retention.UsageRecords},
+	} {
+		check(d.v >= 0, "sqlite.retention.%s must be >= 0 (0 keeps everything), got %s", d.name, d.v)
+	}
 
 	switch c.Observability.Level {
 	case "debug", "info", "warn", "error":
