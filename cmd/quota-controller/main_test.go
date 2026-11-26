@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,13 +15,81 @@ import (
 )
 
 func TestRunConfigError(t *testing.T) {
-	t.Setenv("QUOTA_ROUTER_READ_TIMEOUT", "bad")
+	t.Setenv("QUOTA_ROUTER_SERVER__READ_TIMEOUT", "bad")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	code := run(context.Background(), log)
+	code := run(context.Background(), log, new(slog.LevelVar))
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1", code)
 	}
+}
+
+func TestRunAppliesConfiguredLogLevel(t *testing.T) {
+	addr := freeAddr(t)
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
+	t.Setenv("QUOTA_ROUTER_OBSERVABILITY__LEVEL", "error")
+
+	// The production constructor, so a change to main's wiring fails here.
+	level := new(slog.LevelVar)
+	level.Set(slog.LevelDebug) // the handler must honour the LevelVar
+	var buf synchronizedBuffer
+	log := newLogger(&buf, level)
+
+	log.Debug("before")
+	if !strings.Contains(buf.String(), "before") {
+		t.Fatal("the handler does not follow the LevelVar at all")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() {
+		done <- run(ctx, log, level)
+	}()
+
+	// The level is set right after config.Load, before the listener starts.
+	waitForTCP(t, addr, 2*time.Second)
+	if level.Level() != slog.LevelError {
+		t.Fatalf("level = %s, want error from the configuration", level.Level())
+	}
+
+	buf.Reset()
+	log.Debug("still dropped")
+	log.Error("kept")
+	got := buf.String()
+	if strings.Contains(got, "still dropped") {
+		t.Fatalf("the handler ignored the configured level: %q", got)
+	}
+	if !strings.Contains(got, "kept") {
+		t.Fatalf("the error record was dropped too, got %q", got)
+	}
+	cancel()
+	if code := <-done; code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+}
+
+// synchronizedBuffer is a bytes.Buffer safe for the server goroutine's writes.
+type synchronizedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func (b *synchronizedBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 func TestRunListenError(t *testing.T) {
@@ -30,10 +99,10 @@ func TestRunListenError(t *testing.T) {
 	}
 	defer ln.Close()
 
-	t.Setenv("QUOTA_ROUTER_ADDR", ln.Addr().String())
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", ln.Addr().String())
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	code := run(context.Background(), log)
+	code := run(context.Background(), log, new(slog.LevelVar))
 	if code != 1 {
 		t.Fatalf("run() = %d, want 1", code)
 	}
@@ -41,8 +110,8 @@ func TestRunListenError(t *testing.T) {
 
 func TestRunGracefulShutdownOnCancel(t *testing.T) {
 	addr := freeAddr(t)
-	t.Setenv("QUOTA_ROUTER_ADDR", addr)
-	t.Setenv("QUOTA_ROUTER_SHUTDOWN_TIMEOUT", "2s")
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
+	t.Setenv("QUOTA_ROUTER_SERVER__SHUTDOWN_TIMEOUT", "2s")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -50,7 +119,7 @@ func TestRunGracefulShutdownOnCancel(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	done := make(chan int, 1)
 	go func() {
-		done <- run(ctx, log)
+		done <- run(ctx, log, new(slog.LevelVar))
 	}()
 
 	waitForHTTP(t, "http://"+addr+"/health", 2*time.Second)
@@ -68,8 +137,8 @@ func TestRunGracefulShutdownOnCancel(t *testing.T) {
 
 func TestRunShutdownTimeout(t *testing.T) {
 	addr := freeAddr(t)
-	t.Setenv("QUOTA_ROUTER_ADDR", addr)
-	t.Setenv("QUOTA_ROUTER_SHUTDOWN_TIMEOUT", "50ms")
+	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", addr)
+	t.Setenv("QUOTA_ROUTER_SERVER__SHUTDOWN_TIMEOUT", "50ms")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -133,50 +202,15 @@ func TestRunShutdownTimeout(t *testing.T) {
 	}
 }
 
+// runWithHandler serves with a test handler instead of the /health-only one.
 func runWithHandler(ctx context.Context, log *slog.Logger, handler http.Handler) int {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("configuration error", "error", err)
 		return 1
 	}
-
-	httpServer := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           handler,
-		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-		ReadTimeout:       cfg.ReadTimeout,
-		WriteTimeout:      cfg.WriteTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-		close(errCh)
-	}()
-
-	select {
-	case <-ctx.Done():
-	case err := <-errCh:
-		if err != nil {
-			log.Error("http server failed", "error", err)
-			return 1
-		}
-		return 0
-	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Error("graceful shutdown failed", "error", err)
-		return 1
-	}
-	return 0
+	return serve(ctx, log, cfg, handler)
 }
-
-var _ = config.Load // keep config import used in build tag variations.
 
 func freeAddr(t *testing.T) string {
 	t.Helper()

@@ -174,3 +174,33 @@ func publishedPorts(block string) []string {
 	}
 	return ports
 }
+
+// TestDockerignoreExcludesSecrets guards the controller's build context: the
+// Dockerfile runs COPY . . from the repository root, so an unignored .env or
+// config.yaml would reach the builder and its layer cache.
+func TestDockerignoreExcludesSecrets(t *testing.T) {
+	raw, err := os.ReadFile("../.dockerignore")
+	if err != nil {
+		t.Fatalf("read ../.dockerignore: %v", err)
+	}
+	var patterns []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			patterns = append(patterns, line)
+		}
+	}
+
+	// Docker matches a pattern from any path segment, so ".env" covers both
+	// the root file and deploy/.env; "deploy/.env" alone would not.
+	for _, want := range []string{".env", "config.yaml", "*.db"} {
+		ok := false
+		for _, p := range patterns {
+			if p == want {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Errorf(".dockerignore does not exclude %q; the controller's build context would carry it", want)
+		}
+	}
+}

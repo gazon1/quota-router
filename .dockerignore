@@ -1,4 +1,15 @@
 .git
 # Compose loads deploy/.env into the containers; the controller's build context
 # is the repository root, so it must not reach the builder or its layer cache.
+# `.env` matches both a root-level and a nested .env (`**/.env` is not needed:
+# Docker's pattern matches any path segment).
+.env
 deploy/.env
+# Local config carries credentials; the image must build from the checkout
+# alone, so it never sees real values.
+config.yaml
+*.db
+*.db-wal
+*.db-shm
+# Run output and review reports, not part of the build.
+build/
