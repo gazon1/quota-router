@@ -1,0 +1,34 @@
+{
+  "case": "commandcode_alpha_subscriptions",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 779,
+    "body": {
+      "success": true,
+      "data": {
+        "id": "***REDACTED***",
+        "status": "active",
+        "userId": "***REDACTED***",
+        "orgId": null,
+        "createdAt": "2026-10-25T22:09:01.000Z",
+        "priceId": "***REDACTED***",
+        "metadata": {
+          "fbp": "***REDACTED***",
+          "commandCode": "true",
+          "commandCodeUserId": "***REDACTED***"
+        },
+        "quantity": 1,
+        "cancelAtPeriodEnd": false,
+        "currentPeriodStart": "2026-11-25T22:09:01.000Z",
+        "currentPeriodEnd": "2026-12-25T22:09:01.000Z",
+        "endedAt": null,
+        "cancelAt": null,
+        "canceledAt": null,
+        "planId": "***REDACTED***",
+        "pendingPhase": null,
+        "renewalPending": null
+      }
+    }
+  }
+}

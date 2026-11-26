@@ -1,0 +1,16 @@
+{
+  "case": "litellm_no_auth",
+  "response": {
+    "ok": false,
+    "status": 401,
+    "elapsed_ms": 24,
+    "body": {
+      "error": {
+        "message": "Authentication Error, No api key passed in.",
+        "type": "auth_error",
+        "param": null,
+        "code": "401"
+      }
+    }
+  }
+}

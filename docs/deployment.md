@@ -62,12 +62,12 @@ cd deploy
 test -f .env || install -m 600 .env.example .env   # only on first setup
 grep -q '^LITELLM_MASTER_KEY=.\+' .env || \
   sed -i "s/^LITELLM_MASTER_KEY=/LITELLM_MASTER_KEY=$(openssl rand -hex 24)/" .env
-$EDITOR .env                            # set MINIMAX_API_KEY (and keep the master key)
+$EDITOR .env                            # set MINIMAX_TOKEN_PLAN_KEY and COMMAND_CODE_API_KEY
 docker compose up -d --build --wait
 ```
 
 Both commands are idempotent on purpose: re-running setup must not overwrite an
-existing `.env`. A plain copy would blank `MINIMAX_API_KEY` and rotate the master
+existing `.env`. A plain copy would blank the provider keys and rotate the master
 key, breaking every client that already holds it.
 
 `LITELLM_MASTER_KEY` must not be empty: LiteLLM refuses to start without it
@@ -217,5 +217,8 @@ backup step here.
 - The controller has no API beyond `GET /health`, so the stack proves
   independence, health checks and limits but routes no traffic through the
   controller yet.
-- Single model configured (`MiniMax-M3.1-Flash`); quota polling and routing
-  (issues #10, #13) are not wired.
+- Three models configured: MiniMax `MiniMax-M3.1-Flash` and two Command Code
+  models. Quota polling and routing (issues #10, #13) are not wired.
+- Command Code subscription quota is read from undocumented `/alpha` routes and
+  is `UNKNOWN` as a supported contract; see
+  [docs/litellm-provider-compatibility.md](./litellm-provider-compatibility.md).

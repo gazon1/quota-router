@@ -1,0 +1,16 @@
+{
+  "case": "litellm_repeat_2",
+  "response": {
+    "ok": false,
+    "status": 429,
+    "elapsed_ms": 724,
+    "body": {
+      "error": {
+        "message": "litellm.RateLimitError: RateLimitError: OpenAIException - Token Plan usage limit reached: Upgrade your Token Plan or purchase Credits for more usage. (2056)\n\nLiteLLM: model group 'minimax/MiniMax-M3.1-Flash' failed with the error above. No fallback was attempted.",
+        "type": "throttling_error",
+        "param": null,
+        "code": "429"
+      }
+    }
+  }
+}

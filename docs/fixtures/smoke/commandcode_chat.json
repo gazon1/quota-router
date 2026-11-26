@@ -1,0 +1,36 @@
+{
+  "case": "commandcode_chat",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 1686,
+    "body": {
+      "id": "***REDACTED***",
+      "object": "chat.completion",
+      "created": 1795706350,
+      "model": "gpt-5.6-sol",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "pong",
+            "phase": "final_answer"
+          },
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 11,
+        "completion_tokens": 5,
+        "total_tokens": 16,
+        "prompt_tokens_details": "***REDACTED***",
+        "completion_tokens_details": "***REDACTED***",
+        "cache_creation_input_tokens": 0
+      },
+      "system_fingerprint": "fp_uvvibcgnk7",
+      "service_tier": "default"
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "case": "minimax_openai_models",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 730,
+    "body": {
+      "object": "list",
+      "data": [
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1789556118,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1780272000,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1773799200,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1773799200,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1770948000,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1770948000,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1766455200,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1766455200,
+          "owned_by": "minimax"
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1761530400,
+          "owned_by": "minimax"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "case": "litellm_chat",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 1948,
+    "body": {
+      "id": "***REDACTED***",
+      "created": 1795706364,
+      "model": "commandcode/gpt-5.6-sol",
+      "object": "chat.completion",
+      "system_fingerprint": "fp_uk3dxeo2j9",
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "pong",
+            "role": "assistant",
+            "provider_specific_fields": {
+              "phase": "final_answer"
+            }
+          },
+          "provider_specific_fields": {},
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "completion_tokens": 5,
+        "prompt_tokens": 11,
+        "total_tokens": 16,
+        "completion_tokens_details": "***REDACTED***",
+        "prompt_tokens_details": "***REDACTED***",
+        "cache_creation_input_tokens": 0
+      },
+      "service_tier": "default"
+    }
+  }
+}

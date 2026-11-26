@@ -1,0 +1,15 @@
+{
+  "case": "litellm_chat_stream",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 1740,
+    "events": [
+      "data: <chunk>",
+      "data: <chunk>",
+      "data: <chunk>",
+      "data: [DONE]"
+    ],
+    "final_usage": null
+  }
+}

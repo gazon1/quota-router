@@ -1,0 +1,22 @@
+{
+  "case": "commandcode_chat_stream",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 1806,
+    "events": [
+      "data: <chunk>",
+      "data: <chunk>",
+      "data: <chunk>",
+      "data: [DONE]"
+    ],
+    "final_usage": {
+      "prompt_tokens": 11,
+      "completion_tokens": 5,
+      "total_tokens": 16,
+      "prompt_tokens_details": "***REDACTED***",
+      "completion_tokens_details": "***REDACTED***",
+      "cache_creation_input_tokens": 0
+    }
+  }
+}

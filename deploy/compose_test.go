@@ -175,6 +175,81 @@ func publishedPorts(block string) []string {
 	return ports
 }
 
+// TestLiteLLMConfigContract guards the provider wiring verified in issue #8.
+// Each assertion encodes a failure measured against the pinned image, so a
+// regression fails here instead of surfacing as a confusing runtime error.
+func TestLiteLLMConfigContract(t *testing.T) {
+	raw, err := os.ReadFile("litellm-config.yaml")
+	if err != nil {
+		t.Fatalf("read litellm-config.yaml: %v", err)
+	}
+	doc := stripComments(string(raw))
+
+	// LiteLLM resolves a request by model_name, so a bare alias is an unknown
+	// model: `/v1/models` lists it, but POSTing it returns 400.
+	if !strings.Contains(doc, "model_name: minimax/MiniMax-M3.1-Flash") {
+		t.Error("litellm-config.yaml: minimax model_name must be minimax/MiniMax-M3.1-Flash")
+	}
+	// Verified: without disable_cooldowns, one rejected key marks the deployment
+	// unhealthy and the next request answers 429, which reads as rate limiting.
+	if !strings.Contains(doc, "disable_cooldowns: true") {
+		t.Error("litellm-config.yaml: disable_cooldowns must be true or a 401 resurfaces as a 429")
+	}
+	// Verified: LiteLLM appends /v1/messages to an anthropic api_base, so a
+	// trailing /v1 produces .../v1/v1/messages and a 404.
+	for _, block := range strings.Split(doc, "- model_name:")[1:] {
+		if !strings.Contains(block, "model: anthropic/") {
+			continue
+		}
+		var base string
+		for _, line := range strings.Split(block, "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "api_base: "); ok {
+				base = v
+			}
+		}
+		if strings.HasSuffix(base, "/v1") {
+			t.Errorf("litellm-config.yaml: anthropic api_base %q must not end in /v1", base)
+		}
+	}
+	// Inference and quota are different hosts. A quota host used as api_base
+	// would make every model request a quota lookup.
+	if strings.Contains(doc, "www.minimax.io") {
+		t.Error("litellm-config.yaml: api_base must use the inference host api.minimax.io, not the quota host www.minimax.io")
+	}
+	// Every credential is injected, never committed.
+	if strings.Contains(doc, "sk-") {
+		t.Error("litellm-config.yaml: a literal credential is committed; use os.environ/")
+	}
+}
+
+// TestEnvExampleCoversConfig reads the variables litellm-config.yaml injects and
+// requires each to be declared in .env.example, so setup cannot miss one.
+func TestEnvExampleCoversConfig(t *testing.T) {
+	cfg, err := os.ReadFile("litellm-config.yaml")
+	if err != nil {
+		t.Fatalf("read litellm-config.yaml: %v", err)
+	}
+	env, err := os.ReadFile(".env.example")
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, line := range strings.Split(string(env), "\n") {
+		if name, _, ok := strings.Cut(strings.TrimSpace(line), "="); ok && !strings.HasPrefix(name, "#") {
+			declared[name] = true
+		}
+	}
+	for _, line := range strings.Split(string(cfg), "\n") {
+		name, ok := strings.CutPrefix(strings.TrimSpace(line), "api_key: os.environ/")
+		if !ok {
+			continue
+		}
+		if !declared[name] {
+			t.Errorf(".env.example does not declare %q, which litellm-config.yaml requires", name)
+		}
+	}
+}
+
 // TestDockerignoreExcludesSecrets guards the controller's build context: the
 // Dockerfile runs COPY . . from the repository root, so an unignored .env or
 // config.yaml would reach the builder and its layer cache.

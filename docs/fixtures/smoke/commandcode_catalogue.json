@@ -1,0 +1,13 @@
+{
+  "case": "commandcode_catalogue",
+  "models": [
+    {
+      "id": "***REDACTED***",
+      "context_length": null,
+      "supported_endpoints": [
+        "/chat/completions",
+        "/responses"
+      ]
+    }
+  ]
+}

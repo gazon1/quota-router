@@ -1,0 +1,36 @@
+{
+  "case": "litellm_models",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 104,
+    "body": {
+      "data": [
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1677610602,
+          "owned_by": "openai",
+          "mode": "chat",
+          "max_input_tokens": 1000000
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1677610602,
+          "owned_by": "openai",
+          "mode": "chat",
+          "max_input_tokens": 1050000,
+          "max_output_tokens": 1050000
+        },
+        {
+          "id": "***REDACTED***",
+          "object": "model",
+          "created": 1677610602,
+          "owned_by": "openai"
+        }
+      ],
+      "object": "list"
+    }
+  }
+}
