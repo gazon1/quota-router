@@ -18,6 +18,16 @@ serving when the Controller is stopped.
 | `compose_test.go` | Contract test for the acceptance criteria below |
 | `../.dockerignore` | Keeps `.git` and `deploy/.env` out of the controller's build context |
 
+## Prerequisites
+
+Docker Engine **28.0.0 or newer**. Docker documents that in releases older than
+28.0.0, hosts on the same L2 segment can reach ports published to localhost — so
+the `127.0.0.1:4000:4000` binding in `compose.yaml` is only loopback-only on 28+.
+See [port publishing](https://docs.docker.com/engine/network/port-publishing/)
+and [moby/moby#45610](https://github.com/moby/moby/issues/45610). On an older
+Engine, do not rely on the binding: keep the host off untrusted networks or add a
+host firewall rule that drops inbound `tcp/4000`.
+
 ## Setup
 
 ```sh

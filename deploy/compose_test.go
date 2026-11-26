@@ -46,8 +46,10 @@ func TestComposeContract(t *testing.T) {
 		}
 	}
 
-	if strings.Contains(stripComments(doc), "depends_on") {
-		t.Error("compose.yaml: a depends_on edge exists; LiteLLM must start with the controller down")
+	// Issue #6 forbids one edge specifically: LiteLLM must not wait on the
+	// controller. Other edges (a future database) stay legal.
+	if dep := dependsOn(services["litellm"]); strings.Contains(dep, "quota-controller") {
+		t.Errorf("compose.yaml: litellm depends_on %q; it must start with the controller down", dep)
 	}
 	if strings.Contains(stripComments(doc), ":latest") || strings.Contains(stripComments(doc), ":stable") {
 		t.Error("compose.yaml: floating image tag (:latest or :stable)")
@@ -58,8 +60,8 @@ func TestComposeContract(t *testing.T) {
 	if !digest.MatchString(services["litellm"]) {
 		t.Error("compose.yaml: litellm image is not pinned by a full v1.110.0 tag@sha256:<64 hex> digest")
 	}
-	if !strings.Contains(services["litellm"], `"127.0.0.1:4000:4000"`) {
-		t.Error("compose.yaml: litellm port is not bound to localhost")
+	if got := publishedPorts(services["litellm"]); len(got) != 1 || got[0] != "127.0.0.1:4000:4000" {
+		t.Errorf("compose.yaml: litellm must publish exactly 127.0.0.1:4000:4000, got %v", got)
 	}
 	// The controller must not publish a host port at all.
 	if strings.Contains(services["quota-controller"], "ports:") {
@@ -120,4 +122,39 @@ func serviceBlocks(doc string) (map[string]string, bool) {
 	}
 	flush()
 	return blocks, sawServices
+}
+
+// dependsOn returns the services the block depends on, space-joined, or "".
+func dependsOn(block string) string {
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "depends_on:") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(line, "depends_on:"))
+		v = strings.Trim(v, "[]")
+		return strings.Join(strings.Split(v, ","), " ")
+	}
+	return ""
+}
+
+// publishedPorts returns the port mappings of a block, in file order.
+func publishedPorts(block string) []string {
+	var ports []string
+	in := false
+	for _, line := range strings.Split(block, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "ports:" {
+			in = true
+			continue
+		}
+		if !in {
+			continue
+		}
+		if !strings.HasPrefix(trimmed, "- ") {
+			break
+		}
+		ports = append(ports, strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")), `"'`))
+	}
+	return ports
 }
