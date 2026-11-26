@@ -43,6 +43,27 @@ next model resume *after* an executed tool instead of at it.
 - `ToolCompleted` and `ToolFailed` both mean the call ran. A failed call replayed
   is a second side effect, so it travels with the checkpoint, not through a retry.
 
+### The boundary is enforced, not promised
+
+The repository already enforces its trust boundaries in code rather than in
+comments: `quota.Failed` replaces an undeclared reason with a safe code instead of
+storing a raw provider error. The checkpoint does the same.
+
+| Entry | Enforced by |
+|---|---|
+| a completed result | `CompletedResult` truncates past `maxResultRunes` (4096 runes, marker included) — a file dump is not a result |
+| a failed result | `FailedResult` stores one of `TOOL_ERROR`, `DENIED`, `TIMEOUT`, `OUTCOME_UNKNOWN`; an undeclared value becomes `TOOL_ERROR` |
+| a planned call | `PlannedResult`, which carries no result |
+| the whole checkpoint | `Validate()` before it leaves for another model — it refuses an undeclared status or failure, raw error text in a failed result, a result on a call that never started, an over-long result and a nameless call |
+
+`TOOL_ERROR` replaces the raw error on purpose: a provider error can carry a
+credential in a URL or a header, and the next model would print it. The text stays
+in the caller's own logs. `Validate` is the last gate — a checkpoint that skipped
+the builders is refused rather than sent.
+
+`OUTCOME_UNKNOWN` counts as executed: a call whose reply never arrived may have
+run, and a retry could repeat its side effect.
+
 ## Rebuild and budget
 
 `Migration` names the model, the rebuild and its estimated input tokens.
@@ -59,7 +80,11 @@ rebuild. Over the budget, no migration happens.
 
 ## What the contract does not do
 
-It holds no provider client, no tokenizer and no store. Estimating `InputTokens`
-and tallying what was actually charged to the failed route is
-[#23](https://github.com/gazon1/quota-router/issues/23) work; this package only
-makes the decision refusable when the cost is not accountable.
+It holds no provider client, no tokenizer and no store. `Migration.InputTokens`
+is the caller's estimate, so `Allowed` can only compare an estimate with a budget:
+it cannot tell whether the estimate describes the rebuild it is attached to, and
+it cannot see what the failed route was actually charged. A caller that reuses a
+checkpoint-sized estimate for a full replay passes the budget. Real token
+accounting — what was charged, and therefore what a rebuild really costs — is
+[#23](https://github.com/gazon1/quota-router/issues/23); this package only makes
+the decision refusable when no cost is accountable at all.

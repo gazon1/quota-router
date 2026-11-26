@@ -56,8 +56,10 @@ Three details worth knowing before using the model:
 [internal/turn](./internal/turn) is where one model's turn ends and another may
 start: a stopped attempt is `SURFACE`d, never retried, unless it was
 `NOT_DISPATCHED`; executed tool results travel in a `Checkpoint` across the
-boundary; and a migration is refused without an estimated input-token cost within
-a configured budget. See [docs/turn-boundary-migration.md](./docs/turn-boundary-migration.md)
+boundary, built through `CompletedResult`/`FailedResult` so a raw error or a
+whole file cannot cross it; and a migration is refused without an estimated
+input-token cost within a configured budget. See
+[docs/turn-boundary-migration.md](./docs/turn-boundary-migration.md)
 for the stage table and why a model switch is a context rebuild, not a
 continuation.
 
