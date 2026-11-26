@@ -16,6 +16,41 @@ go run ./cmd/quota-controller
 
 The server listens on `:8080` by default and exposes `GET /health`, which returns `{"status":"ok"}`.
 
+## Domain model
+
+[internal/quota](./internal/quota) defines three signals that are deliberately
+separate types, because none can be derived from another:
+
+| Signal | Type | Meaning |
+|---|---|---|
+| Subscription quota | `Snapshot` | Windows from a documented provider quota source, with observed-at, source, confidence and raw-field provenance |
+| Local usage | `Usage` | Requests and tokens this installation saw; `Origin` records provider-reported vs locally observed vs estimated |
+| Provider health | `ProviderState` | Healthy, degraded, unavailable or unknown, plus an optional routing cooldown and a closed `HealthReason` code |
+
+Unusable quota is `UNKNOWN` with an `UnknownReason` (`UNSUPPORTED_NO_DOCUMENTED_QUOTA_API`,
+`TRANSIENT_FETCH_FAILURE`, `STALE_OBSERVATION`, `MALFORMED_RESPONSE`,
+`AUTHENTICATION_OR_PERMISSION_FAILURE`, `NOT_YET_OBSERVED`) and no window values,
+never zero remaining. A last-known-good snapshot kept after a failed refresh is
+marked `Stale` and reads as `UNKNOWN` through `StateAt`. A cooldown is a routing
+policy exclusion and never changes quota or health.
+
+Three details worth knowing before using the model:
+
+- Any unusable window makes the whole snapshot `UNKNOWN`. A known-low 5-hour
+  window next to a weekly window with no reported remaining is not `LOW_QUOTA`,
+  because the issue requires missing or unparseable quota to become `UNKNOWN`
+  and a consumer cannot otherwise tell a partial snapshot from a complete one.
+- `StateAt` takes a freshness bound and fails closed: a non-positive `maxAge`
+  is `UNKNOWN`, not "any age". Pass the bound the caller actually intends.
+- `Observed` copies its windows (and normalizes reset times to UTC), so mutating
+  the values you passed cannot change a `Snapshot`. Non-finite numbers (NaN,
+  infinities) are `MALFORMED_RESPONSE`.
+- There is no stored state to disagree with the windows: `Snapshot.State()`
+  derives the state from `Windows` on every read.
+- Both reason vocabularies are enforced, not just documented: `Failed` and
+  `NewProviderState` replace an undeclared reason with a safe code, so turning
+  a raw provider error into a reason cannot smuggle a credential into the model.
+
 ## Configuration
 
 Configuration is loaded by [koanf v2](https://github.com/knadh/koanf) into typed
