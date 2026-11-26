@@ -1018,6 +1018,10 @@ func TestStoredErrorsMustBeSafeDescriptions(t *testing.T) {
 		`http 401: Authorization: Bearer abc123`,
 		`request failed with header x-api-key: secret`,
 		`provider said: invalid api_key=sk-live-1234`,
+		`https://provider.example/api?access_token=secret123`,
+		`https://provider.example/api?client_secret=abc`,
+		`refresh failed for access-token=abc`,
+		`refresh failed for client-secret=abc`,
 		strings.Repeat("x", maxError+1), // a raw body, not a description
 	}
 	for _, e := range unsafe {
@@ -1044,6 +1048,37 @@ func TestStoredErrorsMustBeSafeDescriptions(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+func TestSymlinkedDatabaseSharesOneMigrationLock(t *testing.T) {
+	// Review finding: the lock name came from the configured path, so two
+	// controllers naming one database through a symlink took different locks and
+	// could migrate it concurrently.
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.db")
+	alias := filepath.Join(dir, "alias.db")
+	if err := os.WriteFile(real, nil, 0o600); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	viaReal, err := Open(Config{Path: real, BusyTimeout: time.Second}, testLog())
+	if err != nil {
+		t.Fatalf("open real: %v", err)
+	}
+	defer viaReal.Close()
+	viaAlias, err := Open(Config{Path: alias, BusyTimeout: time.Second}, testLog())
+	if err != nil {
+		t.Fatalf("open alias: %v", err)
+	}
+	defer viaAlias.Close()
+
+	if viaReal.path != viaAlias.path {
+		t.Fatalf("lock paths differ: %q vs %q — the aliases would migrate concurrently",
+			viaReal.path, viaAlias.path)
+	}
+}
 
 func TestDiskFullIsReportedAndLeavesNoRows(t *testing.T) {
 	ctx := context.Background()
