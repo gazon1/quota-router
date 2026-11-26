@@ -39,6 +39,12 @@ Token Plan adapter that produces these observations; see
 [docs/minimax-quota-adapter.md](./docs/minimax-quota-adapter.md) for the key
 type, endpoint, response semantics and limitations.
 
+[internal/provider/commandcode](./internal/provider/commandcode) is the mirror
+case: the #4 gate found no documented Command Code quota interface, so it reports
+`UNKNOWN`/`UNSUPPORTED_NO_DOCUMENTED_QUOTA_API` without making a request. See
+[docs/commandcode-quota-adapter.md](./docs/commandcode-quota-adapter.md) for why
+the undocumented `/alpha` routes are deliberately not implemented.
+
 
 Three details worth knowing before using the model:
 
