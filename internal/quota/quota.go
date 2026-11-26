@@ -13,7 +13,10 @@
 // comparable inside one provider and one window.
 package quota
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // clockSkewTolerance is how far an observation may be dated in the future
 // before its timestamp is treated as untrustworthy rather than as fresh quota.
@@ -95,6 +98,7 @@ type Snapshot struct {
 // lowFraction is the remaining-quota fraction at or below which a window counts
 // as scarce; zero or less disables the classification.
 func Observed(provider, source string, at time.Time, windows []Window, lowFraction float64) Snapshot {
+	windows = cloneWindows(windows)
 	state, reason := Derive(windows, lowFraction)
 	confidence := ConfidenceHigh
 	switch {
@@ -114,6 +118,28 @@ func Observed(provider, source string, at time.Time, windows []Window, lowFracti
 	}
 }
 
+// cloneWindows owns the values the caller passed, so mutating its windows or
+// their numbers afterwards cannot leave a snapshot whose State disagrees with
+// its Windows. Reset times become UTC, which the model promises.
+func cloneWindows(windows []Window) []Window {
+	out := make([]Window, len(windows))
+	for i, w := range windows {
+		out[i] = Window{Name: w.Name, Limit: cloneFloat(w.Limit), Used: cloneFloat(w.Used), Remaining: cloneFloat(w.Remaining)}
+		if !w.ResetsAt.IsZero() {
+			out[i].ResetsAt = w.ResetsAt.UTC()
+		}
+	}
+	return out
+}
+
+func cloneFloat(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
+}
+
 // Failed builds the snapshot of an attempt that produced no usable quota. It
 // carries no windows, so nothing downstream can read zero remaining out of it.
 func Failed(provider, source string, at time.Time, reason UnknownReason) Snapshot {
@@ -127,27 +153,29 @@ func Failed(provider, source string, at time.Time, reason UnknownReason) Snapsho
 	}
 }
 
-// Derive computes the state of a set of windows. The worst window wins, so one
-// exhausted window outweighs an available one, and a window whose quota cannot
-// be established makes the snapshot UNKNOWN rather than Available.
+// Derive computes the state of a set of windows. A window whose quota cannot be
+// established makes the snapshot UNKNOWN even when another window is exhausted,
+// because the requirements say an unparseable value must never become a quota
+// claim. Among established windows the worst wins, so one exhausted window
+// outweighs a low or available one.
 func Derive(windows []Window, lowFraction float64) (QuotaState, UnknownReason) {
 	if len(windows) == 0 {
 		return QuotaUnknown, MalformedResponse
 	}
-	state, reason := Available, UnknownReason("")
+	want := Available
 	for _, w := range windows {
 		s, r := w.state(lowFraction)
-		if rank(s) > rank(state) {
-			state = s
+		if s == QuotaUnknown {
+			// Any unusable window makes the whole snapshot unestablished: the
+			// issue requires missing/unparseable quota to become UNKNOWN, and a
+			// consumer cannot tell a fully known snapshot from a partial one.
+			return QuotaUnknown, r
 		}
-		if s == QuotaUnknown && reason == "" {
-			reason = r
+		if rank(s) > rank(want) {
+			want = s
 		}
 	}
-	if state == QuotaUnknown {
-		return state, reason
-	}
-	return state, ""
+	return want, ""
 }
 
 // state derives one window. A reported remaining of zero or less is exhausted
@@ -157,14 +185,24 @@ func (w Window) state(lowFraction float64) (QuotaState, UnknownReason) {
 	switch {
 	case w.Remaining == nil:
 		return QuotaUnknown, MalformedResponse
+	case !finite(*w.Remaining):
+		// NaN compares false against everything, so without this check an
+		// unparseable number falls through to Available.
+		return QuotaUnknown, MalformedResponse
 	case *w.Remaining <= 0:
 		return Exhausted, ""
-	case w.Limit == nil || *w.Limit <= 0:
+	case w.Limit == nil || *w.Limit <= 0 || !finite(*w.Limit):
 		return QuotaUnknown, MalformedResponse
 	case lowFraction > 0 && *w.Remaining <= *w.Limit*lowFraction:
 		return LowQuota, ""
 	}
 	return Available, ""
+}
+
+// finite rejects NaN and infinities, which a provider response can carry via an
+// unparseable or out-of-range numeric field.
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // partial reports a usable window that is missing a reported-when-available
@@ -192,10 +230,14 @@ func rank(s QuotaState) int {
 }
 
 // StateAt reports the state a consumer may act on at now. A snapshot dated in
-// the future beyond clockSkewTolerance, older than maxAge (zero disables the
-// check), marked stale, or never observed is UNKNOWN, whatever State says.
+// the future beyond clockSkewTolerance, older than maxAge, marked stale, or
+// never observed is UNKNOWN, whatever State says. A non-positive maxAge is
+// UNKNOWN too: a freshness bound that nobody set must not silently accept a
+// day-old observation as available quota.
 func (s Snapshot) StateAt(now time.Time, maxAge time.Duration) (QuotaState, UnknownReason) {
 	switch {
+	case maxAge <= 0:
+		return QuotaUnknown, StaleObservation
 	case s.ObservedAt.IsZero():
 		return QuotaUnknown, NotYetObserved
 	case s.Stale, untrusted(s.ObservedAt, now, maxAge):
@@ -213,8 +255,5 @@ func (s Snapshot) StateAt(now time.Time, maxAge time.Duration) (QuotaState, Unkn
 // the future, or older than maxAge. Either way this is a clock or freshness
 // problem, not fresh quota.
 func untrusted(observedAt, now time.Time, maxAge time.Duration) bool {
-	if observedAt.After(now.Add(clockSkewTolerance)) {
-		return true
-	}
-	return maxAge > 0 && now.Sub(observedAt) > maxAge
+	return observedAt.After(now.Add(clockSkewTolerance)) || now.Sub(observedAt) > maxAge
 }

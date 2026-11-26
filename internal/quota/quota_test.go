@@ -2,6 +2,7 @@ package quota
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -124,10 +125,11 @@ func TestStateAtRejectsUntrustworthyObservations(t *testing.T) {
 		at   time.Time
 		age  time.Duration
 	}{
-		{"never observed", Snapshot{State: Available}, time.Time{}, 0},
+		{"never observed", Snapshot{State: Available}, time.Time{}, time.Hour},
 		{"stale beyond max age", Observed("p", "src", now.Add(-2*time.Hour), fresh.Windows, 0.1), now, time.Hour},
-		{"marked stale", stale, now, 0},
-		{"dated in the future beyond skew", Observed("p", "src", now.Add(10*time.Minute), fresh.Windows, 0.1), now, 0},
+		{"marked stale", stale, now, time.Hour},
+		{"dated in the future beyond skew", Observed("p", "src", now.Add(10*time.Minute), fresh.Windows, 0.1), now, time.Hour},
+		{"unset max age fails closed", fresh, now, 0},
 	}
 	for _, tc := range tests {
 		if got, _ := tc.snap.StateAt(tc.at, tc.age); got != QuotaUnknown {
@@ -142,13 +144,76 @@ func TestStateAtRejectsUntrustworthyObservations(t *testing.T) {
 
 func TestSmallClockSkewIsTolerated(t *testing.T) {
 	s := Observed("p", "src", now.Add(30*time.Second), []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
-	if got, _ := s.StateAt(now, 0); got != Available {
+	if got, _ := s.StateAt(now, time.Hour); got != Available {
 		t.Fatalf("StateAt(skew 30s) = %s, want AVAILABLE", got)
 	}
-	// maxAge zero disables the freshness check, but skew never does.
-	stale := Observed("p", "src", now.Add(-48*time.Hour), []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
-	if got, _ := stale.StateAt(now, 0); got != Available {
-		t.Fatalf("StateAt(maxAge 0) = %s, want AVAILABLE", got)
+}
+
+// A provider response can carry a NaN or an infinity through a numeric field an
+// adapter failed to parse. NaN compares false against everything, so without an
+// explicit check it would fall through to AVAILABLE.
+func TestNonFiniteValuesNeverBecomeQuota(t *testing.T) {
+	inf := math.Inf(1)
+	tests := []struct {
+		name string
+		win  Window
+	}{
+		{"NaN remaining", Window{Limit: f(100), Remaining: f(math.NaN())}},
+		{"Inf remaining", Window{Limit: f(100), Remaining: &inf}},
+		{"NaN limit", Window{Limit: f(math.NaN()), Remaining: f(50)}},
+		{"Inf limit", Window{Limit: &inf, Remaining: f(50)}},
+	}
+	for _, tc := range tests {
+		if got, reason := Derive([]Window{tc.win}, 0.1); got != QuotaUnknown || reason != MalformedResponse {
+			t.Errorf("%s: Derive() = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", tc.name, got, reason)
+		}
+	}
+}
+
+// The snapshot owns its values: mutating the caller's windows afterwards must
+// not leave a State that disagrees with the Windows it reports.
+func TestObservedIsImmuneToCallerMutation(t *testing.T) {
+	limit, used, rem := 100.0, 10.0, 90.0
+	win := Window{Limit: &limit, Used: &used, Remaining: &rem, ResetsAt: now.Add(time.Hour)}
+	loc := time.FixedZone("MSK", 3*60*60)
+	s := Observed("p", "src", now, []Window{win}, 0.1)
+	s.Windows[0].ResetsAt = now.In(loc) // exercise the copy, not the caller's value
+
+	rem = 0
+	if s.State != Available {
+		t.Fatalf("State = %s, want AVAILABLE", s.State)
+	}
+	if *s.Windows[0].Remaining != 90 {
+		t.Fatalf("Windows[0].Remaining = %v, want 90: the snapshot shares the caller's pointer", *s.Windows[0].Remaining)
+	}
+}
+
+func TestUnusableWindowMakesWholeSnapshotUnknown(t *testing.T) {
+	// A known-low window next to an unparseable one must not report LOW_QUOTA:
+	// the issue requires missing quota to become UNKNOWN, and a consumer cannot
+	// otherwise tell a fully known snapshot from a partial one.
+	windows := []Window{
+		remaining(5, 100, now.Add(time.Hour)),
+		{Name: "weekly", Limit: f(200)},
+	}
+	if got, reason := Derive(windows, 0.1); got != QuotaUnknown || reason != MalformedResponse {
+		t.Fatalf("Derive(low + missing) = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
+	}
+
+	exhausted := []Window{
+		{Name: "5h", Limit: f(100), Remaining: f(0)},
+		{Name: "weekly"}, // no remaining at all
+	}
+	if got, _ := Derive(exhausted, 0.1); got != QuotaUnknown {
+		t.Fatalf("Derive(exhausted + missing) = %s, want UNKNOWN", got)
+	}
+}
+
+func TestResetTimesAreNormalizedToUTC(t *testing.T) {
+	loc := time.FixedZone("MSK", 3*60*60)
+	s := Observed("p", "src", now, []Window{remaining(90, 100, now.In(loc))}, 0.1)
+	if s.Windows[0].ResetsAt.Location() != time.UTC {
+		t.Fatalf("ResetsAt location = %v, want UTC", s.Windows[0].ResetsAt.Location())
 	}
 }
 

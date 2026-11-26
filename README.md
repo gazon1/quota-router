@@ -34,6 +34,18 @@ never zero remaining. A last-known-good snapshot kept after a failed refresh is
 marked `Stale` and reads as `UNKNOWN` through `StateAt`. A cooldown is a routing
 policy exclusion and never changes quota or health.
 
+Three details worth knowing before using the model:
+
+- Any unusable window makes the whole snapshot `UNKNOWN`. A known-low 5-hour
+  window next to a weekly window with no reported remaining is not `LOW_QUOTA`,
+  because the issue requires missing or unparseable quota to become `UNKNOWN`
+  and a consumer cannot otherwise tell a partial snapshot from a complete one.
+- `StateAt` takes a freshness bound and fails closed: a non-positive `maxAge`
+  is `UNKNOWN`, not "any age". Pass the bound the caller actually intends.
+- `Observed` copies its windows (and normalizes reset times to UTC), so mutating
+  the values you passed cannot leave a `Snapshot` whose `State` disagrees with
+  its `Windows`. Non-finite numbers (NaN, infinities) are `MALFORMED_RESPONSE`.
+
 ## Configuration
 
 Configuration is loaded by [koanf v2](https://github.com/knadh/koanf) into typed
