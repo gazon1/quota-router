@@ -64,6 +64,12 @@ credential in a URL or a header, and the next model would print it. The text sta
 in the caller's own logs. `Validate` is the last gate — a checkpoint that skipped
 the builders is refused rather than sent.
 
+The URL rule is applied to URLs *extracted* from the text, because a credentialed
+URL inside a sentence does not parse as a URL and a parse error must not read as
+"no credential". A bare JWT is caught by its shape (`eyJ…`, two dots), and
+`authorization:`, `token=`, `api_key=` and `password=` count only with a value
+after them, so "authorization: none required" and "token= unset" stay valid.
+
 What `Validate` cannot do is read prose. It catches the shapes this installation
 itself hands around, not arbitrary text: a caller that pastes a raw provider body
 into `Goal` has bypassed the contract, and the fix there is to summarize, not to
@@ -77,9 +83,10 @@ run, and a retry could repeat its side effect.
 ## Rebuild and budget
 
 `Migration` names the model and the rebuild. `Rebuild` pairs its kind with its
-**own** input-token estimate, so an estimate measured for a checkpoint rebuild has
-nowhere to be attached to a full replay — the mismatch is unrepresentable rather
-than merely discouraged.
+**own** input-token estimate, so a number measured for a checkpoint rebuild cannot
+be lent to a full replay by a field mix-up. The estimate is still the caller's:
+`Rebuild{Kind: FULL_TRANSCRIPT, InputTokens: 6000}` is representable and passes
+the budget. Only accounting (#23) can tell what the context really costs.
 
 | Rebuild kind | Use |
 |---|---|
@@ -88,8 +95,8 @@ than merely discouraged.
 
 `Migration.Allowed(budget)` fails closed. It refuses an unknown rebuild, an
 unestimated cost (`Rebuild.InputTokens <= 0`), a model-less migration, an unset
-budget (`MaxInputTokens <= 0`) and a `FULL_TRANSCRIPT` with no `AuthorizedBy` — a
-budget nobody configured must not authorize a rebuild, and neither must a bare
+budget (`MaxInputTokens <= 0`) and a `FULL_TRANSCRIPT` with a blank `AuthorizedBy`
+— a budget nobody configured must not authorize a rebuild, and neither must a bare
 struct literal authorize a full replay. Over the budget, no migration happens.
 
 ## What the contract does not do

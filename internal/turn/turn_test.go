@@ -155,11 +155,9 @@ func TestLargeContextMigrationPaysForItsRebuild(t *testing.T) {
 		t.Fatal("the checkpoint rebuild of the same turn was refused")
 	}
 
-	// An estimate travels in the rebuild it measured, so the original mistake —
-	// a checkpoint-sized number attached to a full replay — cannot be written
-	// down at all. This is what the old flat Migration allowed and no test can
-	// pin: the type now prevents it.
-	var _ = compact.Rebuild.Kind
+	// The estimate now lives inside the rebuild it prices, so it cannot be
+	// lent to a different one by a field mix-up. Whether the number is right is
+	// still the caller's, and #23 supplies real accounting.
 }
 
 func TestFullReplayNeedsAnExplicitDecision(t *testing.T) {
@@ -169,6 +167,11 @@ func TestFullReplayNeedsAnExplicitDecision(t *testing.T) {
 	replay := Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FullTranscript, InputTokens: 90_000}}
 	if replay.Allowed(budget) {
 		t.Fatal("a full replay without a named decision was allowed")
+	}
+	// Whitespace is not a name: it authorizes nothing.
+	replay.AuthorizedBy = "   "
+	if replay.Allowed(budget) {
+		t.Fatal("a blank authorization was accepted")
 	}
 	replay.AuthorizedBy = "policy: owner-approved-large-context"
 	if !replay.Allowed(budget) {
@@ -189,6 +192,9 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		{"decisions carries a credential", Checkpoint{Decisions: []string{"api_key=sk-live-abc"}}},
 		{"pending carries a credential", Checkpoint{Pending: []string{"retry with token=sk-live-abc"}}},
 		{"references carries a credential", Checkpoint{References: []string{"https://user:pw@api.example.com/quota"}}},
+		// A credentialed URL inside a sentence does not parse as a URL, so it
+		// must be extracted before it is judged.
+		{"goal mentions a credentialed URL in prose", Checkpoint{Goal: "see https://user:pw@api.example.com/quota for details"}},
 		{"tool call name carries a credential", Checkpoint{ToolResults: []ToolResult{
 			CompletedResult("curl -H 'Authorization: Bearer sk-live-abc'", "200 OK"),
 		}}},
@@ -216,14 +222,45 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		t.Fatalf("Validate() rejected a legitimate checkpoint: %v", err)
 	}
 
-	// Plain prose that happens to contain "bearer" must not look like a token.
-	prose := Checkpoint{Goal: "the bearer of this report is the owner"}
-	if err := prose.Validate(); err != nil {
-		t.Fatalf("Validate() rejected plain prose: %v", err)
+	// Plain prose must survive, including long ordinary words after "Bearer" and
+	// headers or parameters with no value: a guard that rejects everything is a
+	// guard a caller learns to ignore.
+	for _, prose := range []string{
+		"the bearer of this report is the owner",
+		"Bearer responsibility belongs to the policy owner",
+		"Bearer credentials are required for this endpoint",
+		"authorization: none required",
+		"token= unset until the operator configures it",
+		"password= empty is not a credential",
+	} {
+		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
+			t.Fatalf("Validate() rejected plain prose %q: %v", prose, err)
+		}
 	}
-	// But a real token after it is still caught.
-	if err := (Checkpoint{Goal: "sent with Bearer sk-live-abcdef123"}).Validate(); err == nil {
-		t.Fatal("Validate() let a bearer token through when it followed the keyword")
+	// But a real token, a bare JWT, and a credentialed URL in prose are caught.
+	for _, raw := range []string{
+		"sent with Bearer sk-live-abcdef123",
+		"Authorization: Bearer sk-live-1",
+		"api_key=sk-live-abc",
+		"use eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
+		"see https://user:pw@api.example.com/quota for details",
+	} {
+		if err := (Checkpoint{Goal: raw}).Validate(); err == nil {
+			t.Errorf("Validate() let %q through", raw)
+		}
+	}
+
+	// Ordinary values that only look suspicious stay legitimate: a token count,
+	// a commit SHA, a plain URL, a duration.
+	for _, fine := range []string{
+		"prompt_tokens=40 completion_tokens=12",
+		"fixed in commit 4610f1b8cb4ab4dfc4e4b4ff259be0782797ab43",
+		"https://github.com/gazon1/quota-router/pull/58",
+		"migration completed in 3.2s",
+	} {
+		if err := (Checkpoint{Goal: fine}).Validate(); err != nil {
+			t.Errorf("Validate() rejected a legitimate value %q: %v", fine, err)
+		}
 	}
 }
 

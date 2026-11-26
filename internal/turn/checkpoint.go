@@ -197,33 +197,118 @@ func (c Checkpoint) Validate() error {
 // arrives in, plus the URL rule config.checkURL already applies. It is not a
 // secret scanner and does not claim to be one; it catches the shapes this
 // installation itself hands around, not arbitrary prose.
+// credentialShape names the credential form s carries, or "" when it carries
+// none. It is deliberately narrow — the header and query shapes a provider error
+// arrives in, plus the URL rule config.checkURL already applies. It is not a
+// secret scanner and does not claim to be one; it catches the shapes this
+// installation itself hands around, and it must not reject ordinary prose, or a
+// caller learns to ignore the error.
 func credentialShape(s string) string {
 	lower := strings.ToLower(s)
+	// A header or a query parameter counts only with a value after it; an empty
+	// one ("token= unset", "authorization: none required") is prose.
 	for _, p := range []struct{ name, needle string }{
 		{"an Authorization header", "authorization:"},
 		{"an api_key parameter", "api_key="},
 		{"a token parameter", "token="},
 		{"a password parameter", "password="},
 	} {
-		if strings.Contains(lower, p.needle) {
+		if hasValueAfter(lower, p.needle) {
 			return p.name
 		}
 	}
-	// "bearer " alone also matches prose ("the bearer of this report"), so it
-	// counts only when a token-looking word follows it.
+	// "bearer " alone also matches prose ("Bearer responsibility belongs to the
+	// policy owner"), so it counts only when a token-shaped word follows.
 	if i := strings.Index(lower, "bearer "); i >= 0 {
-		rest := strings.TrimSpace(lower[i+len("bearer "):])
-		if w, _, _ := strings.Cut(rest, " "); len(w) >= 8 {
-			return "a bearer token"
+		fields := strings.Fields(lower[i+len("bearer "):])
+		if len(fields) > 0 {
+			if w := strings.Trim(fields[0], "\"'`(),.;:"); tokenShaped(w) {
+				return "a bearer token"
+			}
 		}
 	}
-	if strings.Contains(s, "://") {
+	for _, u := range urlsIn(s) {
 		// The same rule as config.checkURL: user:password@host is a credential.
-		if u, err := url.Parse(s); err == nil && u.User != nil {
+		// The URL is extracted first, because a URL inside a sentence does not
+		// parse as one and an error there must not read as "no credential".
+		if parsed, err := url.Parse(u); err == nil && parsed.User != nil {
 			return "credentials embedded in a URL"
 		}
 	}
+	// A bare JWT carries no keyword to key on; its shape is the declaration.
+	for _, w := range strings.Fields(s) {
+		if strings.HasPrefix(strings.ToLower(w), "eyj") && strings.Count(w, ".") == 2 {
+			return "a JWT"
+		}
+	}
 	return ""
+}
+
+// hasValueAfter reports whether needle is followed by a non-empty, non-space
+// value: "authorization: Bearer x" is a header, "authorization: none required"
+// is prose.
+func hasValueAfter(lower, needle string) bool {
+	i := strings.Index(lower, needle)
+	if i < 0 {
+		return false
+	}
+	rest := strings.TrimSpace(lower[i+len(needle):])
+	if rest == "" {
+		return false
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return false
+	}
+	v := strings.Trim(fields[0], "\"'`(),.;:")
+	return v != "" && v != "none" && v != "unset" && v != "empty" && v != "optional"
+}
+
+// tokenShaped reports whether w looks like a credential rather than a word: a
+// long run with both letters and digits, or a long opaque run. A dictionary word
+// like "responsibility" is letters only and does not count.
+func tokenShaped(w string) bool {
+	if len(w) < 12 {
+		return false
+	}
+	// A JWT is base64 of a JSON object, which always starts with "eyJ".
+	if strings.HasPrefix(w, "eyj") {
+		return true
+	}
+	var letters, digits, other int
+	for _, r := range w {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z':
+			letters++
+		default:
+			other++
+		}
+	}
+	return digits > 0 && letters > 0 || other > 0 && letters+digits > 12
+}
+
+// urlsIn returns the http(s) URLs s mentions, including one inside a sentence.
+func urlsIn(s string) []string {
+	var out []string
+	for _, scheme := range []string{"http://", "https://"} {
+		from := 0
+		for {
+			i := strings.Index(strings.ToLower(s[from:]), scheme)
+			if i < 0 {
+				break
+			}
+			start := from + i
+			end := start
+			for end < len(s) && !strings.ContainsRune(" \t\n\"'<>()[]{}", rune(s[end])) {
+				end++
+			}
+			out = append(out, s[start:end])
+			from = end
+		}
+	}
+	return out
 }
 
 // Executed counts tool calls that already ran, completed or failed. Any of them
@@ -294,7 +379,7 @@ func (m Migration) Allowed(b Budget) bool {
 	case FromCheckpoint:
 		// The compact rebuild is the default and needs no separate decision.
 	case FullTranscript:
-		if m.AuthorizedBy == "" {
+		if strings.TrimSpace(m.AuthorizedBy) == "" {
 			return false
 		}
 	default:
