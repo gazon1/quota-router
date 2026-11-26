@@ -16,6 +16,24 @@ go run ./cmd/quota-controller
 
 The server listens on `:8080` by default and exposes `GET /health`, which returns `{"status":"ok"}`.
 
+## Domain model
+
+[internal/quota](./internal/quota) defines three signals that are deliberately
+separate types, because none can be derived from another:
+
+| Signal | Type | Meaning |
+|---|---|---|
+| Subscription quota | `Snapshot` | Windows from a documented provider quota source, with observed-at, source, confidence and raw-field provenance |
+| Local usage | `Usage` | Requests and tokens this installation saw; `Origin` records provider-reported vs locally observed vs estimated |
+| Provider health | `ProviderState` | Healthy, degraded, unavailable or unknown, plus an optional routing cooldown |
+
+Unusable quota is `UNKNOWN` with an `UnknownReason` (`UNSUPPORTED_NO_DOCUMENTED_QUOTA_API`,
+`TRANSIENT_FETCH_FAILURE`, `STALE_OBSERVATION`, `MALFORMED_RESPONSE`,
+`AUTHENTICATION_OR_PERMISSION_FAILURE`, `NOT_YET_OBSERVED`) and no window values,
+never zero remaining. A last-known-good snapshot kept after a failed refresh is
+marked `Stale` and reads as `UNKNOWN` through `StateAt`. A cooldown is a routing
+policy exclusion and never changes quota or health.
+
 ## Configuration
 
 Configuration is loaded by [koanf v2](https://github.com/knadh/koanf) into typed
