@@ -227,8 +227,6 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 	// guard a caller learns to ignore.
 	for _, prose := range []string{
 		"the bearer of this report is the owner",
-		"Bearer responsibility belongs to the policy owner",
-		"Bearer credentials are required for this endpoint",
 		"authorization: none required",
 		"token= unset until the operator configures it",
 		"password= empty is not a credential",
@@ -237,6 +235,28 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 			t.Fatalf("Validate() rejected plain prose %q: %v", prose, err)
 		}
 	}
+	// The RFC spelling fails closed: a summary that needs to mention it rephrases
+	// ("bearer auth is handled by middleware") instead of quoting it, and that
+	// cost is documented. A live credential is not recoverable.
+	for _, quoted := range []string{
+		"Bearer responsibility belongs to the policy owner",
+		"Bearer credentials are required for this endpoint",
+		"request failed: Bearer abcdefghijklmnop was rejected",
+	} {
+		if err := (Checkpoint{Goal: quoted}).Validate(); err == nil {
+			t.Errorf("Validate() let %q through", quoted)
+		}
+	}
+	// Lowercase is prose and stays valid.
+	for _, prose := range []string{
+		"bearer auth is handled by middleware",
+		"use the bearer token from the config",
+	} {
+		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
+			t.Errorf("Validate() rejected lowercase prose %q: %v", prose, err)
+		}
+	}
+
 	// But a real token, a bare JWT, and a credentialed URL in prose are caught.
 	for _, raw := range []string{
 		"sent with Bearer sk-live-abcdef123",

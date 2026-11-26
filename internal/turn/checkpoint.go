@@ -216,7 +216,7 @@ func credentialShape(s string) string {
 	// An explicit scheme names its value, so a single word after "Bearer" is a
 	// credential whatever its alphabet: prose continues with more words ("Bearer
 	// responsibility belongs to the policy owner"), a token does not.
-	if anyBearerToken(lower) {
+	if anyBearerToken(s) {
 		return "a bearer token"
 	}
 	for _, u := range urlsIn(s) {
@@ -261,21 +261,28 @@ func anyValueAfter(lower, needle string) bool {
 	}
 }
 
-// anyBearerToken reports whether "Bearer" is followed by exactly one value, the
-// shape of a credential rather than a sentence. A fragment that is only "Bearer
-// responsibility" is indistinguishable from a token, and refused on purpose.
-func anyBearerToken(lower string) bool {
+// anyBearerToken reports whether s mentions the RFC 6750 scheme token followed by
+// a value nobody marked as a placeholder: "Bearer abcdefghijklmnop was rejected"
+// is a credential inside a log line. That scheme is spelled with a capital B;
+// lowercase "bearer" is prose ("the bearer of this report").
+//
+// Splitting a real value from a common noun ("Bearer timeout") is not decidable
+// here, so this side fails closed: anything after the scheme counts. The cost is
+// that a summary quoting the scheme must rephrase ("bearer auth via middleware"),
+// and that cost is far below sending a live credential to the next model.
+func anyBearerToken(s string) bool {
+	lower := strings.ToLower(s)
 	for from := 0; ; {
-		i := strings.Index(lower[from:], "bearer ")
+		i := strings.Index(s[from:], "Bearer ")
 		if i < 0 {
 			return false
 		}
-		rest := strings.Fields(strings.Trim(lower[from+i+len("bearer "):], "\"'`(),.;:"))
-		if len(rest) == 1 {
+		fields := strings.Fields(strings.Trim(lower[from+i+len("Bearer "):], "\"'`(),.;:"))
+		if len(fields) > 0 && !placeholders[fields[0]] {
 			return true
 		}
-		from += i + len("bearer ")
-		if from >= len(lower) {
+		from += i + len("Bearer ")
+		if from >= len(s) {
 			return false
 		}
 	}

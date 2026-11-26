@@ -69,18 +69,21 @@ URL inside a sentence does not parse as a URL and a parse error must not read as
 "no credential". A bare JWT is caught by its shape (`eyJ…`, two dots).
 `authorization:`, `token=`, `api_key=` and `password=` count only when a value
 that is not a placeholder (`none`, `unset`, `empty`, `optional`, `required`,
-`redacted`) follows — at **any** occurrence, so `token= unset; token=sk-live-abc`
-is still refused — and "authorization: none required" stays valid. An explicit
-`Bearer` followed by a single value is a credential whatever its alphabet, while
-`Bearer responsibility belongs to the policy owner` is a sentence and stays valid;
-that trade-off deliberately refuses a bare two-word fragment.
+`redacted`, `***`) follows — at **any** occurrence, so
+`token= unset; token=sk-live-abc` is still refused — and "authorization: none
+required" stays valid. For `Bearer`, the side fails closed: the RFC 6750 spelling
+with a capital `B` followed by any non-placeholder value is refused, including a
+credential inside diagnostic text (`Bearer abcdefghijklmnop was rejected`).
+Lowercase `bearer` is prose. The cost is that a summary quoting the scheme must
+rephrase ("bearer auth is handled by middleware"); that cost is far below sending
+a live credential to the next model.
 
 What `Validate` cannot do is read prose. It catches the shapes this installation
 itself hands around, not arbitrary text: a caller that pastes a raw provider body
 into `Goal` has bypassed the contract, and the fix there is to summarize, not to
-forward. The narrowness is deliberate — "the bearer of this report" must not be
-mistaken for a token, so a bare `bearer` counts only when a token-shaped word
-follows it.
+forward. The narrowness is deliberate: "the bearer of this report" is lowercase
+prose and stays valid, and no character heuristic pretends to read a capital
+`Bearer` value as a word — that side refuses, on purpose.
 
 `OUTCOME_UNKNOWN` counts as executed: a call whose reply never arrived may have
 run, and a retry could repeat its side effect.
