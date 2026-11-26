@@ -146,11 +146,15 @@ func (a *Adapter) Fetch(ctx context.Context) (quota.Snapshot, quota.ProviderStat
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if snap.Confidence != quota.ConfidenceNone {
-		// An attempt that started earlier but finished later must not replace a
-		// newer observation: retained quota would silently go backwards.
-		if !a.haveGood || !snap.ObservedAt.Before(a.lastGood.ObservedAt) {
-			a.lastGood, a.haveGood = snap, true
+		// An attempt that started earlier but finished later must not replace, or
+		// be returned instead of, a newer observation: the caller would otherwise
+		// receive an older quota reading as fresh and regress with it. Handing back
+		// the retained newer snapshot keeps Cache and callers agreeing; health still
+		// describes the attempt that just completed.
+		if a.haveGood && snap.ObservedAt.Before(a.lastGood.ObservedAt) {
+			return a.lastGood, state
 		}
+		a.lastGood, a.haveGood = snap, true
 		return snap, state
 	}
 	if !a.haveGood {

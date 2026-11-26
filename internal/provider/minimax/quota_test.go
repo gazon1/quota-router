@@ -401,21 +401,26 @@ func TestFetchRejectsOversizedBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := &Adapter{URL: srv.URL + path, Key: config.Secret(key), Timeout: time.Second}
+	// This asserts rejection, not timing: a 1 MiB transfer under -race is slow
+	// enough on a cold run to trip a tight bound and report the wrong reason.
+	a := &Adapter{URL: srv.URL + path, Key: config.Secret(key), Timeout: 30 * time.Second}
 	snap, _ := a.Fetch(context.Background())
 	if got, reason := snap.State(); got != quota.QuotaUnknown || reason != quota.MalformedResponse {
 		t.Errorf("quota = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
 	}
 }
 
-// A slower, older attempt must not overwrite a newer observation: retained
-// last-known-good quota would silently go backwards.
-func TestSlowerOlderFetchDoesNotOverwriteNewer(t *testing.T) {
-	release := make(chan struct{})
+// A slower, older attempt must not overwrite a newer observation, and the older
+// call must not return its own older reading either: a caller receiving an
+// apparently fresh snapshot that regresses quota is the real defect.
+func TestSlowerOlderFetchDoesNotRegressCallers(t *testing.T) {
+	started := make(chan struct{}) // the older handler is waiting
+	release := make(chan struct{}) // let the older attempt finish
 	var first atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if first.CompareAndSwap(false, true) {
-			// The older attempt holds the response until the newer one is stored.
+			// The older attempt holds its response until the newer one is stored.
+			close(started)
 			<-release
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"model_remains":[{"model_name":"general",` +
@@ -429,17 +434,49 @@ func TestSlowerOlderFetchDoesNotOverwriteNewer(t *testing.T) {
 	defer srv.Close()
 
 	a := &Adapter{URL: srv.URL + path, Key: config.Secret(key), LowFraction: 0.1, Timeout: 5 * time.Second}
-	older := make(chan quota.Snapshot, 1)
+	type result struct {
+		snap  quota.Snapshot
+		state quota.ProviderState
+	}
+	older := make(chan result, 1)
 	go func() {
-		snap, _ := a.Fetch(context.Background())
-		older <- snap
+		snap, state := a.Fetch(context.Background())
+		older <- result{snap, state}
 	}()
 
-	// Give the first request time to start and block, then take the newer one.
-	time.Sleep(50 * time.Millisecond)
-	newer, _ := a.Fetch(context.Background())
+	// Explicit handshake instead of a sleep: the older request is provably
+	// blocked in its handler before the newer one starts.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first request never reached the server")
+	}
+	newer, newerHealth := a.Fetch(context.Background())
 	close(release)
-	<-older
+	got := <-older
+
+	if state, _ := newer.State(); state != quota.Exhausted {
+		t.Fatalf("newer fetch = %s, want EXHAUSTED", state)
+	}
+	// The returned value is what a caller routes on, so assert on it, not only on
+	// the retained cache.
+	if state, _ := got.snap.State(); state != quota.Exhausted {
+		t.Fatalf("older fetch returned %s, want the retained newer EXHAUSTED observation", state)
+	}
+	if got.snap.Stale {
+		t.Errorf("older fetch marked the retained newer observation stale, want fresh")
+	}
+	if got.snap.ObservedAt.Before(newer.ObservedAt) {
+		t.Errorf("returned observation is older than the newer fetch, want the newest kept")
+	}
+	// Health describes the attempt that just completed, not the retained copy.
+	if got.state.Health != quota.Healthy || got.state.Reason() != quota.ReasonNone {
+		t.Errorf("older fetch health = %s/%s, want HEALTHY: it reached the provider",
+			got.state.Health, got.state.Reason())
+	}
+	if newerHealth.Health != quota.Healthy {
+		t.Errorf("newer fetch health = %s, want HEALTHY", newerHealth.Health)
+	}
 
 	// The fixture is EXHAUSTED (weekly 0%); the older body is LOW_QUOTA (20%).
 	a.mu.Lock()

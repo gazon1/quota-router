@@ -121,8 +121,10 @@ stored anywhere in the model; only the reason codes leave the adapter.
 
 `Fetch` keeps the last observation that established quota and, when a later
 attempt does not, returns it with `Stale` set. Only a strictly newer observation
-replaces it: when two attempts overlap and the older one finishes last, the newer
-one stays retained, so quota cannot silently go backwards. That copy is diagnostics only:
+replaces it, and a call whose own attempt was older than the retained one returns
+the retained newer snapshot rather than its own older reading: when two attempts
+overlap and the earlier one finishes last, neither the cache nor that caller's
+return value regresses to older quota. That copy is diagnostics only:
 `Snapshot.StateAt(now, maxAge)` reports `UNKNOWN` / `STALE_OBSERVATION` for it, so
 no consumer can route on stale quota. Health always describes the attempt that
 just ran. First-attempt failures have no last-known-good copy to return.
