@@ -253,17 +253,20 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 			t.Errorf("Validate() let lowercase %q through", quoted)
 		}
 	}
-	// The documented cost: prose with a longer word after "bearer" is refused and
-	// must be rephrased. A function word is the one escape, so "bearer of" and
-	// "bearer is" still read as prose.
+	// The documented cost: the word is reserved, so prose that needs it is
+	// rephrased ("the owner of this report", "may be absent"). A placeholder is
+	// still fine, and prose without the word is untouched.
 	for _, prose := range []string{
-		"the bearer of this report is the owner",
-		"the bearer is the owner",
-		"the bearer may be absent from config",
+		"the owner of this report is the user",
+		"auth may be absent from config",
+		"auth is handled by middleware",
 	} {
 		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
 			t.Errorf("Validate() rejected prose %q: %v", prose, err)
 		}
+	}
+	if err := (Checkpoint{Goal: "the bearer of this report"}).Validate(); err == nil {
+		t.Fatal("Validate() let a value after the reserved word through")
 	}
 
 	// But a real token, a bare JWT, and a credentialed URL in prose are caught.

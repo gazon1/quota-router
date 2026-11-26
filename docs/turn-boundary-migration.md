@@ -71,24 +71,23 @@ URL inside a sentence does not parse as a URL and a parse error must not read as
 that is not a placeholder (`none`, `unset`, `empty`, `optional`, `required`,
 `redacted`, `***`) follows — at **any** occurrence, so
 `token= unset; token=sk-live-abc` is still refused — and "authorization: none
-required" stays valid. For `Bearer`, the side fails closed and the scheme is
-matched **case-insensitively** (RFC 7235 §2.1), so a credential after either
-spelling is refused, including inside diagnostic text
-(`bearer abcdefghijklmnop was rejected`). The only escape is grammatical: an
-article **before** the word and a function word after it, as in "the bearer of this
-report" — so `Bearer the` and `Bearer of sk-live-1` stay refused, since neither
-reads as a sentence. A value spelled like a function word is still a value.
-Surrounding punctuation is ignored (`none!`, `(unset)`, `unset?`), so a placeholder
-is a placeholder in any sentence. No character or vowel heuristic tries to read a value
-as a word — those could not separate `abcdefghijklmnop` from prose. The cost is that a summary mentioning the
-scheme before any other word rephrases it; that cost is far below sending a live
-credential to the next model.
+required" stays valid.
+
+For `Bearer`, the rule refuses rather than guesses, and the scheme name is
+case-insensitive (RFC 7235 §2.1): anything after it that is not a placeholder is
+refused, including inside diagnostic text
+(`bearer abcdefghijklmnop was rejected`). Character, vowel, length and
+grammar-shape heuristics were each tried and each either missed a real value or
+refused ordinary prose, because a summary is free text and this is not a parser.
+So the word `bearer` is **reserved** in a checkpoint: prose that needs it is
+rephrased, and a credential belongs in the caller's own logs. That cost is
+recoverable; a leaked credential is not.
 
 What `Validate` cannot do is read prose. It catches the shapes this installation
 itself hands around, not arbitrary text: a caller that pastes a raw provider body
 into `Goal` has bypassed the contract, and the fix there is to summarize, not to
-forward. The narrowness is deliberate: the guard refuses rather than guesses, and
-the one allowance it grants is a fixed list of function words.
+forward. The narrowness is deliberate: it refuses rather than guesses, and the one
+word it reserves is documented above.
 
 `OUTCOME_UNKNOWN` counts as executed: a call whose reply never arrived may have
 run, and a retry could repeat its side effect.

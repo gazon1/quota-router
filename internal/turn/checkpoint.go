@@ -245,16 +245,6 @@ func trimWord(w string) string {
 	})
 }
 
-// functionWords are the grammar that can legitimately follow an article and
-// "bearer" in a sentence ("the bearer of ..."). Anything else after the scheme is
-// treated as a value.
-var functionWords = map[string]bool{
-	"a": true, "an": true, "the": true, "of": true, "is": true, "are": true,
-	"was": true, "were": true, "as": true, "in": true, "on": true, "to": true,
-	"for": true, "by": true, "and": true, "or": true, "not": true, "be": true,
-	"has": true, "have": true, "had": true, "may": true, "must": true,
-}
-
 // placeholders are the values nobody means as a credential.
 var placeholders = map[string]bool{
 	"": true, "none": true, "unset": true, "empty": true, "optional": true,
@@ -285,29 +275,22 @@ func anyValueAfter(lower, needle string) bool {
 // (RFC 7235 §2.1), so "bearer abcdefghijklmnop was rejected" is a credential in a
 // log line just as much as "Bearer abcdefghijklmnop".
 //
-// No character, vowel or length heuristic here tries to read a value as a word:
-// they could not separate "abcdefghijklmnop" from prose, and "abc" is a valid
-// short token. The rule fails closed with a single grammatical escape — an
-// article before the word and a function word after it, as in "the bearer of this
-// report". A credential is never written that way, while "Bearer of sk-live-1" is
-// not grammar and stays refused.
+// This refuses rather than guesses. Character, vowel, length and grammar-shape
+// heuristics were each tried here and each either missed a real value
+// ("abcdefghijklmnop") or refused ordinary prose ("the bearer of this report"),
+// because a summary is free text and the boundary is not a parser. So the word
+// "bearer" is simply reserved in a checkpoint: anything but a placeholder after
+// the scheme belongs in the caller's own logs, and prose that needs the word
+// rephrases it. That cost is recoverable; a leaked credential is not.
 func anyBearerToken(lower string) bool {
 	for from := 0; ; {
 		i := strings.Index(lower[from:], "bearer ")
 		if i < 0 {
 			return false
 		}
-		before := strings.Fields(trimWord(lower[:from+i]))
-		after := strings.Fields(lower[from+i+len("bearer "):])
-		if len(after) > 0 {
-			prev, next := "", trimWord(after[0])
-			if len(before) > 0 {
-				prev = before[len(before)-1]
-			}
-			grammatical := (prev == "the" || prev == "a" || prev == "an") && functionWords[next]
-			if !placeholders[next] && !grammatical {
-				return true
-			}
+		fields := strings.Fields(lower[from+i+len("bearer "):])
+		if len(fields) > 0 && !placeholders[trimWord(fields[0])] {
+			return true
 		}
 		from += i + len("bearer ")
 		if from >= len(lower) {
