@@ -174,6 +174,18 @@ func TestNonFiniteValuesNeverBecomeQuota(t *testing.T) {
 			t.Errorf("%s: Derive() = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", tc.name, got, reason)
 		}
 	}
+
+	// Used never establishes quota, so a broken one must not claim a complete
+	// observation either: it lowers confidence, not the state.
+	broken := Observed("p", "src", now, []Window{{
+		Limit: f(100), Remaining: f(90), Used: f(math.NaN()), ResetsAt: now.Add(time.Hour),
+	}}, 0.1)
+	if state, _ := broken.State(); state != Available {
+		t.Fatalf("State() = %s, want AVAILABLE: Used does not establish quota", state)
+	}
+	if broken.Confidence != ConfidenceLow {
+		t.Fatalf("Confidence = %s, want LOW: a NaN Used is not complete accounting", broken.Confidence)
+	}
 }
 
 // The snapshot owns its values: mutating the caller's windows afterwards must

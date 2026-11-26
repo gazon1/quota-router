@@ -218,10 +218,12 @@ func finite(v float64) bool {
 }
 
 // partial reports a usable window that is missing a reported-when-available
-// field, which lowers confidence without changing the state.
+// field, which lowers confidence without changing the state. A non-finite Used
+// counts as missing: it cannot be reported as complete accounting. Used never
+// establishes quota, so a broken one lowers confidence instead of the state.
 func partial(windows []Window) bool {
 	for _, w := range windows {
-		if w.Used == nil || w.ResetsAt.IsZero() {
+		if w.Used == nil || !finite(*w.Used) || w.ResetsAt.IsZero() {
 			return true
 		}
 	}
