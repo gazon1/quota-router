@@ -78,6 +78,21 @@ credential, and confirmed the round-3 reasoning exposure is gone.
 | A duplicate model could offset a missing one in the count check | fixed — each configured model must appear exactly once; mutation-checked |
 | The catalogue was never asserted, only fetched | fixed — every configured model must be listed with the endpoint the config routes to; verified it fails when a model or an endpoint is removed |
 
+## Round 5 — head `8b18f47`
+
+Verdict: **APPROVE** — no blocking or major findings; all five round-4 items
+confirmed FIXED at that head. One MINOR remained: the document claimed the
+fixtures contain "schema only, never billing figures", while they do retain the
+token counts and quota percentages the endpoints exist to return. Corrected: the
+document now states which fields are kept and why, which are dropped and why, and
+that `/alpha` magnitudes are replaced by their types. The reviewer also confirmed
+the blocked MiniMax inference is recorded honestly and is not presented as passed.
+
+The reviewer listed six decisions for the repository owner to confirm (MiniMax
+model switch, free-tier Command Code models, global cooldown and retry policy,
+shared Token Plan credential, and the fixture contents). They are recorded as
+implicit decisions in the PR body and are not defects.
+
 ## What the reviews did not change
 
 Both roles accepted several decisions as intended rather than defective, and they

@@ -27,7 +27,7 @@ are sanitized: keys, request IDs, user/org identifiers and subscription IDs are
 | Invalid, wrong-type, revoked, insufficient-plan credentials | **PARTIALLY reproducible** — the probe asserts invalid-key, wrong-master-key, plan-refusal and the 401-not-429 cooldown case; revoked-key and 5xx were recorded manually | [Credential matrix](#credential-matrix) |
 | 429/5xx/timeouts/malformed payloads, bounded retry | **PARTIAL** — 429 and malformed covered; 5xx not observed | [Error semantics](#error-semantics) |
 | Model aliases map to exact upstream IDs, no silent fallback | **DONE** — plus one shipped alias was rejected by LiteLLM (fixed) | [Defect 1](#defect-1-the-shipped-model_name-was-not-a-liteLLM-model-id) |
-| Internal LiteLLM auth; no secrets/prompts in logs or artifacts | **DONE** — asserted by the probe; fixtures keep model ids and schema only, never billing figures or identity | [Internal auth](#internal-litellm-auth) |
+| Internal LiteLLM auth; no secrets/prompts in logs or artifacts | **DONE** — asserted by the probe; fixtures keep model ids, status codes and probe measurements, never credentials, identity or provider reasoning (see the keep/drop table) | [Internal auth](#internal-litellm-auth) |
 | Unsupported quota surfaces documented as `UNKNOWN`, not zero/AVAILABLE | **DONE** | [UNKNOWN surfaces](#unsupported-or-unverified-surfaces) |
 
 ## Pinned image
@@ -398,12 +398,28 @@ usage, and a MiniMax response must carry `base_resp.status_code == 0` — becaus
 MiniMax reports an auth failure as HTTP 200. A case whose assertion fails is
 written with `verdict: FAILED`, so the committed fixture cannot read as verified.
 
-Fixtures keep the schema and the model ids, which are the compatibility evidence,
-and drop everything that is not: model reasoning (`reasoning`,
-`type: "reasoning"` items, `reasoning_text`, encrypted blocks), request and
-subscription ids, billing figures and account identity. `stream_options.include_usage` is requested from the
-proxy explicitly: without it the proxy forwards no usage, so asserting usage would
-test the flag rather than the provider.
+What the fixtures keep and drop is deliberate, and narrower than "sanitized":
+
+| Kept | Why |
+|---|---|
+| model ids, `supported_endpoints`, JSON field names and types | the compatibility evidence itself |
+| status codes, provider business codes, error strings | the behaviour under test |
+| `usage` token counts of a test request, MiniMax quota percentages and window timestamps | they are the response these endpoints exist to return; the requests are fixed probe prompts, not user content |
+
+| Dropped | Why |
+|---|---|
+| credentials (`sk-…`), authorization values | secrets |
+| user/org identity, e-mail, request/generation/subscription ids | account identity, correlatable with provider logs |
+| model reasoning: `reasoning`, `type: "reasoning"` items, `reasoning_text`, encrypted blocks | provider-internal chain of thought, may describe the prompt |
+
+/alpha billing magnitudes are replaced by their JSON types, so those fixtures
+record a schema rather than this account's allowance. The token counts and quota
+percentages elsewhere are operational measurements of the probe account, not
+credentials and not personal data; if that is not acceptable for a given
+deployment, run the probe with `--out` into a private directory instead of
+committing the fixtures. `stream_options.include_usage` is requested from the
+proxy explicitly: without it the proxy forwards no usage, so asserting usage
+would test the flag rather than the provider.
 
 ## Boundaries honored
 
