@@ -15,10 +15,10 @@ import (
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	os.Exit(run(context.Background(), log, os.Args[1:]))
+	os.Exit(run(context.Background(), log))
 }
 
-func run(ctx context.Context, log *slog.Logger, _ []string) int {
+func run(ctx context.Context, log *slog.Logger) int {
 	cfg, err := config.Load()
 	if err != nil {
 		log.Error("configuration error", "error", err)
@@ -27,11 +27,12 @@ func run(ctx context.Context, log *slog.Logger, _ []string) int {
 
 	srv := server.New(log)
 	httpServer := &http.Server{
-		Addr:         cfg.Addr,
-		Handler:      srv.Handler(),
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-		IdleTimeout:  cfg.IdleTimeout,
+		Addr:              cfg.Addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		ReadTimeout:       cfg.ReadTimeout,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

@@ -9,36 +9,45 @@ import (
 
 // Config holds runtime configuration parsed from environment variables.
 type Config struct {
-	Addr            string
-	ShutdownTimeout time.Duration
-	ReadTimeout     time.Duration
-	WriteTimeout    time.Duration
-	IdleTimeout     time.Duration
+	Addr              string
+	ShutdownTimeout   time.Duration
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
 }
 
 const (
-	defaultAddr            = ":8080"
-	defaultShutdownTimeout = 10 * time.Second
-	defaultReadTimeout     = 5 * time.Second
-	defaultWriteTimeout    = 10 * time.Second
-	defaultIdleTimeout     = 60 * time.Second
+	defaultAddr              = ":8080"
+	defaultShutdownTimeout   = 10 * time.Second
+	defaultReadHeaderTimeout = 5 * time.Second
+	defaultReadTimeout       = 5 * time.Second
+	defaultWriteTimeout      = 10 * time.Second
+	defaultIdleTimeout       = 60 * time.Second
 )
 
 // Load reads configuration from environment variables. It fails fast with an
 // actionable message when a value is present but invalid.
 func Load() (Config, error) {
 	cfg := Config{
-		Addr:            envOrDefault("QUOTA_ROUTER_ADDR", defaultAddr),
-		ShutdownTimeout: defaultShutdownTimeout,
-		ReadTimeout:     defaultReadTimeout,
-		WriteTimeout:    defaultWriteTimeout,
-		IdleTimeout:     defaultIdleTimeout,
+		Addr:              defaultAddr,
+		ShutdownTimeout:   defaultShutdownTimeout,
+		ReadHeaderTimeout: defaultReadHeaderTimeout,
+		ReadTimeout:       defaultReadTimeout,
+		WriteTimeout:      defaultWriteTimeout,
+		IdleTimeout:       defaultIdleTimeout,
+	}
+	if v, ok := os.LookupEnv("QUOTA_ROUTER_ADDR"); ok {
+		cfg.Addr = v
 	}
 
 	var errs []error
 	var err error
 
 	if cfg.ShutdownTimeout, err = durationEnv("QUOTA_ROUTER_SHUTDOWN_TIMEOUT", defaultShutdownTimeout); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.ReadHeaderTimeout, err = durationEnv("QUOTA_ROUTER_READ_HEADER_TIMEOUT", defaultReadHeaderTimeout); err != nil {
 		errs = append(errs, err)
 	}
 	if cfg.ReadTimeout, err = durationEnv("QUOTA_ROUTER_READ_TIMEOUT", defaultReadTimeout); err != nil {
@@ -54,30 +63,11 @@ func Load() (Config, error) {
 	if cfg.Addr == "" {
 		errs = append(errs, errors.New("QUOTA_ROUTER_ADDR must not be empty"))
 	}
-	if cfg.ShutdownTimeout <= 0 {
-		errs = append(errs, fmt.Errorf("QUOTA_ROUTER_SHUTDOWN_TIMEOUT must be > 0, got %s", cfg.ShutdownTimeout))
-	}
-	if cfg.ReadTimeout <= 0 {
-		errs = append(errs, fmt.Errorf("QUOTA_ROUTER_READ_TIMEOUT must be > 0, got %s", cfg.ReadTimeout))
-	}
-	if cfg.WriteTimeout <= 0 {
-		errs = append(errs, fmt.Errorf("QUOTA_ROUTER_WRITE_TIMEOUT must be > 0, got %s", cfg.WriteTimeout))
-	}
-	if cfg.IdleTimeout <= 0 {
-		errs = append(errs, fmt.Errorf("QUOTA_ROUTER_IDLE_TIMEOUT must be > 0, got %s", cfg.IdleTimeout))
-	}
 
 	if len(errs) > 0 {
 		return Config{}, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 	}
 	return cfg, nil
-}
-
-func envOrDefault(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok {
-		return v
-	}
-	return def
 }
 
 func durationEnv(key string, def time.Duration) (time.Duration, error) {
@@ -91,9 +81,6 @@ func durationEnv(key string, def time.Duration) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("%s must be > 0, got %s", key, d)
-	}
-	if d > 24*time.Hour {
-		return 0, fmt.Errorf("%s must be <= 24h, got %s", key, d)
 	}
 	return d, nil
 }

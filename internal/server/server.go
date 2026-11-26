@@ -1,11 +1,9 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"time"
 )
 
 // Server wires HTTP routes and handlers.
@@ -31,21 +29,11 @@ func (s *Server) Handler() http.Handler {
 
 type healthResponse struct {
 	Status string `json:"status"`
-	Time   string `json:"time"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
-	defer cancel()
-
-	resp := healthResponse{
-		Status: "ok",
-		Time:   time.Now().UTC().Format(time.RFC3339Nano),
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		s.log.ErrorContext(ctx, "encode health response", "error", err)
+	if err := json.NewEncoder(w).Encode(healthResponse{Status: "ok"}); err != nil {
+		s.log.ErrorContext(r.Context(), "encode health response", "error", err)
 	}
 }
