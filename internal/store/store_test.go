@@ -732,6 +732,43 @@ func TestReadersAndRetentionAgreeOnTimestampTies(t *testing.T) {
 	}
 }
 
+func TestBackupRefusesAndLeavesNoLitter(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	dir := t.TempDir()
+
+	for _, c := range []struct{ name, path string }{
+		{"empty path", ""},
+		{"missing directory", filepath.Join(dir, "nodir", "x.db")},
+	} {
+		if err := s.Backup(ctx, c.path); err == nil {
+			t.Errorf("%s: Backup succeeded", c.name)
+		}
+	}
+
+	target := filepath.Join(dir, "ok.db")
+	if err := s.Backup(ctx, target); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	// Refusing an existing target must not damage it either.
+	if err := s.Backup(ctx, target); err == nil {
+		t.Fatal("Backup overwrote an existing file")
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("the existing backup was removed: %v", err)
+	}
+	// No private temporary file may survive either outcome.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".backup-") {
+			t.Errorf("temporary file %q survived", e.Name())
+		}
+	}
+}
+
 func TestDiskFullIsReportedAndLeavesNoRows(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)

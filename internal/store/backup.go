@@ -20,9 +20,9 @@ import (
 //
 // VACUUM INTO refuses to overwrite, so an existing target is an error rather
 // than a silent replacement. The snapshot goes to a private temporary file in
-// the same directory and is renamed into place, so two concurrent backups with
-// one target cannot delete each other's output: a loser fails on the rename
-// and removes only its own temporary file.
+// the same directory and is published under the target name with a hard link,
+// which cannot clobber: of two concurrent backups with one target, one wins and
+// the loser removes only its own temporary file.
 func (s *Store) Backup(ctx context.Context, path string) error {
 	if path == "" {
 		return errors.New("backup: path must not be empty")
@@ -49,7 +49,7 @@ func (s *Store) Backup(ctx context.Context, path string) error {
 		os.Remove(tmpPath) // a failed VACUUM INTO can leave a partial file behind
 		return fmt.Errorf("backup to %s: %w", path, classify(err))
 	}
-	// Rename would overwrite a target that appeared meanwhile, so publish with a
+	// os.Rename would overwrite a target that appeared meanwhile, so publish with a
 	// hard link instead: it fails with EEXIST, which is the contract callers
 	// asked for — a new file, never a silent replacement.
 	if err := os.Link(tmpPath, path); err != nil {
