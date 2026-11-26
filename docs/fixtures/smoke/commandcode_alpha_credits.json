@@ -1,0 +1,41 @@
+{
+  "case": "commandcode_alpha_credits",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 1199,
+    "body": {
+      "credits": {
+        "belowThreshold": "bool",
+        "creditThreshold": "int",
+        "monthlyCredits": "float",
+        "purchasedCredits": "int",
+        "freeCredits": "int"
+      },
+      "windowLimits": {
+        "limited": "bool",
+        "exceeded": "NoneType",
+        "fiveHour": {
+          "used": "float",
+          "cap": "int",
+          "exceeded": "bool",
+          "resetAt": "int"
+        },
+        "weekly": {
+          "used": "float",
+          "cap": "int",
+          "exceeded": "bool",
+          "resetAt": "int"
+        }
+      },
+      "sandboxAccess": "bool",
+      "sandboxMinutes": {
+        "usedMinutes": "int",
+        "limitMinutes": "int",
+        "overageUsd": "int",
+        "resetAt": "int"
+      }
+    },
+    "verdict": "VERIFIED"
+  }
+}

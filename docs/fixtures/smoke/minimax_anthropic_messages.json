@@ -1,0 +1,17 @@
+{
+  "case": "minimax_anthropic_messages",
+  "response": {
+    "ok": false,
+    "status": 429,
+    "elapsed_ms": 690,
+    "body": {
+      "type": "error",
+      "error": {
+        "type": "rate_limit_error",
+        "message": "Token Plan usage limit reached: Upgrade your Token Plan or purchase Credits for more usage. (2056)"
+      },
+      "request_id": "***REDACTED***"
+    },
+    "verdict": "BLOCKED_BY_PLAN"
+  }
+}

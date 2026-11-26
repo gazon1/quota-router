@@ -1,0 +1,44 @@
+{
+  "case": "commandcode_tool_call",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 4093,
+    "body": {
+      "id": "***REDACTED***",
+      "object": "chat.completion",
+      "created": 1795709879,
+      "model": "stealth/glyph-cluster:free",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "***REDACTED***",
+                "type": "function",
+                "function": {
+                  "name": "***REDACTED***",
+                  "arguments": "{\"city\": \"SF\"}"
+                }
+              }
+            ]
+          },
+          "logprobs": null,
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 187,
+        "completion_tokens": 58,
+        "total_tokens": 245,
+        "prompt_tokens_details": "***REDACTED***",
+        "completion_tokens_details": "***REDACTED***",
+        "cache_creation_input_tokens": 0
+      }
+    },
+    "verdict": "VERIFIED"
+  }
+}

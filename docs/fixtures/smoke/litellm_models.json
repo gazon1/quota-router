@@ -1,0 +1,42 @@
+{
+  "case": "litellm_models",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 22,
+    "body": {
+      "data": [
+        {
+          "id": "minimax/MiniMax-M2.7",
+          "object": "model",
+          "created": 1677610602,
+          "owned_by": "openai"
+        },
+        {
+          "id": "commandcode/recursive/flint-v1.0:free",
+          "object": "model",
+          "created": 1677610602,
+          "owned_by": "openai",
+          "max_input_tokens": 262144,
+          "max_output_tokens": 262144
+        },
+        {
+          "id": "commandcode/stealth/glyph-cluster:free",
+          "object": "model",
+          "created": 1677610602,
+          "owned_by": "openai",
+          "max_input_tokens": 256000,
+          "max_output_tokens": 256000
+        },
+        {
+          "id": "commandcode/deepseek-v4.1-flash",
+          "object": "model",
+          "created": 1677610602,
+          "owned_by": "openai"
+        }
+      ],
+      "object": "list"
+    },
+    "verdict": "VERIFIED"
+  }
+}

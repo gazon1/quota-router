@@ -1,0 +1,34 @@
+{
+  "case": "commandcode_chat",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 3138,
+    "body": {
+      "id": "***REDACTED***",
+      "object": "chat.completion",
+      "created": 1795709865,
+      "model": "stealth/glyph-cluster:free",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "pong"
+          },
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 147,
+        "completion_tokens": 13,
+        "total_tokens": 160,
+        "prompt_tokens_details": "***REDACTED***",
+        "completion_tokens_details": "***REDACTED***",
+        "cache_creation_input_tokens": 0
+      }
+    },
+    "verdict": "VERIFIED"
+  }
+}

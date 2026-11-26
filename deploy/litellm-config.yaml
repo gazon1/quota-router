@@ -1,12 +1,58 @@
 # LiteLLM Proxy config for the home-host deployment.
 # No database is configured: LiteLLM runs stateless here and reports
 # "db":"Not connected" on /health/readiness, which is intended for one host.
+#
+# Model IDs were verified against the live providers on 2026-11-26
+# (docs/litellm-provider-compatibility.md). model_name must be exactly
+# "<provider>/<model>": LiteLLM resolves /v1/models and requests by that string,
+# so a bare alias such as "minimax-m3.1-flash" is rejected as an unknown model.
+# Both names are still accurate: that was the shipped alias before the fix.
 model_list:
-  - model_name: minimax-m3.1-flash
+  # MiniMax Token Plan. openai/ keeps the OpenAI-compatible request path, and the
+  # inference host is api.minimax.io — never the quota host.
+  - model_name: minimax/MiniMax-M2.7
     litellm_params:
-      model: openai/MiniMax-M3.1-Flash
+      model: openai/MiniMax-M2.7
       api_base: https://api.minimax.io/v1
-      api_key: os.environ/MINIMAX_API_KEY
+      # Token Plan subscription key (sk-cp-...). Not interchangeable with a
+      # pay-as-you-go Open Platform key.
+      api_key: os.environ/MINIMAX_TOKEN_PLAN_KEY
+
+  # Command Code, OpenAI-shaped models: Chat Completions and Responses.
+  # The ":free" suffix keeps the provider's free tier, and the ids carry both a
+  # slash and a colon; LiteLLM routes them as-is, verified. Free-tier models have
+  # a daily request cap (Flint: 1000/day, 429 "You've used all ... requests for
+  # today" with a reset time), so they are not interchangeable with paid models.
+  - model_name: commandcode/recursive/flint-v1.0:free
+    litellm_params:
+      model: openai/recursive/flint-v1.0:free
+      api_base: https://api.commandcode.ai/provider/v1
+      api_key: os.environ/COMMAND_CODE_API_KEY
+
+  - model_name: commandcode/stealth/glyph-cluster:free
+    litellm_params:
+      model: openai/stealth/glyph-cluster:free
+      api_base: https://api.commandcode.ai/provider/v1
+      api_key: os.environ/COMMAND_CODE_API_KEY
+
+  # Command Code, Anthropic-shaped models. LiteLLM's anthropic provider appends
+  # "/v1/messages" to api_base, so it must stop before /v1 or the request goes to
+  # /provider/v1/v1/messages and 404s.
+  - model_name: commandcode/deepseek-v4.1-flash
+    litellm_params:
+      model: anthropic/deepseek/deepseek-v4.1-flash
+      api_base: https://api.commandcode.ai/provider
+      api_key: os.environ/COMMAND_CODE_API_KEY
+
+router_settings:
+  # A provider 401/403 otherwise marks the deployment unhealthy, and the *next*
+  # request returns a 429 "no deployments available ... in cooldown" that hides
+  # the real cause. Verified on the pinned image: without this, a rejected key
+  # reads as rate limiting.
+  disable_cooldowns: true
+  # A retry may follow a tool call that already executed, so the client decides;
+  # LiteLLM does not silently repeat inference requests.
+  num_retries: 0
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY

@@ -62,12 +62,12 @@ cd deploy
 test -f .env || install -m 600 .env.example .env   # only on first setup
 grep -q '^LITELLM_MASTER_KEY=.\+' .env || \
   sed -i "s/^LITELLM_MASTER_KEY=/LITELLM_MASTER_KEY=$(openssl rand -hex 24)/" .env
-$EDITOR .env                            # set MINIMAX_API_KEY (and keep the master key)
+$EDITOR .env                            # set MINIMAX_TOKEN_PLAN_KEY and COMMAND_CODE_API_KEY
 docker compose up -d --build --wait
 ```
 
 Both commands are idempotent on purpose: re-running setup must not overwrite an
-existing `.env`. A plain copy would blank `MINIMAX_API_KEY` and rotate the master
+existing `.env`. A plain copy would blank the provider keys and rotate the master
 key, breaking every client that already holds it.
 
 `LITELLM_MASTER_KEY` must not be empty: LiteLLM refuses to start without it
@@ -194,7 +194,7 @@ Measured in the pinned image `@sha256:4295b064…b883c3` (2026-11-26):
 
   `RUST_WITH_FALLBACK` still falls back to Python when the native call declines.
 
-So for **this** deployment — chat completions through `openai/MiniMax-M3.1-Flash` —
+So for **this** deployment — chat completions through `openai/MiniMax-M2.7` —
 the request path is **Python regardless of `LITELLM_RUST`**, because the route is
 `PYTHON_ONLY`. Rust is load-bearing only for `ocr` and Bedrock `transcription`.
 Setting `LITELLM_RUST=true` adds Rust to Anthropic `messages`; that is untested
@@ -217,5 +217,10 @@ backup step here.
 - The controller has no API beyond `GET /health`, so the stack proves
   independence, health checks and limits but routes no traffic through the
   controller yet.
-- Single model configured (`MiniMax-M3.1-Flash`); quota polling and routing
-  (issues #10, #13) are not wired.
+- Four models configured: MiniMax `MiniMax-M2.7` and three Command Code
+  models. Two of the Command Code models are free-tier and hit a daily request
+  cap, so a `429` from them is the plan signal, not a routing fault. Quota
+  polling and routing (issues #10, #13) are not wired.
+- Command Code subscription quota is read from undocumented `/alpha` routes and
+  is `UNKNOWN` as a supported contract; see
+  [docs/litellm-provider-compatibility.md](./litellm-provider-compatibility.md).

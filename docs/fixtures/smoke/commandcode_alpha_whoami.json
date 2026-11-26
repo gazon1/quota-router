@@ -1,0 +1,19 @@
+{
+  "case": "commandcode_alpha_whoami",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 612,
+    "body": {
+      "success": "bool",
+      "user": {
+        "id": "str",
+        "name": "str",
+        "email": "str",
+        "userName": "str"
+      },
+      "org": "NoneType"
+    },
+    "verdict": "VERIFIED"
+  }
+}

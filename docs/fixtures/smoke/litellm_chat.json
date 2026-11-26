@@ -1,0 +1,36 @@
+{
+  "case": "litellm_chat",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 2905,
+    "body": {
+      "id": "***REDACTED***",
+      "created": 1795709887,
+      "model": "commandcode/stealth/glyph-cluster:free",
+      "object": "chat.completion",
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "pong",
+            "role": "assistant",
+            "provider_specific_fields": {}
+          },
+          "provider_specific_fields": {},
+          "logprobs": null
+        }
+      ],
+      "usage": {
+        "completion_tokens": 13,
+        "prompt_tokens": 147,
+        "total_tokens": 160,
+        "completion_tokens_details": "***REDACTED***",
+        "prompt_tokens_details": "***REDACTED***",
+        "cache_creation_input_tokens": 0
+      }
+    },
+    "verdict": "VERIFIED"
+  }
+}

@@ -107,7 +107,7 @@ func TestLoadFileSetsNestedAndMapValues(t *testing.T) {
 litellm:
   base_url: https://litellm.example.com
   model_aliases:
-    fast: minimax/MiniMax-M3.1-Flash
+    fast: minimax/MiniMax-M2.7
 providers:
   minimax:
     base_url: https://api.minimax.io/v1
@@ -117,7 +117,7 @@ providers:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.LiteLLM.ModelAliases["fast"] != "minimax/MiniMax-M3.1-Flash" {
+	if cfg.LiteLLM.ModelAliases["fast"] != "minimax/MiniMax-M2.7" {
 		t.Fatalf("ModelAliases = %v, want the fast alias", cfg.LiteLLM.ModelAliases)
 	}
 	if got := cfg.Providers["minimax"]; got.BaseURL != "https://api.minimax.io/v1" {
@@ -183,13 +183,13 @@ func TestLoadEnvSetsProvider(t *testing.T) {
 
 func TestLoadEnvSetsModelAlias(t *testing.T) {
 	cleanEnv(t)
-	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST", "minimax/MiniMax-M3.1-Flash")
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST", "minimax/MiniMax-M2.7")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got := cfg.LiteLLM.ModelAliases["fast"]; got != "minimax/MiniMax-M3.1-Flash" {
+	if got := cfg.LiteLLM.ModelAliases["fast"]; got != "minimax/MiniMax-M2.7" {
 		t.Fatalf("ModelAliases = %v, want the fast alias from the environment", cfg.LiteLLM.ModelAliases)
 	}
 }

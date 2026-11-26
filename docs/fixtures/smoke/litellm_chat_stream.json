@@ -1,0 +1,26 @@
+{
+  "case": "litellm_chat_stream",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 2273,
+    "events": [
+      "data: <chunk>",
+      "data: <chunk>",
+      "data: <chunk>",
+      "data: <chunk>",
+      "data: [DONE]"
+    ],
+    "final_usage": {
+      "completion_tokens": 13,
+      "prompt_tokens": 147,
+      "total_tokens": 160,
+      "completion_tokens_details": "***REDACTED***",
+      "prompt_tokens_details": "***REDACTED***",
+      "cache_creation_input_tokens": 0
+    },
+    "assistant_deltas": 1,
+    "content_chars": 4,
+    "verdict": "VERIFIED"
+  }
+}

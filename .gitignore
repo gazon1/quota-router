@@ -8,3 +8,5 @@ config.yaml
 
 # Local run output, including review reports.
 build/
+__pycache__/
+*.pyc

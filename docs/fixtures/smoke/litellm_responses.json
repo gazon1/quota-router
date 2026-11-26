@@ -1,0 +1,68 @@
+{
+  "case": "litellm_responses",
+  "response": {
+    "ok": true,
+    "status": 200,
+    "elapsed_ms": 8090,
+    "body": {
+      "id": "***REDACTED***",
+      "created_at": 1795709897,
+      "error": null,
+      "incomplete_details": null,
+      "metadata": {},
+      "model": "commandcode/stealth/glyph-cluster:free",
+      "object": "response",
+      "output": [
+        {
+          "id": "***REDACTED***",
+          "content": [
+            {
+              "annotations": [],
+              "text": "pong",
+              "type": "output_text",
+              "logprobs": []
+            }
+          ],
+          "role": "assistant",
+          "status": "completed",
+          "type": "message",
+          "phase": null
+        }
+      ],
+      "parallel_tool_calls": true,
+      "temperature": 1.0,
+      "tool_choice": "auto",
+      "tools": [],
+      "top_p": 1.0,
+      "max_output_tokens": null,
+      "status": "completed",
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "truncation": "disabled",
+      "usage": {
+        "input_tokens": 143,
+        "input_tokens_details": "***REDACTED***",
+        "output_tokens": 240,
+        "output_tokens_details": "***REDACTED***",
+        "total_tokens": 383,
+        "cost": null
+      },
+      "user": null,
+      "store": false,
+      "completed_at": 1795709897,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "top_logprobs": 0,
+      "max_tool_calls": null,
+      "background": false,
+      "service_tier": "auto",
+      "safety_identifier": "d317eca2fec56075859d043bf5b2520c6006f74931b9597706dc29ef7ca9860f",
+      "prompt_cache_key": null,
+      "prompt_cache_retention": null
+    },
+    "verdict": "VERIFIED"
+  }
+}

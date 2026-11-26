@@ -23,12 +23,17 @@ server:
 litellm:
   base_url: http://127.0.0.1:4000
   model_aliases:
-    fast: minimax/MiniMax-M3.1-Flash
+    fast: minimax/MiniMax-M2.7
 
 providers:
+  # Provider base URLs are quota surfaces read by the Controller, never inference
+  # endpoints: LiteLLM owns inference. MiniMax serves quota from www.minimax.io
+  # while inference lives on api.minimax.io, so pointing this at the inference
+  # host silently polls nothing.
   minimax:
-    base_url: https://api.minimax.io/v1
-    # api_key: set QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY instead
+    base_url: https://www.minimax.io/v1
+    # api_key: set QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY to the Token Plan
+    # subscription key (sk-cp-...), the same credential litellm uses.
 
 polling:
   interval: 30s

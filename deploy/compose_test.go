@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // TestComposeContract guards the #6 acceptance criteria that would otherwise
@@ -173,6 +175,173 @@ func publishedPorts(block string) []string {
 		ports = append(ports, strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")), `"'`))
 	}
 	return ports
+}
+
+// TestLiteLLMConfigContract guards the provider wiring verified in issue #8.
+// Each assertion encodes a failure measured against the pinned image, so a
+// regression fails here instead of surfacing as a confusing runtime error.
+func TestLiteLLMConfigContract(t *testing.T) {
+	cfg := readLiteLLMConfig(t)
+
+	// The full tuple per model, decoded rather than matched as text: quoting a
+	// value is legal YAML and must not fail the build, while a changed upstream
+	// provider, base URL or credential name must.
+	want := map[string]struct{ model, apiBase, apiKey string }{
+		"minimax/MiniMax-M2.7": {
+			model:   "openai/MiniMax-M2.7",
+			apiBase: "https://api.minimax.io/v1",
+			apiKey:  "os.environ/MINIMAX_TOKEN_PLAN_KEY",
+		},
+		"commandcode/recursive/flint-v1.0:free": {
+			model:   "openai/recursive/flint-v1.0:free",
+			apiBase: "https://api.commandcode.ai/provider/v1",
+			apiKey:  "os.environ/COMMAND_CODE_API_KEY",
+		},
+		"commandcode/stealth/glyph-cluster:free": {
+			model:   "openai/stealth/glyph-cluster:free",
+			apiBase: "https://api.commandcode.ai/provider/v1",
+			apiKey:  "os.environ/COMMAND_CODE_API_KEY",
+		},
+		"commandcode/deepseek-v4.1-flash": {
+			model: "anthropic/deepseek/deepseek-v4.1-flash",
+			// LiteLLM appends /v1/messages to an anthropic api_base, so a trailing
+			// /v1 produces .../v1/v1/messages and a 404. Verified on the image.
+			apiBase: "https://api.commandcode.ai/provider",
+			apiKey:  "os.environ/COMMAND_CODE_API_KEY",
+		},
+	}
+	if len(cfg.models) != len(want) {
+		t.Errorf("litellm-config.yaml: %d models configured, expected %d", len(cfg.models), len(want))
+	}
+	// A duplicate would otherwise pay for a missing model in the count check.
+	seen := map[string]int{}
+	for _, m := range cfg.models {
+		seen[m.name]++
+	}
+	for name, n := range seen {
+		if n != 1 {
+			t.Errorf("litellm-config.yaml: model %q is configured %d times", name, n)
+		}
+	}
+	for _, m := range cfg.models {
+		want, ok := want[m.name]
+		if !ok {
+			t.Errorf("litellm-config.yaml: unexpected model %q", m.name)
+			continue
+		}
+		if m.model != want.model {
+			t.Errorf("litellm-config.yaml: %s model = %q, want %q", m.name, m.model, want.model)
+		}
+		if m.apiBase != want.apiBase {
+			t.Errorf("litellm-config.yaml: %s api_base = %q, want %q", m.name, m.apiBase, want.apiBase)
+		}
+		if m.apiKey != want.apiKey {
+			t.Errorf("litellm-config.yaml: %s api_key = %q, want %q (never a literal)", m.name, m.apiKey, want.apiKey)
+		}
+		// An anthropic provider with no api_base would fall through to the vendor's
+		// default host, which is not this account's provider.
+		if strings.HasPrefix(m.model, "anthropic/") && m.apiBase == "" {
+			t.Errorf("litellm-config.yaml: %s needs an explicit api_base", m.name)
+		}
+	}
+
+	// Inference and quota are different hosts. A quota host used as api_base
+	// would make every model request a quota lookup.
+	for _, m := range cfg.models {
+		if strings.Contains(m.apiBase, "www.minimax.io") {
+			t.Errorf("litellm-config.yaml: %s api_base uses the quota host, not the inference host", m.name)
+		}
+	}
+	// Verified: without disable_cooldowns, one rejected provider key marks the
+	// deployment unhealthy and the next request answers 429, which reads as rate
+	// limiting; num_retries must stay 0 so a retry cannot repeat a tool call.
+	if !cfg.router.DisableCooldowns {
+		t.Error("litellm-config.yaml: router_settings.disable_cooldowns must be true")
+	}
+	if cfg.router.NumRetries != 0 {
+		t.Errorf("litellm-config.yaml: router_settings.num_retries = %d, want 0", cfg.router.NumRetries)
+	}
+}
+
+// liteLLMConfig is the slice of the proxy config these tests assert on.
+type liteLLMConfig struct {
+	raw    string
+	models []liteLLMModel
+	router struct {
+		DisableCooldowns bool `yaml:"disable_cooldowns"`
+		NumRetries       int  `yaml:"num_retries"`
+	}
+}
+
+type liteLLMModel struct {
+	name    string
+	model   string
+	apiBase string
+	apiKey  string
+}
+
+// readLiteLLMConfig decodes litellm-config.yaml with the YAML parser the project
+// already depends on through koanf, so a quoted or reflowed value is judged by
+// meaning rather than by spelling.
+func readLiteLLMConfig(t *testing.T) liteLLMConfig {
+	t.Helper()
+	raw, err := os.ReadFile("litellm-config.yaml")
+	if err != nil {
+		t.Fatalf("read litellm-config.yaml: %v", err)
+	}
+	var doc struct {
+		ModelList []struct {
+			ModelName  string `yaml:"model_name"`
+			Parameters struct {
+				Model   string `yaml:"model"`
+				APIBase string `yaml:"api_base"`
+				APIKey  string `yaml:"api_key"`
+			} `yaml:"litellm_params"`
+		} `yaml:"model_list"`
+		Router struct {
+			DisableCooldowns bool `yaml:"disable_cooldowns"`
+			NumRetries       int  `yaml:"num_retries"`
+		} `yaml:"router_settings"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse litellm-config.yaml: %v", err)
+	}
+	cfg := liteLLMConfig{raw: string(raw), router: doc.Router}
+	for _, m := range doc.ModelList {
+		cfg.models = append(cfg.models, liteLLMModel{
+			name: m.ModelName, model: m.Parameters.Model,
+			apiBase: m.Parameters.APIBase, apiKey: m.Parameters.APIKey,
+		})
+	}
+	return cfg
+}
+
+// TestEnvExampleCoversConfig reads the variables litellm-config.yaml injects and
+// requires each to be declared in .env.example, so setup cannot miss one.
+func TestEnvExampleCoversConfig(t *testing.T) {
+	cfg, err := os.ReadFile("litellm-config.yaml")
+	if err != nil {
+		t.Fatalf("read litellm-config.yaml: %v", err)
+	}
+	env, err := os.ReadFile(".env.example")
+	if err != nil {
+		t.Fatalf("read .env.example: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, line := range strings.Split(string(env), "\n") {
+		if name, _, ok := strings.Cut(strings.TrimSpace(line), "="); ok && !strings.HasPrefix(name, "#") {
+			declared[name] = true
+		}
+	}
+	for _, line := range strings.Split(string(cfg), "\n") {
+		name, ok := strings.CutPrefix(strings.TrimSpace(line), "api_key: os.environ/")
+		if !ok {
+			continue
+		}
+		if !declared[name] {
+			t.Errorf(".env.example does not declare %q, which litellm-config.yaml requires", name)
+		}
+	}
 }
 
 // TestDockerignoreExcludesSecrets guards the controller's build context: the
