@@ -64,7 +64,8 @@ LiteLLM resolves requests by `model_name`, so the alias documented in
 `<provider>/<model>` string, verified to resolve:
 
 ```
-GET /v1/models -> minimax/MiniMax-M3.1-Flash, commandcode/gpt-5.6-sol, commandcode/deepseek-v4.1-flash
+GET /v1/models -> minimax/MiniMax-M2.7, commandcode/recursive/flint-v1.0:free,
+                  commandcode/stealth/glyph-cluster:free, commandcode/deepseek-v4.1-flash
 ```
 
 ### Defect 2: a rejected provider key resurfaced as `429` on the next request
@@ -130,7 +131,8 @@ openai:    MiniMax-M3.1-Flash, MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed,
 anthropic: identical list
 ```
 
-Both protocols agree, so `MiniMax-M3.1-Flash` is a verified model ID, not a guess.
+Both protocols agree, so `MiniMax-M2.7` is a verified model ID, not a guess. It is the
+model configured in `deploy/litellm-config.yaml`.
 
 ### MiniMax inference
 
@@ -139,15 +141,17 @@ model on both protocols, with the valid key, returns the same documented
 business error:
 
 ```
-POST /v1/chat/completions   MiniMax-M3.1-Flash -> 429  rate_limit_error
+POST /v1/chat/completions   MiniMax-M2.7      -> 429  rate_limit_error
                                                      "Token Plan usage limit reached: Upgrade your
                                                       Token Plan or purchase Credits for more usage. (2056)"
 POST /v1/chat/completions   MiniMax-M3, -M2.7    -> 429  (same 2056)
+POST /v1/chat/completions   MiniMax-M3.1-Flash -> 429  (same 2056)
 POST /anthropic/v1/messages MiniMax-M3.1-Flash   -> 429  (same 2056)
 ```
 
-So **authenticated successful streaming and tool calls were not reproduced on
-MiniMax** and remain unverified for this issue. The key itself is valid — the
+Every probed model returns the same business error, so the quota is exhausted account-wide
+rather than per-model. So **authenticated successful streaming and tool calls were not
+reproduced on MiniMax** and remain unverified for this issue. The key itself is valid — the
 same key returns `200` on `/models` and on the quota endpoint — so this
 distinguishes *plan/usage exhaustion* (`2056`) from *authentication failure*
 (`1004`/`2049`), which the issue asks for. Nothing here indicates that the
@@ -213,6 +217,8 @@ the path. Representative rows ([full snapshot](./fixtures/smoke/commandcode_cata
 
 | Model id | `supported_endpoints` |
 |---|---|
+| `stealth/glyph-cluster:free` — configured | `/chat/completions`, `/responses` |
+| `recursive/flint-v1.0:free` — configured | `/chat/completions`, `/responses` |
 | `gpt-5.6-sol`, `gpt-6.2-astra`, `deepseek/deepseek-v4-pro` | `/chat/completions`, `/responses` |
 | `deepseek/deepseek-v4.1-flash` | `/chat/completions`, `/responses`, `/messages` — the model configured for the Anthropic-shaped route |
 | `MiniMaxAI/MiniMax-M3` | `/chat/completions`, `/responses` |
@@ -237,6 +243,7 @@ All measured through LiteLLM and directly.
 | Cancellation | Client closing the stream mid-flight is billed for produced tokens — measured `+0.001409` five-hour credits after aborting 3 chunks in |
 | Final usage metadata | Streaming usage arrives in the last chunk, so a cancelled stream yields **no** usage object |
 | Insufficient plan | `403 permission_error` `MODEL_NOT_IN_PLAN: … available in Pro and above plans or extra on demand usage` |
+| Free-tier daily cap | `429`, `"You've used all 1000 free Flint requests for today. Your quota resets at <ISO-8601>"` — replicated on `/chat/completions`, `/responses` and through LiteLLM |
 
 Cancellation matters for the issue's retry rule: a cancelled stream has already
 consumed quota and possibly executed a tool, so a retry is not free. This is why

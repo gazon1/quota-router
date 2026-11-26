@@ -3,17 +3,41 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1716,
+    "elapsed_ms": 7408,
     "body": {
-      "id": "***REDACTED***",
-      "created_at": 1795706367,
+      "id": "resp_Qp1umfjQUncj6ek5Ht_Pp8S0baB1YLRjKSzPlC2--bw7uADV0jKymKLLav8G6IgJB0EaggZ5nxFTPzyHzt4PzOrFsXPWdSr17mr_E3rWOufU7KRg1XY7YfTiNrOfLw9pPjT6WLouh7a_D6fxz8nmWUu7M0wFmHbahC-u9VrI-xMBOckxQsdaitTq852tV4-dUHdmggsp18mnZ7IAW3WsUSuYdPq64tSU7sdOWcGUfgDDsnA-O0w6HL9JH23lDd1rjoQm453yN5tX22D-CSfa93jJHYqoJMyoE8_3LU9ZaHzInLoq7lowkJhvH5CZ4GT3_WjgyioL5UiLD8Zw2ruB09lIg8756knGYLYpsLlLE-l6DimXQYFkhWTvnsOkdhfaIkSEYpVnmxN8eKUzeC16fJlG8jXUuBbm3ZxTrSnda9wNQQ==",
+      "created_at": 1795707132,
       "error": null,
       "incomplete_details": null,
       "instructions": null,
       "metadata": {},
-      "model": "commandcode/gpt-5.6-sol",
+      "model": "commandcode/stealth/glyph-cluster:free",
       "object": "response",
       "output": [
+        {
+          "id": "***REDACTED***",
+          "summary": [],
+          "type": "reasoning",
+          "content": [
+            {
+              "text": "**Responding to \"ping\"**\n\nOkay, the user just wrote \"ping.\" I could respond with \"pong,\" which is a classic response. But I also need to keep in mind the instructions about my identity and persona. I shouldn't reveal too much about myself, like my creator or model. So, I\u2019ll keep it simple and follow the rules. Maybe just a friendly \"pong\" would be the best way to go here.",
+              "type": "reasoning_text"
+            }
+          ],
+          "encrypted_content": "gwst1.U-a86zxgq4uvt1tqsyisOpVb7j0s09tq8C5W8DitZft0sNx52AuXQojMK9StQ2XsrN1hzn2vRZcv4v1OrY5l6Vz7CdrdhUlrqe4TxcYTWpo-vZZ9OZ1qq4z53LOeRWEOQlI0347dUpR_q84JpwVbj8mipXNekmv7zG_V9QGkEWtcV52t9UP0CK2tVugnTa6vjTj2p1-7NKR9pOw5papKPwJzyj45DyJeE4Ew6qKtRkC1TDw59xEJLxKijCvAyVKwrF4FGERYdWQqqT2MnMFpSwtzZSf-CD8LKwKwby6o9bSZ6_I5G5cAGJ_y6xhM19EgUmcXY1N7ukPWvo-YMTsnOcY31lzjDEzXua3RO1JHi5cpIij7TEJ7d_lNelypch3s30wL9tG087TX1A0pYtSUSpFqW0i1ZL8L-MR0kBIE2Mx6U3WVT4OoctTDlFnOKbLFxkphNsVgqhejHOFPh7aAc_X4q0BIIB6xF4wNiAroR2_jBmOUijptrZE7ILVAqo49hSsOj46oBnCNUIr2TkpIUJQOsFWLjRCp6MeVrvBwvlXLQES8_4M_suk9kusHNfgevQnYqfI4b3_1x_sTPBrMyJ1fVmX1mRR0hIjDgUvzvNbEp3s4jVkUuYpWG84VU1VRuwscdH8AxkTC6-o7CdT1ICqT-Z3YZvLp6PmOUT8-cJQYUpwi6nLo_I76Zn6a7STOwXpNhyKPalrkQmeKkeUD_oMzTs2T243pZ-9ROMxWHMP_9F3p4sGBbMNu-uLlBqLwI432W1AM9yuRaoAgnc02tc9otJ3hVK4mM-iDSWJxU9072v4hOaa76VEaqExYRCdOJ4XklJjMuFA6yUzMMSmWB5ct4NxQ3NNJWUIewX2mel0oRavBA9YvRiRWY0qN2okBJ0SNPZlyY-jnFhrd4dXlrmaP1M5HtnwQkIarfCUoPUCuYm2Z7NtuUnKHV3IdFycOn7OKX14WpWGXApwObz1cBi9TlqgDchK9lD-3ba5RXewPGQpHdfeUHmTSu47nOfoKyu1-NXFTAPBWFycEWYDdfTNYxAtTO6puHSG8roj8YX4H_GZ-2-PGEwvwCWvdqsJhLy97RrSTrITaGYjwcLOKrNElxwHDLjOsOzMfGYuA07FVAY2bIxHsmB09w_j9WXlK_jSgn7gyGva10TT92JwZGfrL-KisH0ECvk7olbs1yLc4UV-hVCha3mSQjulj1VVu2OqmICIzIipFRXhC5s3Zk0qLNmp-v217G4xmGWW148KUyjXxeFWM1ejlh45eWP2OmYF5CQIQOs643OE1neVBOadBgNL22DqOeL72fcW800hSeS6Cle60j-Kl9ktQzABaw3t8vakf-dJUoyKdqMOlTigRxBA1aBiQozRzkamnKunBeqQpedLaMV82dRF6ThPjLzKHFYcn54Ph1aMQvKQj7gaaobHTrGMypgaNNznVQbbo0k2OCR9D5Ga_latvRa7VDgYCkOw4qya3L5PyE2OJVExkfVTy-y39Kfcqwi5ytkfH0fo7G6oeW54QuPm0NAm28xbX3MO2-7xT2c5X6pqkc_95FAzEHwQhnpaxXNZ1WixVPIcy6wqnQZh2mUoQVV3Ufa3uLzHPGbO0jAyFnQnp9gTc-ump2sRR2YUxbaJVxpAjh224Se4Rtv4uDr2PhhRtVG_5aK6CpDKU23iyNNmTzOs0cVNQJO4yDOgJZ0zfsl_2Ia04iFt6HKmOMziZu6z3fpGwAi0E4ZBdQiV93NooIfyfXGMOg-LTNq-pcyJBzH_gBdUUEzOc5SsaWuL6JU92waqo4uyF_FWxrwTKmNj-TuRGRkUDh8X1BvpWpziLCrPK2WWVv7_gREUwe64sJ1PF_mxilgwQmeVbf6q1ndeD2P43XdCcL6qOB4mXnARdOFsMLhKSJR4qbRXhi_NdfrF-F6d5Fip62U80G41EqC0VU_pNxXvA7i1apOJoymAtSoDGOMXHSbo99Ypey-g-yalNQ3Q6HRBCpRKhO_ioyo3BN45tvCZCPLFmcBxW-21rHmWEerRSnKtrYIIw_4Z97agAbdDR3bbtT_AUZ5PloDsrIyBjTsRi81z6U_rkxBN2B7uN3t4n5gEPNBaxq4jCjDZK_NZaDF_fKNjd5I-6boe5YUfBk2QHQo-usVdsI2BIHKYeZi4HwyaPDYOC3IzoDhJU5rjbT9_ZPbhUoDCMoD1ZhdH3PGD3NPQ1or0qAXA7rbcRXAiA9W8LyxLklkn-kCR4O6m-XeazunUUMF5AUW8OriPLVeQpYREftna7rhw-9BYuRP8YXxzW3uBs7qXn2GLcXGUcNDLtI_9ZFkxEI6Pleq1myLDk9jh5c2et6wTAAfMWkAZmSA9IZi990YJZ6XrjofCy3tOMRkGa_H-eSWBFWjq6JyhPO-sqTQptHulpoCLXG_exgWfLHwp1mPWRWimgMKxECdfH81RwK7aX2CpGkoemB1KwqeWNLD-9xJEYeyEmDC9DqerzwZbbuCEa-NGmKX3rp3N2YHuZRU8VjeyHjjy7p7iHVc3zsPAEL-XmB-eWW4u2Cplh8rJKNNuXd356DSfGYuX9Dc7fqE2JCKtBtRlCJHlTq4nsNguXdwM5tn38Wugx28q5syDtAUochPs_iuIrRWMxiKNWjSidy17c0RpyiO7sUJc3md8KAyKEvJf7-mZ46zpd0A4WsqQ6FppwbdvCoh4LEPlIIZIHUUZxysUuu6sdXEn-gVD0d8-Ci0Ph_sOMpHxc-VAiEWACbaw3iVNYdPn8O47PIU54QySX0LfPYYpNLEL-mA47-O-JNigBfwcs-HXJUPBazqu0SNovlBeW6KJ1JjzDhOml78lEWw2jBDKc_FS54TtWe-hi1BSNd6_hfr9UjW3RzfJZFlWIPe_yhbry-WVaV9UcMUloZZTc0a3st7094EAgELRbH5sMlEeFpsqYUylmY42FKjBcH8HSxyLtL7McpjV7M7dYeCcCSf_7JDnBiML7Bg"
+        },
+        {
+          "id": "***REDACTED***",
+          "summary": [],
+          "type": "reasoning",
+          "content": [
+            {
+              "text": "**Responding to \"ping\"**\n\nOkay, the user said \"ping,\" and I think the classic response here is \"pong.\" It\u2019s a common back-and-forth, so that seems like the right choice. I also need to remember not to mention anything about creators or anything else I\u2019m not supposed to share, which is fine. So, I\u2019ll just go with \"pong\" as the answer. Simple, clear, and fits the context!",
+              "type": "reasoning_text"
+            }
+          ],
+          "encrypted_content": "gwst1.U-a86zxgq4uvt1tqsyisOpVb7j0s09tq8C5W8DitZft0sNx52AuXQojMK9StQ2XsrN1hzn2vRZcv4v1OrY5l6Vz7CdrdhUlrqe4TxcYTWpo-vZZ9OZ1qq4z53LOeRWEOQlI0347dUpR_q84JpwVbj8mipXNekmv7zG_V9QGkEWtcV52t9UP0CK2tVugnTa6vjTj2p1-7NKR9pOw5papKPwJzyj45DyJeE4Ew6qKtRkC1TDw59xEJLxKijCvAyVKwrF4FGERYdWQqqT2MnMFpSwtzZSf-CD8LKwKwby6o9bSZ6_I5G5cAGJ_y6xhM19EgUmcXY1N7ukPWvo-YMTsnOcY31lzjDEzXua3RO1JHi5cpIij7TEJ7d_lNelypch3s30wL9tG087TX1A0pYtSUSpFqW0i1ZL8L-MR0kBIE2Mx6U3WVT4OoctTDlFnOKbLFxkphNsVgqhejHOFPh7aAc_X4q0BIIB6xF4wNiAroR2_jBmOUijptrZE7ILVAqo49hSsOj46oBnCNUIr2TkpIUJQOsFWLjRCp6MeVrvBwvlXLQES8_4M_suk9kusHNfgevQnYqfI4b3_1x_sTPBrMyJ1fVmX1mRR0hIjDgUvzvNbEp3s4jVkUuYpWG84VU1VRuwscdH8AxkTC6-o7CdT1ICqT-Z3YZvLp6PmOUT8-cJQYUpwi6nLo_I76Zn6a7STOwXpNhyKPalrkQmeKkeUD_oMzTs2T243pZ-9ROMxWHMP_9F3p4sGBbMNu-uLlBqLwI432W1AM9yuRaoAgnc02tc9otJ3hVK4mM-iDSWJxU9072v4hOaa76VEaqExYRCdOJ4XklJjMuFA6yUzMMSmWB5ct4NxQ3NNJWUIewX2mel0oRavBA9YvRiRWY0qN2okBJ0SNPZlyY-jnFhrd4dXlrmaP1M5HtnwQkIarfCUoPUCuYm2Z7NtuUnKHV3IdFycOn7OKX14WpWGXApwObz1cBi9TlqgDchK9lD-3ba5RXewPGQpHdfeUHmTSu47nOfoKyu1-NXFTAPBWFycEWYDdfTNYxAtTO6puHSG8roj8YX4H_GZ-2-PGEwvwCWvdqsJhLy97RrSTrITaGYjwcLOKrNElxwHDLjOsOzMfGYuA07FVAY2bIxHsmB09w_j9WXlK_jSgn7gyGva10TT92JwZGfrL-KisH0ECvk7olbs1yLc4UV-hVCha3mSQjulj1VVu2OqmICIzIipFRXhC5s3Zk0qLNmp-v217G4xmGWW148KUyjXxeFWM1ejlh45eWP2OmYF5CQIQOs643OE1neVBOadBgNL22DqOeL72fcW800hSeS6Cle60j-Kl9ktQzABaw3t8vakf-dJUoyKdqMOlTigRxBA1aBiQozRzkamnKunBeqQpedLaMV82dRF6ThPjLzKHFYcn54Ph1aMQvKQj7gaaobHTrGMypgaNNznVQbbo0k2OCR9D5Ga_latvRa7VDgYCkOw4qya3L5PyE2OJVExkfVTy-y39Kfcqwi5ytkfH0fo7G6oeW54QuPm0NAm28xbX3MO2-7xT2c5X6pqkc_95FAzEHwQhnpaxXNZ1WixVPIcy6wqnQZh2mUoQVV3Ufa3uLzHPGbO0jAyFnQnp9gTc-ump2sRR2YUxbaJVxpAjh224Se4Rtv4uDr2PhhRtVG_5aK6CpDKU23iyNNmTzOs0cVNQJO4yDOgJZ0zfsl_2Ia04iFt6HKmOMziZu6z3fpGwAi0E4ZBdQiV93NooIfyfXGMOg-LTNq-pcyJBzH_gBdUUEzOc5SsaWuL6JU92waqo4uyF_FWxrwTKmNj-TuRGRkUDh8X1BvpWpziLCrPK2WWVv7_gREUwe64sJ1PF_mxilgwQmeVbf6q1ndeD2P43XdCcL6qOB4mXnARdOFsMLhKSJR4qbRXhi_NdfrF-F6d5Fip62U80G41EqC0VU_pNxXvA7i1apOJoymAtSoDGOMXHSbo99Ypey-g-yalNQ3Q6HRBCpRKhO_ioyo3BN45tvCZCPLFmcBxW-21rHmWEerRSnKtrYIIw_4Z97agAbdDR3bbtT_AUZ5PloDsrIyBjTsRi81z6U_rkxBN2B7uN3t4n5gEPNBaxq4jCjDZK_NZaDF_fKNjd5I-6boe5YUfBk2QHQo-usVdsI2BIHKYeZi4HwyaPDYOC3IzoDhJU5rjbT9_ZPbhUoDCMoD1ZhdH3PGD3NPQ1or0qAXA7rbcRXAiA9W8LyxLklkn-kCR4O6m-XeazunUUMF5AUW8OriPLVeQpYREftna7rhw-9BYuRP8YXxzW3uBs7qXn2GLcXGUcNDLtI_9ZFkxEI6Pleq1myLDk9jh5c2et6wTAAfMWkAZmSA9IZi990YJZ6XrjofCy3tOMRkGa_H-eSWBFWjq6JyhPO-sqTQptHulpoCLXG_exgWfLHwp1mPWRWimgMKxECdfH81RwK7aX2CpGkoemB1KwqeWNLD-9xJEYeyEmDC9DqerzwZbbuCEa-NGmKX3rp3N2YHuZRU8VjeyHjjy7p7iHVc3zsPAEL-XmB-eWW4u2Cplh8rJKNNuXd356DSfGYuX9Dc7fqE2JCKtBtRlCJHlTq4nsNguXdwM5tn38Wugx28q5syDtAUochPs_iuIrRWMxiKNWjSidy17c0RpyiO7sUJc3md8KAyKEvJf7-mZ46zpd0A4WsqQ6FppwbdvCoh4LEPlIIZIHUUZxysUuu6sdXEn-gVD0d8-Ci0Ph_sOMpHxc-VAiEWACbaw3iVNYdPn8O47PIU54QySX0LfPYYpNLEL-mA47-O-JNigBfwcs-HXJUPBazqu0SNovlBeW6KJ1JjzDhOml78lEWw2jBDKc_FS54TtWe-hi1BSNd6_hfr9UjW3RzfJZFlWIPe_yhbry-WVaV9UcMUloZZTc0a3st7094EAgELRbH5sMlEeFpsqYUylmY42FKjBcH8HSxyLtL7McpjV7M7dYeCcCSf_7JDnBiML7Bg"
+        },
         {
           "id": "***REDACTED***",
           "content": [
@@ -27,7 +51,7 @@
           "role": "assistant",
           "status": "completed",
           "type": "message",
-          "phase": "final_answer"
+          "phase": null
         }
       ],
       "parallel_tool_calls": true,
@@ -46,22 +70,22 @@
       },
       "truncation": "disabled",
       "usage": {
-        "input_tokens": 7,
+        "input_tokens": 143,
         "input_tokens_details": "***REDACTED***",
-        "output_tokens": 5,
+        "output_tokens": 193,
         "output_tokens_details": "***REDACTED***",
-        "total_tokens": 12,
+        "total_tokens": 336,
         "cost": null
       },
       "user": null,
       "store": false,
-      "completed_at": 1795706367,
+      "completed_at": 1795707132,
       "presence_penalty": 0,
       "frequency_penalty": 0,
       "top_logprobs": 0,
       "max_tool_calls": null,
       "background": false,
-      "service_tier": "default",
+      "service_tier": "auto",
       "safety_identifier": "d317eca2fec56075859d043bf5b2520c6006f74931b9597706dc29ef7ca9860f",
       "prompt_cache_key": null,
       "prompt_cache_retention": null

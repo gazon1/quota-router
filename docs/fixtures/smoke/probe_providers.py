@@ -30,8 +30,12 @@ MINIMAX_INFERENCE = "https://api.minimax.io/v1"
 MINIMAX_ANTHROPIC = "https://api.minimax.io/anthropic"
 MINIMAX_QUOTA = "https://www.minimax.io/v1/token_plan/remains"
 COMMANDCODE_BASE = "https://api.commandcode.ai/provider/v1"
-MINIMAX_MODEL = "MiniMax-M3.1-Flash"
-CC_OPENAI_MODEL = os.environ.get("CC_OPENAI_MODEL", "gpt-5.6-sol")
+MINIMAX_MODEL = os.environ.get("MINIMAX_MODEL", "MiniMax-M2.7")
+CC_OPENAI_MODEL = os.environ.get("CC_OPENAI_MODEL", "stealth/glyph-cluster:free")
+# Second OpenAI-shaped model in the config. Free-tier models carry a daily request
+# cap, so its status is recorded without an expectation: a 429 here is the plan
+# signal, not a regression.
+CC_OPENAI_MODEL_2 = os.environ.get("CC_OPENAI_MODEL_2", "recursive/flint-v1.0:free")
 CC_ANTHROPIC_MODEL = os.environ.get("CC_ANTHROPIC_MODEL", "deepseek/deepseek-v4.1-flash")
 # The mismatch cases need a model that is listed on exactly one endpoint, so the
 # proxy cannot serve it on the other. deepseek-v4.1-flash advertises all three,
@@ -44,20 +48,27 @@ USER_AGENT = "quota-router-smoke/1.0"
 
 REDACT_KEYS = ("key", "authorization", "cookie", "secret", "token",
                "userid", "priceid", "planid", "fbp", "subscription")
-REDACT_VALUES = {"email", "name", "userName", "userId", "id", "request_id",
+REDACT_VALUES = {"email", "name", "userName", "userId", "request_id",
                  "requestId", "orgId", "subscription", "customer"}
+MODEL_OBJECT_KEYS = {"object", "owned_by", "context_length", "supported_endpoints",
+                     "display_name", "created_at"}
 
 
 def redact(obj):
+    """Drops credentials and account identity, but keeps model ids: a model id is
+    the evidence this file exists to record."""
     if isinstance(obj, dict):
+        is_model = (obj.get("object") == "model" or bool(MODEL_OBJECT_KEYS & set(obj))
+                    or ("id" in obj and isinstance(obj.get("id"), str)
+                        and ("/" in obj["id"] or ":" in obj["id"])))
         out = {}
         for k, v in obj.items():
-            # Suffix matching catches camelCase ids such as commandCodeUserId,
-            # which a lowercase allowlist of whole names let through.
             lk = k.lower()
-            if any(p in lk for p in REDACT_KEYS) and not isinstance(v, (int, float, bool, type(None))):
-                out[k] = "***REDACTED***"
-            elif k in REDACT_VALUES and not isinstance(v, (int, float, bool, type(None))):
+            if isinstance(v, (int, float, bool, type(None))):
+                out[k] = v
+            elif k == "id":
+                out[k] = v if is_model else "***REDACTED***"
+            elif any(p in lk for p in REDACT_KEYS) or k in REDACT_VALUES:
                 out[k] = "***REDACTED***"
             else:
                 out[k] = redact(v)
@@ -207,6 +218,9 @@ def main() -> int:
         record("commandcode_chat_stream",
                call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth, {**chat, "stream": True},
                     timeout=90, stream=True))
+        record("commandcode_chat_second",
+               call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth,
+                    {**chat, "model": CC_OPENAI_MODEL_2}, timeout=90))
         record("commandcode_responses",
                call("POST", f"{COMMANDCODE_BASE}/responses", auth,
                     {"model": CC_OPENAI_MODEL, "input": "Reply with exactly: pong"}, timeout=90))

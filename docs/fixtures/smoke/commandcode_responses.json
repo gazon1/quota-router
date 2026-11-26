@@ -3,16 +3,22 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1862,
+    "elapsed_ms": 2768,
     "body": {
-      "id": "***REDACTED***",
+      "id": "gen_01M8C7R14C61F7MAMAB13E0KX7",
       "object": "response",
-      "created_at": 1795706354,
+      "created_at": 1795707112,
       "status": "completed",
-      "completed_at": 1795706354,
+      "completed_at": 1795707112,
       "incomplete_details": null,
       "error": null,
       "output": [
+        {
+          "type": "reasoning",
+          "id": "***REDACTED***",
+          "summary": [],
+          "encrypted_content": "gwst1.vhnlCP5-HqVkSp3JfwTXFUjAVtvKnN74tCUYewrDZALcigsAPSLdAZlMm-hqr6tfEW4jbqKX5rIk0Fyp6PRy7WU2Wwsi8HdygcD1i8zivLPwDAf3JsMbdrRIKmbgr8VsGvtQq8OSYsM0LmagTxqH4c8tYnl9T5O0t0icx2w_JpYL5B5Iq5szoQizQNUTCjdV3iicbnftcXkkKy7tl9GsIU54ybCW0U-WubIjLpDCl3jcgotrA0gLXTAHxfe_Ka6zj4-L8vUmAC0RZdOSdGE3o1RCXdwKIKaCJEEn28fC1mP1TiO3ZlBNGQAfH1Z2dyvTLkagfbsZ0pJD7-qL4rmnCmaoe89ZZrYEosq3kBApCNwyBbk4tb6NXFQxJu62C7g4Ph6VoIMvNDXWoiT5Rh3LZ7i7abxD5PSGZocYFa1f5stuZHyIaYjiLp8BykKORToNoNgHAszPxau_owUV0eUnTU-xFOhuqFHDVU36tlvnoJju2HBc5Nh58ugk2Gy_0LTXMBpnj3hHutDdZRcY6MrnS_JrbA1Csqq7x_XntVbmPLzf9d8ok9Fn8TwAAqqLIohfPu4T0zrk62YVFobwWTJ5khrtAEI_JcWCvA2gjaZx9jtxHa1KQJrdEnGoCSS4MbsrB5jSFtF_Fz_OuUSQ6tBFwHjIbc7hAg68NuH6lx-7Fityw7cQCcvGzTdNF664ET2GY8holDgzP7a_NKi_q9zbvue8EfnoSeHdQTrQ_23QTZ-m0wtdqe5IYaZ5T1-6kzBYNZnk7vciCD0CfP1AOiZYu8NOJZZWG0GdF69EHWmTmQRl3ivffo3xnOeSH3vK37UlvOW8E88_6L2RqiJV8AeU22U3X_WYTyfayAAK15vtQgWo53vyHFAIRQU0jw7YosuiGoGPFo-jTr6Cq8Im0-V6ngirc0j0mBT7Qv3YAHKpm8Ia6siL80ypbvRQrQobI_8jsOwV68e_q2l7PSTlHdCB0TryuD2fwZiGw5kLAFqXKgw_i2ALpMtoDw"
+        },
         {
           "type": "message",
           "id": "***REDACTED***",
@@ -25,18 +31,17 @@
               "annotations": [],
               "logprobs": []
             }
-          ],
-          "phase": "final_answer"
+          ]
         }
       ],
       "usage": {
-        "input_tokens": 11,
-        "output_tokens": 5,
-        "total_tokens": 16,
+        "input_tokens": 147,
+        "output_tokens": 13,
+        "total_tokens": 160,
         "input_tokens_details": "***REDACTED***",
         "output_tokens_details": "***REDACTED***"
       },
-      "model": "gpt-5.6-sol",
+      "model": "stealth/glyph-cluster:free",
       "instructions": null,
       "previous_response_id": null,
       "temperature": 1,
@@ -58,7 +63,7 @@
       "reasoning": null,
       "store": false,
       "background": false,
-      "service_tier": "default",
+      "service_tier": "auto",
       "metadata": {},
       "safety_identifier": "d317eca2fec56075859d043bf5b2520c6006f74931b9597706dc29ef7ca9860f",
       "prompt_cache_key": null,

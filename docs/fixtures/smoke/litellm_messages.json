@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 2229,
+    "elapsed_ms": 2402,
     "body": {
       "id": "***REDACTED***",
       "type": "message",
@@ -11,15 +11,20 @@
       "model": "commandcode/deepseek-v4.1-flash",
       "content": [
         {
+          "type": "thinking",
+          "thinking": "The user wants exactly \"p\nong\". Wait, \"pong\" -",
+          "signature": "c83d49ef-351e-4bf7-a2c3-31459ec87282"
+        },
+        {
           "type": "text",
-          "text": "pong"
+          "text": ""
         }
       ],
-      "stop_reason": "end_turn",
+      "stop_reason": "max_tokens",
       "stop_sequence": null,
       "usage": {
         "input_tokens": 36,
-        "output_tokens": 3,
+        "output_tokens": 16,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0
       }

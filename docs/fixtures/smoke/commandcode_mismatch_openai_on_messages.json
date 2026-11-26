@@ -3,12 +3,12 @@
   "response": {
     "ok": false,
     "status": 400,
-    "elapsed_ms": 497,
+    "elapsed_ms": 520,
     "body": {
       "type": "error",
       "error": {
         "type": "invalid_request_error",
-        "message": "Model \"gpt-5.6-sol\" is not supported on this endpoint. Use /provider/v1/chat/completions for OpenAI and OSS models."
+        "message": "Model \"stealth/glyph-cluster:free\" is not supported on this endpoint. Use /provider/v1/chat/completions for OpenAI and OSS models."
       }
     }
   }

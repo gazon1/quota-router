@@ -3,13 +3,13 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1948,
+    "elapsed_ms": 2823,
     "body": {
-      "id": "***REDACTED***",
-      "created": 1795706364,
-      "model": "commandcode/gpt-5.6-sol",
+      "id": "gen_01M8C7RBP4HBTHE8T4SQ6B6R9T",
+      "created": 1795707122,
+      "model": "commandcode/stealth/glyph-cluster:free",
       "object": "chat.completion",
-      "system_fingerprint": "fp_uk3dxeo2j9",
+      "system_fingerprint": "fp_b802le18zk",
       "choices": [
         {
           "finish_reason": "stop",
@@ -18,7 +18,14 @@
             "content": "pong",
             "role": "assistant",
             "provider_specific_fields": {
-              "phase": "final_answer"
+              "reasoning_details": [
+                {
+                  "type": "reasoning.encrypted",
+                  "data": "gwst1.pHGnbAiNQ3DYLRqVkY21bEAI23J4XmtbKqPH9ADZHObydC1NxMsaBKvxBDuqvAnuNLHz5his66N4mQI5S2uhYwBwpdBaYaNaZjxi6828JnF8xCIFnZc76EeMgUAssCszFaQrAuS3fTlS7Zib2jOfwOQwpdVaavD63TB6QmzocAShL_Uqp4gDM5SvVvlnhchzqDUlUwW480DrKNCs_U4PA9m3JJMPSt0IDP_gOPHYDyRFN0J8Xs1SRtmUPciA2XJ0NIuvR8XYu9kSTCqSDjCPaYDoeqB9K66X_z1L2IA8jhxwd4cXZwqKxP_g0xDG5ifaV1IH5gFzjOCpfrfiDgQEajEUIYgKWF2YsQNcRQx6VFwy31UVWdR0ToHf_JU_DdMzrU9TKzQhfbE1UwH0lFv1T9qz-1_YqmW1-s9eaJrSLgsE8IqETcngzysfs68JDgTr4dEVZsZCSVfW1T9oInptuW5oDbnn1nU1OJY-bDaaIYU9NnajUBC-0ZH6HB6ePeqv8kcZ6TQb4pvzzwA0XLSBPZ_EOSSrbZCuTX7DYXSCbysQQsrVkghjLku1PIwkK6TTYSEMtlxiDPysylgeZ5KVQ4WESBDgYCBJXjQZKN9mJV35u8VJx9IaDqT0e0zTpZzaYfc0fXbmd7lJcTUT23Q_3fcCBjbARyta93UCbPNItedUC8PAsmDlctId5YRZEYWsb9rWO1R4jVyPkFkOmNqCH-9Y2XRMAYu3qs3G_kycPqcJEQUJldY4a-2Z1hb8_Voc8KkTqYvU4s7JXNGzrceiY9bejJ2b6ZktKlhSvZB3EOwW6ttalwFmSVv3Ct428I7MtSj1kpv6D-Z5kUOYtrFo5ZG4vsTKkhoC54aHlEcm1erGYNq09hXHEbiSMZF5K6VwHfufHaweBoXeUcjudVxm_vBXF1UtwVi0DSMolEpo34l-QIAA2jnfM2TnGgJGPeayixWKQvUbpSyXcucC5JqfG_3UtdLadtDK1MeWqbjt03jWr7qhHfKa3w",
+                  "format": "stealth-v1",
+                  "index": 0
+                }
+              ]
             }
           },
           "provider_specific_fields": {},
@@ -26,14 +33,13 @@
         }
       ],
       "usage": {
-        "completion_tokens": 5,
-        "prompt_tokens": 11,
-        "total_tokens": 16,
+        "completion_tokens": 13,
+        "prompt_tokens": 147,
+        "total_tokens": 160,
         "completion_tokens_details": "***REDACTED***",
         "prompt_tokens_details": "***REDACTED***",
         "cache_creation_input_tokens": 0
-      },
-      "service_tier": "default"
+      }
     }
   }
 }

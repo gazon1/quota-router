@@ -194,7 +194,7 @@ Measured in the pinned image `@sha256:4295b064…b883c3` (2026-11-26):
 
   `RUST_WITH_FALLBACK` still falls back to Python when the native call declines.
 
-So for **this** deployment — chat completions through `openai/MiniMax-M3.1-Flash` —
+So for **this** deployment — chat completions through `openai/MiniMax-M2.7` —
 the request path is **Python regardless of `LITELLM_RUST`**, because the route is
 `PYTHON_ONLY`. Rust is load-bearing only for `ocr` and Bedrock `transcription`.
 Setting `LITELLM_RUST=true` adds Rust to Anthropic `messages`; that is untested
@@ -217,8 +217,10 @@ backup step here.
 - The controller has no API beyond `GET /health`, so the stack proves
   independence, health checks and limits but routes no traffic through the
   controller yet.
-- Three models configured: MiniMax `MiniMax-M3.1-Flash` and two Command Code
-  models. Quota polling and routing (issues #10, #13) are not wired.
+- Four models configured: MiniMax `MiniMax-M2.7` and three Command Code
+  models. Two of the Command Code models are free-tier and hit a daily request
+  cap, so a `429` from them is the plan signal, not a routing fault. Quota
+  polling and routing (issues #10, #13) are not wired.
 - Command Code subscription quota is read from undocumented `/alpha` routes and
   is `UNKNOWN` as a supported contract; see
   [docs/litellm-provider-compatibility.md](./litellm-provider-compatibility.md).

@@ -187,8 +187,18 @@ func TestLiteLLMConfigContract(t *testing.T) {
 
 	// LiteLLM resolves a request by model_name, so a bare alias is an unknown
 	// model: `/v1/models` lists it, but POSTing it returns 400.
-	if !strings.Contains(doc, "model_name: minimax/MiniMax-M3.1-Flash") {
-		t.Error("litellm-config.yaml: minimax model_name must be minimax/MiniMax-M3.1-Flash")
+	if !strings.Contains(doc, "model_name: minimax/MiniMax-M2.7") {
+		t.Error("litellm-config.yaml: minimax model_name must be minimax/MiniMax-M2.7")
+	}
+	// Free-tier ids carry a slash and a colon. LiteLLM routes them as-is, but a
+	// quoted or escaped form would change the string a client must send, so the
+	// exact ids are asserted. The paid model they replaced is gone.
+	if !strings.Contains(doc, "model_name: commandcode/stealth/glyph-cluster:free") ||
+		!strings.Contains(doc, "model_name: commandcode/recursive/flint-v1.0:free") {
+		t.Error("litellm-config.yaml: expected the glyph-cluster:free and flint-v1.0:free model names")
+	}
+	if strings.Contains(doc, "gpt-5.6-sol") {
+		t.Error("litellm-config.yaml: gpt-5.6-sol was replaced by the free-tier models")
 	}
 	// Verified: without disable_cooldowns, one rejected key marks the deployment
 	// unhealthy and the next request answers 429, which reads as rate limiting.

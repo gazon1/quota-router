@@ -3,34 +3,40 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1686,
+    "elapsed_ms": 2922,
     "body": {
-      "id": "***REDACTED***",
+      "id": "gen_01M8C7QV9MNPZ4NPWAG01D4CQ8",
       "object": "chat.completion",
-      "created": 1795706350,
-      "model": "gpt-5.6-sol",
+      "created": 1795707106,
+      "model": "stealth/glyph-cluster:free",
       "choices": [
         {
           "index": 0,
           "message": {
             "role": "assistant",
             "content": "pong",
-            "phase": "final_answer"
+            "reasoning_details": [
+              {
+                "type": "reasoning.encrypted",
+                "data": "gwst1.eWy9mtt64cLiXRApsiWMfvPb_yr4Qz_N5cnWpBJogwAKHj9rMuesp7ejdUx07JfU5A0oVcNsckP9LA28JThvPboM5ojGtwE0b4bDhLTSYWfYgU6mSeubhkKWWpYqSxk6NeoW3dffmDC6JNbViePU1UTkE7_jj6EVDM4_BtFTMS8I9G7MbrQmVjJcFsy9Xh7nlJNEl3-3Bvdb37DRnRaQ7uV1GgR5ljpPaOD2omf77smpZD16ftmtyR6JbXo9_LYk6_A-XGNyxW1piYBx4Szz8rTaDthbJbDIGE7cQbxHzaSRwXMkZJ_nEyiAxkC3UZfALVAAWF_DkFx70kAXWTxnE0lADi00OMoGMMANQmV6oEgY8gJCoYLglhvvdf5V4acWlS9Hniv-ukD7GdZAUXaXxaVz9Zi2n9Op_Ecj9ahPsnLccwKLij1k8uoCt4SKcx7qMN1BEflmWjbLjJR_ZhN6FuPUQl_8fNe2Kif2po03VXHcCX-HVxiNk3YSjuVutvHMgs9T8nMftmSUmcBL5bYeahv-DHbWppuqggt1YHGLnjCKCh4FLg36C3nkdRufd-aoSdfu6gHL9o7P5jpQPlIXvXFd-Fr-EFytbp168_hGFlqNN1yYHAHBPWezpGkT6aDXH3jRMlexgB3bAcd9oGdMli9-8xcsv2cQO8IgrV_K7mh5aYFTQUON8lPR3KeywetNESuFrrIJTFIRe90FRJIf85q2ECBuKVHyEkR7dpw7WDTm5EOLJaWTMvNyM_SijYGH7eBmfZkO6dV-eUIxVR_50Yrwu5WcziYULLJyPrqUkYgPg7FSjTRVEJcFrOlcUkOQVYsmcuRO9hnfPQ5GKvS9EB29azsf_26KI41FIMZp2_NLadG4XBXLTw9_-qaug-EOmG1Yy51NIxFQc8h5RdWQ6aKAkOnOLn5T3jrKIOY4EL5KoRVSA3ulcPKrkv31lzzp99vF-esXjZ60hQ9mjplw7pLkX8PhBcSFhb3UhT6FJUwrS9drrtFbFw",
+                "format": "stealth-v1",
+                "index": 0
+              }
+            ]
           },
           "logprobs": null,
           "finish_reason": "stop"
         }
       ],
       "usage": {
-        "prompt_tokens": 11,
-        "completion_tokens": 5,
-        "total_tokens": 16,
+        "prompt_tokens": 147,
+        "completion_tokens": 13,
+        "total_tokens": 160,
         "prompt_tokens_details": "***REDACTED***",
         "completion_tokens_details": "***REDACTED***",
         "cache_creation_input_tokens": 0
       },
-      "system_fingerprint": "fp_uvvibcgnk7",
-      "service_tier": "default"
+      "system_fingerprint": "fp_trco6jibi3"
     }
   }
 }

@@ -3,12 +3,12 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 1049,
+    "elapsed_ms": 1154,
     "body": {
       "credits": {
         "belowThreshold": false,
         "creditThreshold": 0,
-        "monthlyCredits": 68.0824109238,
+        "monthlyCredits": 67.922923439,
         "purchasedCredits": 0,
         "freeCredits": 0
       },
@@ -16,13 +16,13 @@
         "limited": true,
         "exceeded": null,
         "fiveHour": {
-          "used": 1.9175890762,
+          "used": 2.077076561,
           "cap": 14,
           "exceeded": false,
           "resetAt": 1795707388177
         },
         "weekly": {
-          "used": 1.9175890762,
+          "used": 2.077076561,
           "cap": 35,
           "exceeded": false,
           "resetAt": 1796294188177

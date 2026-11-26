@@ -23,7 +23,7 @@ server:
 litellm:
   base_url: http://127.0.0.1:4000
   model_aliases:
-    fast: minimax/MiniMax-M3.1-Flash
+    fast: minimax/MiniMax-M2.7
 
 providers:
   # Provider base URLs are quota surfaces read by the Controller, never inference
