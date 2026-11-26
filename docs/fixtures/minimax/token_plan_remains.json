@@ -1,0 +1,29 @@
+{
+  "case": "minimax_token_plan_remains",
+  "note": "Trimmed to the fields the adapter maps, from the sanitized live capture in docs/fixtures/smoke/minimax_token_plan_remains.json. No credentials or response headers are kept. Timestamps are epoch milliseconds; percentages are 0..100.",
+  "response": {
+    "status": 200,
+    "body": {
+      "model_remains": [
+        {
+          "model_name": "general",
+          "end_time": 1795723200000,
+          "weekly_end_time": 1795996800000,
+          "current_interval_remaining_percent": 100,
+          "current_weekly_remaining_percent": 0
+        },
+        {
+          "model_name": "video",
+          "end_time": 1795737600000,
+          "weekly_end_time": 1795996800000,
+          "current_interval_remaining_percent": 100,
+          "current_weekly_remaining_percent": 100
+        }
+      ],
+      "base_resp": {
+        "status_code": 0,
+        "status_msg": "success"
+      }
+    }
+  }
+}
