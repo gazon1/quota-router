@@ -37,17 +37,45 @@ const (
 	ReasonNotProbed HealthReason = "NOT_PROBED"
 )
 
+// known reports whether r is one of the declared reasons.
+func (r HealthReason) known() bool {
+	switch r {
+	case ReasonNone, ReasonAuthFailed, ReasonTimeout, ReasonRateLimited,
+		ReasonServerError, ReasonUnreachable, ReasonNotProbed:
+		return true
+	}
+	return false
+}
+
 // ProviderState is one observation of a provider's health, plus any temporary
 // routing-policy exclusions. A cooldown is a policy decision about routing, not
-// a quota state: a cooled-down provider keeps whatever quota it had.
+// a quota state: a cooled-down provider keeps whatever quota it had. Reason is
+// unexported so an adapter cannot put a raw provider error there; use
+// NewProviderState.
 type ProviderState struct {
 	Provider   string
 	Health     Health
-	Reason     HealthReason
 	ObservedAt time.Time
 	// CooldownUntil excludes the provider from routing until then; zero means
 	// no cooldown. It says nothing about quota or health.
 	CooldownUntil time.Time
+
+	reason HealthReason
+}
+
+// NewProviderState builds a health observation. A reason outside the declared
+// set becomes ReasonServerError: the type is a string, so a caller could pass a
+// raw provider error, which may carry a credential.
+func NewProviderState(provider string, health Health, reason HealthReason, at time.Time) ProviderState {
+	if !reason.known() {
+		reason = ReasonServerError
+	}
+	return ProviderState{Provider: provider, Health: health, ObservedAt: at, reason: reason}
+}
+
+// Reason reports the closed reason code for this health observation.
+func (s ProviderState) Reason() HealthReason {
+	return s.reason
 }
 
 // CooldownActive reports whether the provider is excluded from routing at now.

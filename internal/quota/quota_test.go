@@ -273,3 +273,45 @@ func TestUsageAndHealthAreIndependentOfQuota(t *testing.T) {
 		t.Fatal("CooldownActive() = true for zero CooldownUntil")
 	}
 }
+
+// A raw provider error converted to a reason string would carry a credential
+// into the model. Both constructors refuse a value outside the declared set.
+func TestUnknownReasonVocabularyIsEnforced(t *testing.T) {
+	leak := UnknownReason("dial tcp https://user:secret@provider:443 failed")
+	s := Failed("p", "src", now, leak)
+	if state, reason := s.State(); state != QuotaUnknown || reason != MalformedResponse {
+		t.Fatalf("State() = %s/%s, want UNKNOWN/MALFORMED_RESPONSE for an undeclared reason", state, reason)
+	}
+	if state, reason := s.StateAt(now, time.Hour); state != QuotaUnknown || reason == leak {
+		t.Fatalf("StateAt() = %s/%s, leaked the raw error", state, reason)
+	}
+
+	// The declared set still passes through untouched.
+	for _, reason := range []UnknownReason{UnsupportedNoQuotaAPI, TransientFetchFailure, MalformedResponse} {
+		if got := Failed("p", "src", now, reason); func() UnknownReason { _, r := got.State(); return r }() != reason {
+			t.Errorf("Failed(%s) did not keep its declared reason", reason)
+		}
+	}
+}
+
+func TestHealthReasonVocabularyIsEnforced(t *testing.T) {
+	leak := HealthReason("401 https://user:secret@provider/v1: invalid key sk-cp-abc")
+	st := NewProviderState("p", Degraded, leak, now)
+	if st.Reason() != ReasonServerError {
+		t.Fatalf("Reason() = %q, want PROVIDER_ERROR for an undeclared reason", st.Reason())
+	}
+
+	st = NewProviderState("p", Degraded, ReasonRateLimited, now)
+	if st.Reason() != ReasonRateLimited {
+		t.Fatalf("Reason() = %q, want RATE_LIMITED", st.Reason())
+	}
+}
+
+func TestExplicitFailureReasonSurvivesAnyMaxAge(t *testing.T) {
+	s := Failed("p", "src", now, AuthFailure)
+	for _, age := range []time.Duration{time.Hour, 0, -time.Second} {
+		if state, reason := s.StateAt(now, age); state != QuotaUnknown || reason != AuthFailure {
+			t.Errorf("StateAt(maxAge=%s) = %s/%s, want UNKNOWN/AUTHENTICATION_OR_PERMISSION_FAILURE", age, state, reason)
+		}
+	}
+}

@@ -47,6 +47,9 @@ Three details worth knowing before using the model:
   infinities) are `MALFORMED_RESPONSE`.
 - There is no stored state to disagree with the windows: `Snapshot.State()`
   derives the state from `Windows` on every read.
+- Both reason vocabularies are enforced, not just documented: `Failed` and
+  `NewProviderState` replace an undeclared reason with a safe code, so turning
+  a raw provider error into a reason cannot smuggle a credential into the model.
 
 ## Configuration
 

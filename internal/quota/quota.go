@@ -67,6 +67,18 @@ const (
 	NotYetObserved UnknownReason = "NOT_YET_OBSERVED"
 )
 
+// known reports whether r is one of the declared reasons. The type is a string
+// so constants stay readable in JSON, which means a caller can still convert a
+// raw provider error (with a credential in it) into one; Failed refuses that.
+func (r UnknownReason) known() bool {
+	switch r {
+	case UnsupportedNoQuotaAPI, TransientFetchFailure, StaleObservation,
+		MalformedResponse, AuthFailure, NotYetObserved:
+		return true
+	}
+	return false
+}
+
 // Confidence is how much of a snapshot came from documented provider fields.
 type Confidence string
 
@@ -155,7 +167,15 @@ func cloneFloat(v *float64) *float64 {
 
 // Failed builds the snapshot of an attempt that produced no usable quota. It
 // carries no windows, so nothing downstream can read zero remaining out of it.
+//
+// A reason outside the declared set becomes MalformedResponse rather than being
+// stored: converting a raw provider error to an UnknownReason would smuggle a
+// credential-bearing string into the model, and this boundary is what keeps
+// that honest.
 func Failed(provider, source string, at time.Time, reason UnknownReason) Snapshot {
+	if !reason.known() {
+		reason = MalformedResponse
+	}
 	return Snapshot{
 		Provider:   provider,
 		Source:     source,
@@ -251,12 +271,12 @@ func rank(s QuotaState) int {
 // that nobody set must not accept a day-old observation as available quota.
 func (s Snapshot) StateAt(now time.Time, maxAge time.Duration) (QuotaState, UnknownReason) {
 	switch {
+	case s.unknown != "":
+		// An explicit failure keeps its reason before anything else applies:
+		// NOT_YET_OBSERVED or STALE_OBSERVATION would hide what went wrong.
+		return QuotaUnknown, s.unknown
 	case maxAge <= 0:
 		return QuotaUnknown, StaleObservation
-	case s.unknown != "":
-		// An explicit failure keeps its reason even when it was recorded with a
-		// zero timestamp: NOT_YET_OBSERVED would hide what actually went wrong.
-		return QuotaUnknown, s.unknown
 	case s.ObservedAt.IsZero():
 		return QuotaUnknown, NotYetObserved
 	case s.Stale, untrusted(s.ObservedAt, now, maxAge):
