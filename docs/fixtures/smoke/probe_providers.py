@@ -51,7 +51,10 @@ REDACT_KEYS = ("key", "authorization", "cookie", "secret", "token",
                "userid", "priceid", "planid", "fbp", "subscription")
 REDACT_VALUES = {"email", "name", "userName", "userId", "request_id",
                  "requestId", "orgId", "subscription", "customer"}
-MODEL_OBJECT_KEYS = {"object", "owned_by", "context_length", "supported_endpoints",
+# Fields only a model catalogue entry carries. "object" is NOT one of them: every
+# OpenAI-shaped response has object: "chat.completion", so treating it as a model
+# marker kept generation ids such as gen_... in the fixtures.
+MODEL_OBJECT_KEYS = {"owned_by", "context_length", "supported_endpoints",
                      "display_name", "created_at"}
 
 
@@ -75,9 +78,17 @@ def redact(obj):
     """Drops credentials and account identity, but keeps model ids: a model id is
     the evidence this file exists to record."""
     if isinstance(obj, dict):
-        is_model = (obj.get("object") == "model" or bool(MODEL_OBJECT_KEYS & set(obj))
+        # "object" alone marks a model entry; the other catalogue fields only
+        # count without a response-style object (a Responses body also has
+        # created_at and model, but object: "response").
+        is_model = (obj.get("object") == "model"
+                    or (obj.get("object") not in ("response", "chat.completion", "message")
+                        and bool(MODEL_OBJECT_KEYS & set(obj)))
                     or ("id" in obj and isinstance(obj.get("id"), str)
-                        and ("/" in obj["id"] or ":" in obj["id"])))
+                        and ("/" in obj["id"] or ":" in obj["id"])
+                        # A bare model id has no provider prefix and no separator,
+                        # which no response or subscription id shares.
+                        and not re.match(r"^(gen|resp|call|sub|price|msg|req)_", obj["id"])))
         out = {}
         for k, v in obj.items():
             lk = k.lower()
@@ -176,6 +187,32 @@ def main() -> int:
     litellm = os.environ.get("LITELLM_BASE_URL", "http://127.0.0.1:4000").rstrip("/")
 
     results: dict[str, dict] = {}
+
+    def has_choices(body):
+        return bool((body.get("choices") or [{}])[0].get("message"))
+
+    def has_usage(body):
+        usage = body.get("usage") or {}
+        return bool(usage.get("prompt_tokens")) or bool(usage.get("input_tokens"))
+
+    def has_tool_calls(body):
+        msg = (body.get("choices") or [{}])[0].get("message") or {}
+        calls = msg.get("tool_calls") or []
+        if not calls or msg.get("finish_reason") not in (None, "tool_calls"):
+            return False
+        try:
+            json.loads(calls[0]["function"]["arguments"])
+        except Exception:
+            return False
+        return True
+
+    def has_stream(body):
+        events = body.get("events") or []
+        return "data: [DONE]" in events and len(events) > 1
+
+    def has_stream_usage(body):
+        return bool(body.get("final_usage") or body.get("usage"))
+
     failures: list[str] = []
     blocked: list[str] = []
 
@@ -187,15 +224,43 @@ def main() -> int:
             return [shape(value[0])] if value else []
         return type(value).__name__
 
-    def record(name, payload, expect=None, expect_business=0, allow_plan_exhausted=False,
-               allow_refusal=False, schema_only=False):
+    # Codes the providers themselves document, so "blocked by plan" cannot absorb
+    # an unrelated rate limit or permission failure.
+    PLAN_CODES = ("2056", "2057", "2061", "2062", "2068", "MODEL_NOT_IN_PLAN")
+    DAILY_CAP_MARKERS = ("free Flint requests for today", "requests for today")
+    # A provider's own "try again" answer: not a plan refusal, not our regression.
+    TRANSIENT_MARKERS = ("temporarily unavailable", "try again in a moment",
+                         "overloaded", "service unavailable")
+
+    def body_text(body) -> str:
+        return json.dumps(body)[:2000]
+
+    def is_transient(body) -> bool:
+        text = body_text(body).lower()
+        return any(marker in text for marker in TRANSIENT_MARKERS)
+
+    def is_plan_refusal(body) -> bool:
+        text = body_text(body)
+        if any(marker in text for marker in DAILY_CAP_MARKERS):
+            return True
+        codes = {str((body.get("error") or {}).get("code") or ""),
+                 str((body.get("error") or {}).get("type") or ""),
+                 str((body.get("base_resp") or {}).get("status_code") or "")}
+        blob = text + " " + " ".join(codes)
+        return any(code in blob for code in PLAN_CODES)
+
+    def record(name, payload, expect=None, expect_business=None, need=None,
+               allow_plan_exhausted=False, allow_refusal=False, schema_only=False):
         """Records one case and enforces its expectation.
 
         MiniMax answers an auth failure with HTTP 200 and a business error in the
-        body, so a transport-only check cannot see it: expect_business pins
-        base_resp.status_code (0 = success). Inference that the account's quota
-        cannot serve is not a compatibility pass, so it is asserted as the exact
-        documented plan error rather than silently accepted.
+        body, so a transport-only check cannot see it. Where a business status is
+        expected it must be present and equal, not merely absent.
+
+        `need` asserts the response semantics rather than the transport status: a
+        case that claims tool calls must contain one, a stream must terminate and
+        carry usage. A call the provider's plan refuses is recorded as
+        BLOCKED_BY_PLAN only when the body matches a documented plan code.
         """
         if schema_only:
             payload = {**payload, "body": shape(payload.get("body"))}
@@ -203,35 +268,59 @@ def main() -> int:
         status = payload.get("status")
         body = payload.get("body") or {}
         biz = (body.get("base_resp") or {}).get("status_code")
-        code = str((body.get("error") or {}).get("code") or "")
-        text = json.dumps(body)[:2000]
 
         if expect is not None and status != expect:
             failures.append(f"{name}: status {status}, expected {expect}")
             return
-        if expect_business is not None and biz is not None and biz != expect_business:
-            failures.append(f"{name}: base_resp.status_code {biz}, expected {expect_business}")
-        if allow_plan_exhausted and status == 429:
-            # The account cannot serve this call; record it as blocked, not green.
-            results[name]["verdict"] = "BLOCKED_BY_PLAN"
-            blocked.append(name)
-        elif allow_plan_exhausted and status == 200:
-            results[name]["verdict"] = "VERIFIED"
-        elif allow_plan_exhausted:
-            failures.append(f"{name}: status {status}, expected 200 or the documented "
-                            f"plan exhaustion 429 (2056)")
-        if allow_refusal and not allow_plan_exhausted:
-            # A provider may legitimately refuse a model the plan does not cover
-            # (403 MODEL_NOT_IN_PLAN) or a free tier's daily cap (429). Either is
-            # recorded as blocked; a 400/401/5xx is still a regression.
-            if status == 200:
+        if expect_business is not None and status == 200:
+            if biz is None:
+                failures.append(f"{name}: no base_resp.status_code in the body; a missing "
+                                "business status is not a success")
+            elif biz != expect_business:
+                failures.append(f"{name}: base_resp.status_code {biz}, expected {expect_business}")
+
+        if allow_plan_exhausted:
+            if status == 200 and biz in (None, 0):
                 results[name]["verdict"] = "VERIFIED"
-            elif status in (403, 429):
+            elif status == 429 and is_plan_refusal(body):
                 results[name]["verdict"] = "BLOCKED_BY_PLAN"
                 blocked.append(name)
+            elif status in (429, 502, 503) and is_transient(body):
+                results[name]["verdict"] = "TRANSIENT"
+                blocked.append(name)
+            elif status in (429, 502, 503) and is_transient(body):
+                results[name]["verdict"] = "TRANSIENT"
+                blocked.append(name)
             else:
-                failures.append(f"{name}: status {status}, expected 200 or a documented "
-                                f"plan refusal (403/429)")
+                failures.append(f"{name}: status {status}, expected 200 or the documented "
+                                f"plan-exhaustion error, got neither")
+            continue_checks = status == 200
+        elif allow_refusal:
+            if status == 200:
+                results[name]["verdict"] = "VERIFIED"
+                continue_checks = True
+            elif status in (403, 429) and is_plan_refusal(body):
+                results[name]["verdict"] = "BLOCKED_BY_PLAN"
+                blocked.append(name)
+                continue_checks = False
+            elif status in (429, 502, 503) and is_transient(body):
+                results[name]["verdict"] = "TRANSIENT"
+                blocked.append(name)
+                continue_checks = False
+            else:
+                failures.append(f"{name}: status {status}, and the body matches no documented "
+                                f"plan refusal (403/429 with a plan code)")
+                continue_checks = False
+        else:
+            continue_checks = status == (expect if expect is not None else 200)
+
+        if continue_checks and need:
+            what, ok = need
+            # A stream payload carries events/final_usage beside "body", not in it.
+            target = payload["body"] if payload.get("body") is not None else payload
+            if not ok(target):
+                failures.append(f"{name}: response does not satisfy {what}; "
+                                "a status code alone is not verification")
 
     def write(name):
         (out / f"{name}.json").write_text(
@@ -242,12 +331,15 @@ def main() -> int:
     if mm_key:
         auth = {"Authorization": f"Bearer {mm_key}"}
         record("minimax_token_plan_remains", call("GET", MINIMAX_QUOTA, auth),
-               expect=200, expect_business=0)
+               expect=200, expect_business=0,
+               need=("quota windows", lambda b: bool(b.get("model_remains"))))
         record("minimax_openai_models",
-               call("GET", f"{MINIMAX_INFERENCE}/models", auth), expect=200)
+               call("GET", f"{MINIMAX_INFERENCE}/models", auth), expect=200,
+               need=("a model list", lambda b: bool(b.get("data"))))
         record("minimax_anthropic_models",
                call("GET", f"{MINIMAX_ANTHROPIC}/v1/models",
-                    {"x-api-key": mm_key, "anthropic-version": "2023-06-01"}), expect=200)
+                    {"x-api-key": mm_key, "anthropic-version": "2023-06-01"}), expect=200,
+               need=("a model list", lambda b: bool(b.get("data"))))
         chat = {"model": MINIMAX_MODEL, "max_completion_tokens": 16,
                 "messages": [{"role": "user", "content": "Reply with exactly: pong"}]}
         # Inference is either served (200) or refused by the documented plan
@@ -255,15 +347,18 @@ def main() -> int:
         # /models, a 5xx - is a real compatibility regression and fails the run.
         record("minimax_openai_chat",
                call("POST", f"{MINIMAX_INFERENCE}/chat/completions", auth, chat),
-               allow_plan_exhausted=True)
+               allow_plan_exhausted=True, expect_business=0,
+               need=("choices with usage", lambda b: has_choices(b) and has_usage(b)))
         record("minimax_openai_chat_stream",
                call("POST", f"{MINIMAX_INFERENCE}/chat/completions", auth,
-                    {**chat, "stream": True}, stream=True), allow_plan_exhausted=True)
+                    {**chat, "stream": True}, stream=True), allow_plan_exhausted=True,
+               need=("a terminated stream", has_stream))
         record("minimax_anthropic_messages",
                call("POST", f"{MINIMAX_ANTHROPIC}/v1/messages",
                     {"x-api-key": mm_key, "anthropic-version": "2023-06-01"},
                     {"model": MINIMAX_MODEL, "max_tokens": 16, "messages": chat["messages"]}),
-               allow_plan_exhausted=True)
+               allow_plan_exhausted=True, expect_business=0,
+               need=("a content block", lambda b: bool(b.get("content"))))
         for name in list(results):
             write(name)
         q = results["minimax_token_plan_remains"]["body"]
@@ -298,23 +393,30 @@ def main() -> int:
         chat = {"model": CC_OPENAI_MODEL, "max_tokens": 16,
                 "messages": [{"role": "user", "content": "Reply with exactly: pong"}]}
         record("commandcode_chat",
-               call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth, chat, timeout=90), allow_refusal=True)
+               call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth, chat, timeout=90),
+               allow_refusal=True, need=("choices with usage", lambda b: has_choices(b) and has_usage(b)))
         record("commandcode_chat_stream",
                call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth, {**chat, "stream": True},
-                    timeout=90, stream=True), allow_refusal=True)
+                    timeout=90, stream=True), allow_refusal=True,
+               # Command Code emits usage in the final chunk of a normal stream.
+               need=("a [DONE]-terminated stream carrying final usage",
+                     lambda b: has_stream(b) and has_stream_usage(b)))
         # Free-tier model with a daily cap: the cap is the expected outcome, not a
         # compatibility failure, but a 400/401 still is.
         record("commandcode_chat_second",
                call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth,
-                    {**chat, "model": CC_OPENAI_MODEL_2}, timeout=90), allow_refusal=True)
+                    {**chat, "model": CC_OPENAI_MODEL_2}, timeout=90), allow_refusal=True,
+               need=("choices with usage", lambda b: has_choices(b) and has_usage(b)))
         record("commandcode_responses",
                call("POST", f"{COMMANDCODE_BASE}/responses", auth,
-                    {"model": CC_OPENAI_MODEL, "input": "Reply with exactly: pong"}, timeout=90), allow_refusal=True)
+                    {"model": CC_OPENAI_MODEL, "input": "Reply with exactly: pong"}, timeout=90),
+               allow_refusal=True, need=("a responses output", lambda b: bool(b.get("output") or b.get("id"))))
         record("commandcode_messages",
                call("POST", f"{COMMANDCODE_BASE}/messages",
                     {**auth, "anthropic-version": "2023-06-01"},
                     {"model": CC_ANTHROPIC_MODEL, "max_tokens": 16,
-                     "messages": chat["messages"]}, timeout=90), allow_refusal=True)
+                     "messages": chat["messages"]}, timeout=90), allow_refusal=True,
+               need=("a message content block", lambda b: bool(b.get("content"))))
         record("commandcode_tool_call",
                call("POST", f"{COMMANDCODE_BASE}/chat/completions", auth,
                     {"model": CC_OPENAI_MODEL, "max_tokens": 100,
@@ -324,7 +426,7 @@ def main() -> int:
                          "parameters": {"type": "object",
                                         "properties": {"city": {"type": "string"}},
                                         "required": ["city"]}}}]}, timeout=90),
-               allow_refusal=True)
+               allow_refusal=True, need=("a tool call with JSON arguments", has_tool_calls))
         # Endpoint/model mismatch must be rejected, never silently rerouted. A
         # messages-only model is used so the OpenAi-side attempt cannot succeed.
         record("commandcode_mismatch_anthropic_on_chat",
@@ -362,7 +464,8 @@ def main() -> int:
             failures.append("litellm: LITELLM_MASTER_KEY is not set")
         else:
             h = {"Authorization": f"Bearer {master}"}
-            record("litellm_models", call("GET", f"{litellm}/v1/models", h), expect=200)
+            record("litellm_models", call("GET", f"{litellm}/v1/models", h), expect=200,
+                   need=("a model list", lambda b: bool(b.get("data"))))
             record("litellm_no_auth",
                    call("POST", f"{litellm}/v1/chat/completions",
                         {"Content-Type": "application/json"},
@@ -375,18 +478,24 @@ def main() -> int:
                     "messages": [{"role": "user", "content": "Reply with exactly: pong"}]}
             record("litellm_chat",
                    call("POST", f"{litellm}/v1/chat/completions", h, chat, timeout=90),
-                   allow_refusal=True)
+                   allow_refusal=True, need=("choices with usage", lambda b: has_choices(b) and has_usage(b)))
             record("litellm_chat_stream",
-                   call("POST", f"{litellm}/v1/chat/completions", h, {**chat, "stream": True},
-                        timeout=90, stream=True), allow_refusal=True)
+                   call("POST", f"{litellm}/v1/chat/completions", h,
+                        {**chat, "stream": True, "stream_options": {"include_usage": True}},
+                        timeout=90, stream=True), allow_refusal=True,
+               # Command Code emits usage in the final chunk of a normal stream.
+               need=("a [DONE]-terminated stream carrying final usage",
+                     lambda b: has_stream(b) and has_stream_usage(b)))
             record("litellm_responses",
                    call("POST", f"{litellm}/v1/responses", h,
                         {"model": "commandcode/" + CC_OPENAI_MODEL, "input": "ping"}, timeout=90),
-                   allow_refusal=True)
+                   allow_refusal=True,
+                   need=("a responses output", lambda b: bool(b.get("output") or b.get("id"))))
             record("litellm_messages",
                    call("POST", f"{litellm}/v1/messages", h,
                         {"model": CC_LITELLM_MESSAGES_MODEL, "max_tokens": 16,
-                         "messages": chat["messages"]}, timeout=90), allow_refusal=True)
+                         "messages": chat["messages"]}, timeout=90), allow_refusal=True,
+               need=("a message content block", lambda b: bool(b.get("content"))))
             for name in list(results):
                 write(name)
 

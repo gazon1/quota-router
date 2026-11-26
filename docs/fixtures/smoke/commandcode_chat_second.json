@@ -3,7 +3,7 @@
   "response": {
     "ok": false,
     "status": 429,
-    "elapsed_ms": 2119,
+    "elapsed_ms": 1156,
     "body": {
       "error": {
         "message": "You've used all 1000 free Flint requests for today. Your quota resets at 2026-11-27T00:00:00.000Z. Run /model or -m to pick another model.\nhttps://commandcode.ai/models",

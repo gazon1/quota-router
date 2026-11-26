@@ -1,43 +1,15 @@
 {
   "case": "commandcode_chat",
   "response": {
-    "ok": true,
-    "status": 200,
-    "elapsed_ms": 2849,
+    "ok": false,
+    "status": 429,
+    "elapsed_ms": 2078,
     "body": {
-      "id": "gen_01M8C8PG97SF5M2T4143CP044S",
-      "object": "chat.completion",
-      "created": 1795708110,
-      "model": "stealth/glyph-cluster:free",
-      "choices": [
-        {
-          "index": 0,
-          "message": {
-            "role": "assistant",
-            "content": "pong",
-            "reasoning_details": [
-              {
-                "type": "reasoning.encrypted",
-                "data": "gwst1.Nljkc-xgjfK1z0IaujJstUTdN3QPkaLAB6-UgX9jALQKrh5gsPde64c5VEnDjmuxZ0dMZIf31vmyYZ2K0Vl0sBmIlRNierysEyv3dCS24zFQvg0IhwH0cDEypLe8dO78uX_cN61pI1vgBjwoirpuVvajZ5XWl4D9d1tds-fX25wrUX4wMztI9tT6P5iCC1ZZz5klfbQTV8lqfC7q8A3ns_qvKESJjhEXtoVIeAJfF_dhQHhbwBcztSnxIg5nXTGzPQjdondZ16kurjm495IcZPfyaOMRvonYFHmiSCkfcS7eV57daGHy-i0t_55yno1qmnsNLgXVrjGQHV-BH4TMcD3qSN6NadYN6ZKKcgjZPIOni5FBYC5MsSXtxo_CN2jCDi-MylzXUIAT8JOkV-J2quuAkF_z5tOl_USdG3r6mh6djE1qfaapck1Hr9IUpa1yVzuteST7s1P3eX9rEmi9ecRvroRCy5wH29btmpzG2qlWpn9Wj6GWJjf0ljEhHxMLnpf6LNbFMcMFv6LzVd4nZZ5zPEeDM9y7eMARFi0A6l2ecDCR-28KA0xYB_mzXZI_65OlDxD14tga-bfT6OI9qvjcUzAbOUD33uNRYf9EiXQBr84Huo-xk3WhA_wpeq0trYQgNXQa2xzjYUSmTc9tCM6U3j7ntNeFM3MKyzk9oNN5a1477Mmx5-OvqNQkZINNR2ulKIWgNjPcJmFwgqujEHSPTgsXrOQ3XGzR48QFOoNB92FtyxclsSGTzionXGksLTmylTiizlrXGhZul35RUUq5RO7WEIdEHjwt244SUcnbnyWZgUenLkAKEA8z_vsp-srvw6K2MKqpJBmNBQpCfZoqOBHYJBqovv4I49rGXOJ7QweKBQw1w1qNCacV-fjiGtvBZKPQqEvDk-qh2-3o6QV6imfFctyQtxaeYOrnx6fJ6lc8VekOqTIzuAEhNBlR_4STMGIWkd-yZVh9nL7bv9B3iHf1AARFk9HlAqgp1gyhlOU2FGAqzw",
-                "format": "stealth-v1",
-                "index": 0
-              }
-            ]
-          },
-          "logprobs": null,
-          "finish_reason": "stop"
-        }
-      ],
-      "usage": {
-        "prompt_tokens": 147,
-        "completion_tokens": 13,
-        "total_tokens": 160,
-        "prompt_tokens_details": "***REDACTED***",
-        "completion_tokens_details": "***REDACTED***",
-        "cache_creation_input_tokens": 0
-      },
-      "system_fingerprint": "fp_49e6o1a64o"
+      "error": {
+        "message": "Upstream model provider is temporarily unavailable. Please try again in a moment.",
+        "type": "rate_limit_error"
+      }
     },
-    "verdict": "VERIFIED"
+    "verdict": "TRANSIENT"
   }
 }

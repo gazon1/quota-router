@@ -3,13 +3,13 @@
   "response": {
     "ok": false,
     "status": 429,
-    "elapsed_ms": 2336,
+    "elapsed_ms": 2082,
     "body": {
       "error": {
         "message": "Upstream model provider is temporarily unavailable. Please try again in a moment.",
         "type": "rate_limit_error"
       }
     },
-    "verdict": "BLOCKED_BY_PLAN"
+    "verdict": "TRANSIENT"
   }
 }

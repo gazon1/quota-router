@@ -383,12 +383,21 @@ of these, and the table above is not allowed to blur them:
 |---|---|
 | **reproducible** | asserted by `probe_providers.py`, checked by its exit status |
 | **manually measured** | observed once with the same credentials; the fixture is the record, there is no assertion |
-| **BLOCKED_BY_PLAN** | the call reached the provider and was refused by the account's plan; recorded, never counted as a pass |
+| **BLOCKED_BY_PLAN** | the call reached the provider and was refused by the account's plan. Assigned only when the body matches a documented plan code (`2056`, `2057`, `2061`, `2062`, `2068`, `MODEL_NOT_IN_PLAN`, or the free-tier daily-cap message) — never on a bare 429 |
+| **TRANSIENT** | the provider answered "temporarily unavailable"; neither a pass nor a regression here |
 | **UNKNOWN** | not observed at all |
 
 A run where a case is blocked says so instead of printing a bare success, and the
 `--litellm-invalid` proxy is required for the cooldown case: a proxy holding a
 valid provider key cannot reproduce a rejected one.
+
+Status codes alone are not verification. A case that claims a tool call must
+contain one with parseable arguments, a stream must reach its terminator and carry
+final usage, a completion must have both a message and usage, and a MiniMax
+response must carry `base_resp.status_code == 0` — because MiniMax reports an
+auth failure as HTTP 200. `stream_options.include_usage` is requested from the
+proxy explicitly: without it the proxy forwards no usage, so asserting usage would
+test the flag rather than the provider.
 
 ## Boundaries honored
 

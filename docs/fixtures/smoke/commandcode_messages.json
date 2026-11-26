@@ -3,7 +3,7 @@
   "response": {
     "ok": true,
     "status": 200,
-    "elapsed_ms": 2390,
+    "elapsed_ms": 2303,
     "body": {
       "id": "***REDACTED***",
       "type": "message",
@@ -12,7 +12,7 @@
       "content": [
         {
           "type": "thinking",
-          "thinking": "The user wants exactly \"p]ong\"? Wait, they want \"pong",
+          "thinking": "The user wants exactly \"p\u201cong\". Wait, they wrote \"pong",
           "signature": "***REDACTED***"
         },
         {
