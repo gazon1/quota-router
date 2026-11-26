@@ -216,7 +216,7 @@ func credentialShape(s string) string {
 	// An explicit scheme names its value, so a single word after "Bearer" is a
 	// credential whatever its alphabet: prose continues with more words ("Bearer
 	// responsibility belongs to the policy owner"), a token does not.
-	if anyBearerToken(s) {
+	if anyBearerToken(lower) {
 		return "a bearer token"
 	}
 	for _, u := range urlsIn(s) {
@@ -234,6 +234,15 @@ func credentialShape(s string) string {
 		}
 	}
 	return ""
+}
+
+// functionWords are the grammar that can legitimately follow "bearer" in a
+// sentence. Anything else after the scheme is treated as a value.
+var functionWords = map[string]bool{
+	"a": true, "an": true, "the": true, "of": true, "is": true, "are": true,
+	"was": true, "were": true, "as": true, "in": true, "on": true, "to": true,
+	"for": true, "by": true, "and": true, "or": true, "not": true, "be": true,
+	"has": true, "have": true, "had": true, "may": true, "must": true,
 }
 
 // placeholders are the values nobody means as a credential.
@@ -261,28 +270,34 @@ func anyValueAfter(lower, needle string) bool {
 	}
 }
 
-// anyBearerToken reports whether s mentions the RFC 6750 scheme token followed by
-// a value nobody marked as a placeholder: "Bearer abcdefghijklmnop was rejected"
-// is a credential inside a log line. That scheme is spelled with a capital B;
-// lowercase "bearer" is prose ("the bearer of this report").
+// anyBearerToken reports whether s mentions the Bearer scheme followed by a value
+// nobody marked as a placeholder. The scheme name is case-insensitive
+// (RFC 7235 §2.1), so "bearer abcdefghijklmnop was rejected" is a credential in a
+// log line just as much as "Bearer abcdefghijklmnop".
 //
-// Splitting a real value from a common noun ("Bearer timeout") is not decidable
-// here, so this side fails closed: anything after the scheme counts. The cost is
-// that a summary quoting the scheme must rephrase ("bearer auth via middleware"),
-// and that cost is far below sending a live credential to the next model.
-func anyBearerToken(s string) bool {
-	lower := strings.ToLower(s)
+// Nothing here tries to decide whether a value is a credential or an English
+// word: character, vowel and length heuristics could not separate
+// "abcdefghijklmnop" from prose, and a wrong guess sends a live credential to the
+// next model. The rule fails closed instead, with one narrow escape: a listed
+// function word ("the bearer of this report", "the bearer is the owner") is
+// grammar, never a credential. Everything else after the scheme is refused, and
+// prose that needs more rephrases — a documented and recoverable cost, unlike a
+// leaked credential.
+func anyBearerToken(lower string) bool {
 	for from := 0; ; {
-		i := strings.Index(s[from:], "Bearer ")
+		i := strings.Index(lower[from:], "bearer ")
 		if i < 0 {
 			return false
 		}
-		fields := strings.Fields(strings.Trim(lower[from+i+len("Bearer "):], "\"'`(),.;:"))
-		if len(fields) > 0 && !placeholders[fields[0]] {
-			return true
+		fields := strings.Fields(lower[from+i+len("bearer "):])
+		if len(fields) > 0 {
+			w := strings.Trim(fields[0], "\"'`(),.;:")
+			if !placeholders[w] && !functionWords[w] {
+				return true
+			}
 		}
-		from += i + len("Bearer ")
-		if from >= len(s) {
+		from += i + len("bearer ")
+		if from >= len(lower) {
 			return false
 		}
 	}

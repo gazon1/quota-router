@@ -226,9 +226,9 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 	// headers or parameters with no value: a guard that rejects everything is a
 	// guard a caller learns to ignore.
 	for _, prose := range []string{
-		"the bearer of this report is the owner",
 		"authorization: none required",
 		"token= unset until the operator configures it",
+		"Bearer none, request authentication was skipped",
 		"password= empty is not a credential",
 	} {
 		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
@@ -247,13 +247,22 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 			t.Errorf("Validate() let %q through", quoted)
 		}
 	}
-	// Lowercase is prose and stays valid.
+	// The scheme is case-insensitive, so lowercase does not escape either.
+	for _, quoted := range []string{"request failed: bearer abcdefghijklmnop was rejected", "bearer sk-live-1", "first Bearer abc; second Bearer xyz"} {
+		if err := (Checkpoint{Goal: quoted}).Validate(); err == nil {
+			t.Errorf("Validate() let lowercase %q through", quoted)
+		}
+	}
+	// The documented cost: prose with a longer word after "bearer" is refused and
+	// must be rephrased. A function word is the one escape, so "bearer of" and
+	// "bearer is" still read as prose.
 	for _, prose := range []string{
-		"bearer auth is handled by middleware",
-		"use the bearer token from the config",
+		"the bearer of this report is the owner",
+		"the bearer is the owner",
+		"bearer may be absent in config",
 	} {
 		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
-			t.Errorf("Validate() rejected lowercase prose %q: %v", prose, err)
+			t.Errorf("Validate() rejected prose %q: %v", prose, err)
 		}
 	}
 
