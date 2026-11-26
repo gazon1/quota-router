@@ -1,0 +1,59 @@
+name: quota-router
+
+# Home-host deployment: two independent containers, no dependency edge between
+# them. LiteLLM serves LLM traffic on its own; the Controller is a sidecar that
+# can be stopped, restarted or upgraded without interrupting the proxy.
+services:
+  quota-controller:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.controller
+    image: quota-controller:local
+    restart: unless-stopped
+    read_only: true
+    # Measurement target from issue #6: measured VmHWM 14 MiB at 5.5k req/s of
+    # /health. 128 MiB leaves ~9x headroom; re-measure once SQLite and polling
+    # land (issues #12, #13).
+    mem_limit: 128m
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    # No host port: /health is the only route today, so the controller stays
+    # reachable only inside the compose network. Publish one when a real API
+    # exists (issue #18).
+    networks: [internal]
+    # No volume yet: the controller is stateless until SQLite persistence exists
+    # (issue #12). Add one mounted at the DB path when that lands.
+
+  litellm:
+    # Pinned by tag and digest. v1.110.0 is the Python 3.13 proxy: the Rust
+    # gateway in that tag's litellm-rust/ tree is not shipped in this image
+    # (import litellm_rust fails inside it). Never use latest/stable here.
+    image: ghcr.io/berriai/litellm:v1.110.0@sha256:4295b064b22eb88f9530e616afc812edd47048891ba64896bfc3fa74e2b883c3
+    restart: unless-stopped
+    command: ["--config", "/app/config.yaml"]
+    env_file: [.env]
+    # Measured VmHWM 666 MiB idle with one model configured; 1 GiB gives room
+    # for request load. Tune from `docker stats`, not from this comment.
+    mem_limit: 1g
+    cpus: 2
+    volumes:
+      - ./litellm-config.yaml:/app/config.yaml:ro
+    ports:
+      # Localhost only by default. Use "4000:4000" to serve the LAN.
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Cold start to /health/readiness 200 measured at 18s on this host.
+      start_period: 40s
+    networks: [internal]
+
+networks:
+  internal:

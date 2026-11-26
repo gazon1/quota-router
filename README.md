@@ -31,6 +31,18 @@ Empty duration variables use defaults. `QUOTA_ROUTER_ADDR` must not be empty whe
 | `QUOTA_ROUTER_IDLE_TIMEOUT` | `60s` | HTTP idle timeout (Go duration) |
 | `QUOTA_ROUTER_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown timeout (Go duration) |
 
+## Deploy
+
+```sh
+cd deploy
+cp .env.example .env      # set LITELLM_MASTER_KEY and MINIMAX_API_KEY
+docker compose up -d --build
+```
+
+LiteLLM listens on `127.0.0.1:4000`; the controller is internal-only. See
+[docs/deployment.md](./docs/deployment.md) for ports, limits, health checks, upgrade
+and rollback commands.
+
 ## Development
 
 ```sh
