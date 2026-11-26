@@ -37,6 +37,14 @@ variable and to inject a credential, mount it as a secret file:
 Secrets reach the container at runtime and never enter the image or the build
 context. `.env` is loaded by Compose for LiteLLM only; the controller ignores it.
 
+A secret file must be readable by the container user (`65532:65532`, `nonroot`)
+and should be owned by it with mode `0600`; `0644` root-owned is the loosest
+setting to use. The controller checks only readability, not the mode, so the
+permission is a deployment responsibility — a world-readable secret is accepted
+without a warning. Compose bind-mounted files inherit host permissions, so
+`install -m 600 -o 65532` the file before `up`. An explicit
+`QUOTA_ROUTER_..._API_KEY` wins over its `..._API_KEY_FILE` counterpart.
+
 ## Prerequisites
 
 Docker Engine **28.0.0 or newer**. Docker documents that in releases older than

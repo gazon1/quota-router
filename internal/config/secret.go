@@ -26,6 +26,10 @@ func (Secret) GoString() string { return redacted }
 // LogValue keeps Secret out of slog attributes.
 func (Secret) LogValue() any { return redacted }
 
+// MarshalText keeps Secret out of JSON, including slog's JSON handler, which
+// marshals a value that implements encoding.TextMarshaler as a JSON string.
+func (Secret) MarshalText() ([]byte, error) { return []byte(redacted), nil }
+
 // UnmarshalText lets koanf populate a Secret from a plain string value.
 func (s *Secret) UnmarshalText(b []byte) error {
 	*s = Secret(b)

@@ -75,10 +75,20 @@ QUOTA_ROUTER_AUTH__TOKEN_FILE=/run/secrets/controller_token
 ```
 
 The file must exist and be readable, or startup fails and names it; the path is
-never used as the value. Credentials print as `[REDACTED]` through `%s`, `%v`,
-`%#v`, and `slog`, and an invalid URL is reported without echoing it, so a
-`user:password@host` cannot reach a log. `.env` is loaded only by Docker Compose
-for local development, never by the service.
+never used as the value. A `_FILE` variable loads with the same precedence as
+its plain counterpart, so an explicit `QUOTA_ROUTER_AUTH__TOKEN` wins over
+`QUOTA_ROUTER_AUTH__TOKEN_FILE`. Credentials print as `[REDACTED]` through `%s`,
+`%v`, `%#v`, `slog` text and JSON logs, and `json.Marshal`; an invalid URL is
+reported without echoing it, so a `user:password@host` cannot reach a log.
+`.env` is loaded only by Docker Compose for local development, never by the
+service.
+
+Permissions on mounted secret files are the operator's responsibility, and the
+controller only requires the file to be readable by the process — it does not
+inspect the mode. Mount them `0644` or stricter, owned by the container user
+(`65532` in `Dockerfile.controller`); `0600` is the safe choice. A
+world-readable secret is accepted silently, so check it in the deployment, not
+here.
 
 Local files: `config.yaml` and `.env` are git-ignored; keep real ones
 `chmod 600` (`install -m 600`). Only the `*.example.*` files are tracked, and

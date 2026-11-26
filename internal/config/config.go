@@ -97,17 +97,16 @@ type Observability struct {
 // SlogLevel returns the configured level. Validate rejects other values, so the
 // fallback only covers a zero Observability.
 func (o Observability) SlogLevel() slog.Level {
-	for l, level := range map[string]slog.Level{
-		"debug": slog.LevelDebug,
-		"info":  slog.LevelInfo,
-		"warn":  slog.LevelWarn,
-		"error": slog.LevelError,
-	} {
-		if o.Level == l {
-			return level
-		}
+	switch o.Level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
-	return slog.LevelInfo
 }
 
 // Default returns the built-in defaults. Every setting has one: the service
@@ -143,11 +142,14 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config file %s: %w", path, err)
 		}
 	}
-	if err := k.Load(env.ProviderWithValue(EnvPrefix, EnvDelim, envKey), nil); err != nil {
-		return Config{}, fmt.Errorf("environment: %w", err)
-	}
+	// Secret files are an alternative source for the same environment-level
+	// values, so they load before them: an explicit QUOTA_ROUTER_..._API_KEY
+	// still wins over ..._API_KEY_FILE, matching the documented precedence.
 	if err := loadSecretFiles(k); err != nil {
 		return Config{}, err
+	}
+	if err := k.Load(env.ProviderWithValue(EnvPrefix, EnvDelim, envKey), nil); err != nil {
+		return Config{}, fmt.Errorf("environment: %w", err)
 	}
 
 	// Decoding into the defaults keeps every value the file and environment do

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -136,6 +137,19 @@ func TestLoadEnvSetsProvider(t *testing.T) {
 	}
 	if got := cfg.Providers["minimax"]; got.BaseURL != "https://api.minimax.io/v1" || got.APIKey != "env-secret" {
 		t.Fatalf("Providers = %v, want minimax from the environment", cfg.Providers)
+	}
+}
+
+func TestLoadEnvSetsModelAlias(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST", "minimax/MiniMax-M3.1-Flash")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.LiteLLM.ModelAliases["fast"]; got != "minimax/MiniMax-M3.1-Flash" {
+		t.Fatalf("ModelAliases = %v, want the fast alias from the environment", cfg.LiteLLM.ModelAliases)
 	}
 }
 
@@ -286,6 +300,20 @@ func TestSecretRedaction(t *testing.T) {
 	if strings.Contains(buf.String(), "sk-live") {
 		t.Fatalf("slog output leaked the secret: %s", buf.String())
 	}
+
+	// main.go logs through JSONHandler, which marshals a Secret as JSON text.
+	buf.Reset()
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("loaded", "token", s, "cfg", Config{Auth: Auth{Token: s}})
+	if strings.Contains(buf.String(), "sk-live") {
+		t.Fatalf("JSON log output leaked the secret: %s", buf.String())
+	}
+	encoded, err := json.Marshal(Config{Auth: Auth{Token: s}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "sk-live") {
+		t.Fatalf("json.Marshal leaked the secret: %s", encoded)
+	}
 }
 
 func TestLoadSecretsFromEnvironmentAndFiles(t *testing.T) {
@@ -307,6 +335,24 @@ func TestLoadSecretsFromEnvironmentAndFiles(t *testing.T) {
 	}
 	if cfg.Providers["minimax"].APIKey != "file-token" {
 		t.Fatalf("provider api_key = %q, want the trimmed file contents", cfg.Providers["minimax"].APIKey)
+	}
+}
+
+func TestEnvSecretBeatsSecretFile(t *testing.T) {
+	cleanEnv(t)
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN", "env-token")
+	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN_FILE", path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Auth.Token != "env-token" {
+		t.Fatal("the explicit environment value must win over its _FILE counterpart")
 	}
 }
 

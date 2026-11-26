@@ -5,3 +5,6 @@ config.yaml
 *.db
 *.db-wal
 *.db-shm
+
+# Local run output, including review reports.
+build/
