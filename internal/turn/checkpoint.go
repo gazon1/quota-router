@@ -196,36 +196,28 @@ func (c Checkpoint) Validate() error {
 // none. It is deliberately narrow — the header and query shapes a provider error
 // arrives in, plus the URL rule config.checkURL already applies. It is not a
 // secret scanner and does not claim to be one; it catches the shapes this
-// installation itself hands around, not arbitrary prose.
-// credentialShape names the credential form s carries, or "" when it carries
-// none. It is deliberately narrow — the header and query shapes a provider error
-// arrives in, plus the URL rule config.checkURL already applies. It is not a
-// secret scanner and does not claim to be one; it catches the shapes this
 // installation itself hands around, and it must not reject ordinary prose, or a
 // caller learns to ignore the error.
 func credentialShape(s string) string {
 	lower := strings.ToLower(s)
-	// A header or a query parameter counts only with a value after it; an empty
-	// one ("token= unset", "authorization: none required") is prose.
+	// Every occurrence counts: "token= unset; token=sk-live-abc" must not hide
+	// the second one behind the first placeholder. A header or a parameter
+	// without a value ("authorization: none required") is prose.
 	for _, p := range []struct{ name, needle string }{
 		{"an Authorization header", "authorization:"},
 		{"an api_key parameter", "api_key="},
 		{"a token parameter", "token="},
 		{"a password parameter", "password="},
 	} {
-		if hasValueAfter(lower, p.needle) {
+		if anyValueAfter(lower, p.needle) {
 			return p.name
 		}
 	}
-	// "bearer " alone also matches prose ("Bearer responsibility belongs to the
-	// policy owner"), so it counts only when a token-shaped word follows.
-	if i := strings.Index(lower, "bearer "); i >= 0 {
-		fields := strings.Fields(lower[i+len("bearer "):])
-		if len(fields) > 0 {
-			if w := strings.Trim(fields[0], "\"'`(),.;:"); tokenShaped(w) {
-				return "a bearer token"
-			}
-		}
+	// An explicit scheme names its value, so a single word after "Bearer" is a
+	// credential whatever its alphabet: prose continues with more words ("Bearer
+	// responsibility belongs to the policy owner"), a token does not.
+	if anyBearerToken(lower) {
+		return "a bearer token"
 	}
 	for _, u := range urlsIn(s) {
 		// The same rule as config.checkURL: user:password@host is a credential.
@@ -244,49 +236,49 @@ func credentialShape(s string) string {
 	return ""
 }
 
-// hasValueAfter reports whether needle is followed by a non-empty, non-space
-// value: "authorization: Bearer x" is a header, "authorization: none required"
-// is prose.
-func hasValueAfter(lower, needle string) bool {
-	i := strings.Index(lower, needle)
-	if i < 0 {
-		return false
-	}
-	rest := strings.TrimSpace(lower[i+len(needle):])
-	if rest == "" {
-		return false
-	}
-	fields := strings.Fields(rest)
-	if len(fields) == 0 {
-		return false
-	}
-	v := strings.Trim(fields[0], "\"'`(),.;:")
-	return v != "" && v != "none" && v != "unset" && v != "empty" && v != "optional"
+// placeholders are the values nobody means as a credential.
+var placeholders = map[string]bool{
+	"": true, "none": true, "unset": true, "empty": true, "optional": true,
+	"required": true, "redacted": true, "***": true,
 }
 
-// tokenShaped reports whether w looks like a credential rather than a word: a
-// long run with both letters and digits, or a long opaque run. A dictionary word
-// like "responsibility" is letters only and does not count.
-func tokenShaped(w string) bool {
-	if len(w) < 12 {
-		return false
-	}
-	// A JWT is base64 of a JSON object, which always starts with "eyJ".
-	if strings.HasPrefix(w, "eyj") {
-		return true
-	}
-	var letters, digits, other int
-	for _, r := range w {
-		switch {
-		case r >= '0' && r <= '9':
-			digits++
-		case r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z':
-			letters++
-		default:
-			other++
+// anyValueAfter reports whether any occurrence of needle is followed by a value
+// that is not a placeholder.
+func anyValueAfter(lower, needle string) bool {
+	for from := 0; ; {
+		i := strings.Index(lower[from:], needle)
+		if i < 0 {
+			return false
+		}
+		rest := strings.Fields(lower[from+i+len(needle):])
+		if len(rest) > 0 && !placeholders[strings.Trim(rest[0], "\"'`(),.;:")] {
+			return true
+		}
+		from += i + len(needle)
+		if from >= len(lower) {
+			return false
 		}
 	}
-	return digits > 0 && letters > 0 || other > 0 && letters+digits > 12
+}
+
+// anyBearerToken reports whether "Bearer" is followed by exactly one value, the
+// shape of a credential rather than a sentence. A fragment that is only "Bearer
+// responsibility" is indistinguishable from a token, and refused on purpose.
+func anyBearerToken(lower string) bool {
+	for from := 0; ; {
+		i := strings.Index(lower[from:], "bearer ")
+		if i < 0 {
+			return false
+		}
+		rest := strings.Fields(strings.Trim(lower[from+i+len("bearer "):], "\"'`(),.;:"))
+		if len(rest) == 1 {
+			return true
+		}
+		from += i + len("bearer ")
+		if from >= len(lower) {
+			return false
+		}
+	}
 }
 
 // urlsIn returns the http(s) URLs s mentions, including one inside a sentence.
@@ -336,9 +328,9 @@ const (
 	FullTranscript RebuildKind = "FULL_TRANSCRIPT"
 )
 
-// Rebuild pairs a kind with its own input-token estimate. The two travel as one
-// value on purpose: an estimate measured for a checkpoint rebuild has nowhere to
-// be attached to a full replay, so that mismatch cannot be expressed.
+// Rebuild pairs a kind with its input-token estimate, so the number cannot be
+// lent to a different rebuild by a field mix-up. Whether it measures the right
+// context is still the caller's word: only accounting (#23) knows the real cost.
 type Rebuild struct {
 	Kind RebuildKind
 	// InputTokens estimates what this rebuild costs the next model. Zero means

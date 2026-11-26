@@ -244,6 +244,11 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		"api_key=sk-live-abc",
 		"use eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc",
 		"see https://user:pw@api.example.com/quota for details",
+		// An opaque, letters-only bearer value is still a credential.
+		"Bearer abcdefghijklmnop",
+		// A placeholder must not hide a real value in the next occurrence.
+		"token= unset; token=sk-live-abc",
+		"api_key= optional, api_key=sk-live-1",
 	} {
 		if err := (Checkpoint{Goal: raw}).Validate(); err == nil {
 			t.Errorf("Validate() let %q through", raw)

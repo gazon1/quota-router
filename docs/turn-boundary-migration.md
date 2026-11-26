@@ -66,9 +66,14 @@ the builders is refused rather than sent.
 
 The URL rule is applied to URLs *extracted* from the text, because a credentialed
 URL inside a sentence does not parse as a URL and a parse error must not read as
-"no credential". A bare JWT is caught by its shape (`eyJ…`, two dots), and
-`authorization:`, `token=`, `api_key=` and `password=` count only with a value
-after them, so "authorization: none required" and "token= unset" stay valid.
+"no credential". A bare JWT is caught by its shape (`eyJ…`, two dots).
+`authorization:`, `token=`, `api_key=` and `password=` count only when a value
+that is not a placeholder (`none`, `unset`, `empty`, `optional`, `required`,
+`redacted`) follows — at **any** occurrence, so `token= unset; token=sk-live-abc`
+is still refused — and "authorization: none required" stays valid. An explicit
+`Bearer` followed by a single value is a credential whatever its alphabet, while
+`Bearer responsibility belongs to the policy owner` is a sentence and stays valid;
+that trade-off deliberately refuses a bare two-word fragment.
 
 What `Validate` cannot do is read prose. It catches the shapes this installation
 itself hands around, not arbitrary text: a caller that pastes a raw provider body
