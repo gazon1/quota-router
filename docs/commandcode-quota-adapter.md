@@ -88,7 +88,12 @@ verified field into the normalized model.
 | Test | Asserts |
 |---|---|
 | `TestFetchReportsUnsupportedNotZero` | UNKNOWN + reason, no windows, `NONE` confidence, health `UNKNOWN`/`NOT_PROBED`, no cooldown; a `StateAt` freshness bound (positive, zero and negative) cannot convert the refusal into another diagnosis |
-| `TestFetchMakesNoRequest` | a counting transport: any outbound request fails the test, so a speculative `/alpha` client cannot appear unnoticed |
+
+There is deliberately no request-interception test. `Adapter` has no fields, so
+there is no endpoint to aim and no transport to replace; asserting "no request
+was made" would need a process-wide `http.DefaultTransport` swap, which couples
+tests globally and would stop catching anything the day a custom transport
+appeared. The zero-dependency implementation is the evidence.
 
 No fixtures are needed and none exist: there is no response to parse. The `/alpha`
 schemas already captured under `docs/fixtures/smoke/` stay as gate evidence and

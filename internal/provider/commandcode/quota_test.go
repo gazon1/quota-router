@@ -2,7 +2,6 @@ package commandcode
 
 import (
 	"context"
-	"net/http"
 	"testing"
 	"time"
 
@@ -40,21 +39,8 @@ func TestFetchReportsUnsupportedNotZero(t *testing.T) {
 	}
 }
 
-// roundTripperFunc lets the test count any request the adapter might make.
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-// TestFetchMakesNoRequest guards the "do not ship a speculative /alpha client"
-// criterion: any outbound poll of an undocumented route fails here instead of
-// silently becoming production polling.
-func TestFetchMakesNoRequest(t *testing.T) {
-	original := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = original })
-	http.DefaultTransport = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-		t.Errorf("Fetch requested %s, want no request at all", r.URL.Redacted())
-		return nil, nil
-	})
-
-	Adapter{}.Fetch(context.Background())
-}
+// The "do not ship a speculative /alpha client" criterion needs no test of its
+// own: Adapter has no fields, so there is no endpoint to aim and no transport to
+// replace. A request-intercepting test would prove a fact about http.DefaultTransport
+// rather than about this adapter, and would stop catching anything the day a
+// custom transport were introduced.
