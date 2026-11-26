@@ -63,10 +63,23 @@ type ProviderState struct {
 	reason HealthReason
 }
 
-// NewProviderState builds a health observation. A reason outside the declared
-// set becomes ReasonServerError: the type is a string, so a caller could pass a
-// raw provider error, which may carry a credential.
+// known reports whether h is one of the declared health states.
+func (h Health) known() bool {
+	switch h {
+	case Healthy, Degraded, Unavailable, HealthUnknown:
+		return true
+	}
+	return false
+}
+
+// NewProviderState builds a health observation. A value outside a declared
+// vocabulary becomes the safe fallback: the types are strings, so a caller
+// could pass a raw provider error, which may carry a credential.
 func NewProviderState(provider string, health Health, reason HealthReason, at time.Time) ProviderState {
+	if !health.known() {
+		health = HealthUnknown
+		reason = ReasonServerError
+	}
 	if !reason.known() {
 		reason = ReasonServerError
 	}

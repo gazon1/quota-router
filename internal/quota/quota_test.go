@@ -305,6 +305,13 @@ func TestHealthReasonVocabularyIsEnforced(t *testing.T) {
 	if st.Reason() != ReasonRateLimited {
 		t.Fatalf("Reason() = %q, want RATE_LIMITED", st.Reason())
 	}
+
+	// Health is a string too: a value outside its vocabulary cannot become a
+	// provider state either.
+	st = NewProviderState("p", Health("AVAILABLE"), ReasonNone, now)
+	if st.Health != HealthUnknown {
+		t.Fatalf("Health = %q, want UNKNOWN for an undeclared health state", st.Health)
+	}
 }
 
 func TestExplicitFailureReasonSurvivesAnyMaxAge(t *testing.T) {
