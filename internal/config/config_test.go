@@ -339,16 +339,32 @@ func TestLoadSecretsFromEnvironmentAndFiles(t *testing.T) {
 }
 
 func TestLegacyFlatEnvNamesStillWork(t *testing.T) {
-	cleanEnv(t)
-	t.Setenv("QUOTA_ROUTER_ADDR", "127.0.0.1:7001")
-	t.Setenv("QUOTA_ROUTER_READ_TIMEOUT", "7s")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v, want the deprecated flat names to keep working", err)
+	// Every alias in legacyEnvKeys, so a removed or renamed mapping fails here.
+	tests := []struct {
+		legacy, value string
+		got           func(Config) any
+		want          any
+	}{
+		{"QUOTA_ROUTER_ADDR", "127.0.0.1:7001", func(c Config) any { return c.Server.Addr }, "127.0.0.1:7001"},
+		{"QUOTA_ROUTER_SHUTDOWN_TIMEOUT", "11s", func(c Config) any { return c.Server.ShutdownTimeout }, 11 * time.Second},
+		{"QUOTA_ROUTER_READ_HEADER_TIMEOUT", "6s", func(c Config) any { return c.Server.ReadHeaderTimeout }, 6 * time.Second},
+		{"QUOTA_ROUTER_READ_TIMEOUT", "7s", func(c Config) any { return c.Server.ReadTimeout }, 7 * time.Second},
+		{"QUOTA_ROUTER_WRITE_TIMEOUT", "12s", func(c Config) any { return c.Server.WriteTimeout }, 12 * time.Second},
+		{"QUOTA_ROUTER_IDLE_TIMEOUT", "61s", func(c Config) any { return c.Server.IdleTimeout }, 61 * time.Second},
 	}
-	if cfg.Server.Addr != "127.0.0.1:7001" || cfg.Server.ReadTimeout != 7*time.Second {
-		t.Fatalf("Server = %+v, want the deprecated flat names applied", cfg.Server)
+	for _, tt := range tests {
+		t.Run(tt.legacy, func(t *testing.T) {
+			cleanEnv(t)
+			t.Setenv(tt.legacy, tt.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v, want the deprecated flat name to keep working", err)
+			}
+			if got := tt.got(cfg); got != tt.want {
+				t.Fatalf("%s = %v, want %v from the deprecated alias", tt.legacy, got, tt.want)
+			}
+		})
 	}
 }
 

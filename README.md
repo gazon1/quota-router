@@ -73,9 +73,10 @@ Migrate and drop the flat names; they are removed in a later change.
 ### Secrets
 
 Secrets are injected at runtime and never committed: they are read from an
-environment variable or, in containers, from a mounted secret file. Any
-variable ending in `_FILE` names a file whose trimmed contents become the
-setting:
+environment variable or, in containers, from a mounted secret file. A `_FILE`
+variable names a file whose trimmed contents become the setting; it works only
+for secret settings (`auth.token`, `providers.<name>.api_key`), and any other
+`_FILE` is a startup error rather than a silently read path:
 
 ```sh
 QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY_FILE=/run/secrets/minimax_api_key
