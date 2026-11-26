@@ -16,7 +16,7 @@ func TestComposeContract(t *testing.T) {
 		t.Fatalf("read compose.yaml: %v", err)
 	}
 	doc := string(raw)
-	services, ok := serviceBlocks(doc)
+	services, ok := serviceBlocks(stripComments(doc))
 	if !ok {
 		t.Fatal("compose.yaml: no top-level services: mapping")
 	}
@@ -46,10 +46,10 @@ func TestComposeContract(t *testing.T) {
 		}
 	}
 
-	if strings.Contains(doc, "depends_on") {
+	if strings.Contains(stripComments(doc), "depends_on") {
 		t.Error("compose.yaml: a depends_on edge exists; LiteLLM must start with the controller down")
 	}
-	if strings.Contains(doc, ":latest") || strings.Contains(doc, ":stable") {
+	if strings.Contains(stripComments(doc), ":latest") || strings.Contains(stripComments(doc), ":stable") {
 		t.Error("compose.yaml: floating image tag (:latest or :stable)")
 	}
 	// A complete digest, not just the "sha256:" prefix: a truncated digest is
@@ -65,6 +65,18 @@ func TestComposeContract(t *testing.T) {
 	if strings.Contains(services["quota-controller"], "ports:") {
 		t.Error("compose.yaml: quota-controller publishes a host port; it must stay internal")
 	}
+}
+
+// stripComments drops inline comments so a comment that mentions a value cannot
+// satisfy an assertion the real value fails, e.g. `mem_limit: 64m  # was 128m`.
+func stripComments(doc string) string {
+	lines := strings.Split(doc, "\n")
+	for i, line := range lines {
+		if j := strings.Index(line, " #"); j >= 0 {
+			lines[i] = strings.TrimRight(line[:j], " ")
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // serviceBlocks returns one block per service name declared under the

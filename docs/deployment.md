@@ -140,9 +140,11 @@ directive in `go.mod` and pins `golang:1.24-alpine`.
 ## Backup and recovery
 
 There is nothing to back up yet: no database is configured for LiteLLM, and the
-controller has no persisted state (no volume is mounted). Both are rebuilt from
-this checkout plus `.env`. When SQLite persistence lands (issue #12), add a named
-volume for the controller and a backup step here.
+controller has no persisted state (no volume is mounted). Recovering the stack
+means pulling the pinned LiteLLM image, rebuilding the controller from this
+checkout, and restoring `.env` — there is no data to restore. When SQLite
+persistence lands (issue #12), add a named volume for the controller and a real
+backup step here.
 
 ## Known gaps
 
