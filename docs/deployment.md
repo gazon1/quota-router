@@ -119,20 +119,37 @@ curl -s http://127.0.0.1:4000/health/readiness
 The controller is built locally from this checkout, so upgrading it is
 `git pull && docker compose up -d --build --wait quota-controller`.
 
-## Compatibility note: v1.110.0 is Python, not Rust
+## Compatibility note: v1.110.0 ships Rust, but runs it only when asked
 
 Issue #6 asks for the Rust Router candidate to be evaluated rather than assumed.
-Findings for `v1.110.0` (checked 2026-11-26):
+Findings for `v1.110.0` (checked 2026-11-26, image
+`@sha256:4295b064…b883c3`):
 
-- The image reports **Python 3.13.18**; `/app/.venv/bin/litellm --version` says
-  `1.110.0`, and `python3 -c "import litellm_rust"` fails with
-  `ModuleNotFoundError`.
-- The tag does contain a Rust workspace (`litellm-rust/`, with `router`,
-  `gateway`, `host-native` and related crates), but it is **not** what the
-  published image runs. No separate Rust image tag was found on GHCR or Docker
-  Hub (`litellm:rust`, `litellm-rust:latest`, `litellm:main-rust` all 404).
-- So this deployment runs the **Python proxy**. Treat the Rust router as a
-  separate future evaluation, not as part of this image.
+- The proxy is **Python 3.13.18** (`/app/.venv/bin/litellm --version` → `1.110.0`).
+- It **does** ship compiled Rust: `litellm/rust_bridge/_native.abi3.so` is a
+  45 MB native extension (1100+ `rustc`/`/rust/` symbols) that imports cleanly
+  and exports the routing core — `RouterCoreHandle`, `NativeDatabase`,
+  `NativeRedisClient`, `NativeRateLimits`, `TokenCounter`, plus `acompletion`,
+  `aembedding`, `amessages`, `aresponses`, `aocr`.
+- **The Rust path is opt-in and off by default.** `litellm.rust_bridge.configuration`
+  reads `LITELLM_RUST`; unset or `false` yields `Decision.PYTHON`, `true` yields
+  `Decision.RUST_WITH_FALLBACK`. Measured in the image:
+
+  | `LITELLM_RUST` | `rust_enabled()` | decision |
+  |---|---|---|
+  | unset | `False` | `PYTHON` |
+  | `true` | `True` | `RUST_WITH_FALLBACK` |
+  | `false` | `False` | `PYTHON` |
+
+- `RUST_WITH_FALLBACK` falls back to Python when the native call declines, so
+  enabling it is not a hard cutover.
+- No separate Rust image tag exists on GHCR or Docker Hub (`litellm:rust`,
+  `litellm-rust:latest`, `litellm:main-rust` all 404); the one image carries both.
+
+So this deployment runs the **Python path by default** and does not set
+`LITELLM_RUST`. Enabling Rust is an untested change here: measure it under real
+load before adopting it, and do not assume the Rust router is inactive merely
+because the image is tagged as a Python proxy.
 
 `Dockerfile.controller` builds against the `go 1.22.0` / `toolchain go1.24.0`
 directive in `go.mod` and pins `golang:1.24-alpine`.
