@@ -10,6 +10,11 @@ FROM alpine:3.22
 # busybox wget is the healthcheck client; the controller has no shell tooling of its own.
 RUN adduser -D -H -u 65532 nonroot
 COPY --from=build /out/quota-controller /usr/local/bin/quota-controller
+# The SQLite directory must exist and be owned by the runtime user before a
+# named volume is mounted over it: Docker seeds an empty volume from this path,
+# including its owner, so the controller can create its database without root.
+RUN mkdir -p /var/lib/quota-router && chown 65532:65532 /var/lib/quota-router
+VOLUME /var/lib/quota-router
 USER nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/quota-controller"]

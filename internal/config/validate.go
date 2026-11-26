@@ -63,7 +63,27 @@ func (c Config) validate() error {
 		"routing.low_quota_threshold must be in (0, 1], got %v", c.Routing.LowQuotaThreshold)
 
 	check(c.SQLite.Path != "", "sqlite.path must not be empty")
+	// The DSN is built from this value, so a SQLite URI form here would be
+	// prefixed with another "file:" and open a different database than the one
+	// named — or an in-memory one that loses everything on restart. Accept a
+	// plain filesystem path only.
+	lower := strings.ToLower(c.SQLite.Path)
+	check(!strings.HasPrefix(c.SQLite.Path, ":"),
+		"sqlite.path must be a file path, not a SQLite special name like %q (it would not persist)", c.SQLite.Path)
+	check(!strings.HasPrefix(lower, "file:"),
+		"sqlite.path must be a file path, not a SQLite URI like %q", c.SQLite.Path)
 	check(c.SQLite.BusyTimeout > 0, "sqlite.busy_timeout must be > 0, got %s", c.SQLite.BusyTimeout)
+	// Zero disables pruning for that table; a negative value is a typo.
+	for _, d := range []struct {
+		name string
+		v    time.Duration
+	}{
+		{"quota_snapshots", c.SQLite.Retention.QuotaSnapshots},
+		{"provider_health", c.SQLite.Retention.ProviderHealth},
+		{"usage_records", c.SQLite.Retention.UsageRecords},
+	} {
+		check(d.v >= 0, "sqlite.retention.%s must be >= 0 (0 keeps everything), got %s", d.name, d.v)
+	}
 
 	switch c.Observability.Level {
 	case "debug", "info", "warn", "error":

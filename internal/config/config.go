@@ -82,6 +82,16 @@ type Routing struct {
 type SQLite struct {
 	Path        string        `koanf:"path"`
 	BusyTimeout time.Duration `koanf:"busy_timeout"`
+	// Retention bounds history. Zero keeps everything.
+	Retention Retention `koanf:"retention"`
+}
+
+// Retention bounds how long persisted history is kept. The newest state per
+// provider always survives, so cleanup never removes what routing reads.
+type Retention struct {
+	QuotaSnapshots time.Duration `koanf:"quota_snapshots"`
+	ProviderHealth time.Duration `koanf:"provider_health"`
+	UsageRecords   time.Duration `koanf:"usage_records"`
 }
 
 // Auth holds the bearer token for the controller's own HTTP API.
@@ -121,11 +131,21 @@ func Default() Config {
 			WriteTimeout:      10 * time.Second,
 			IdleTimeout:       60 * time.Second,
 		},
-		LiteLLM:       LiteLLM{BaseURL: "http://127.0.0.1:4000", ModelAliases: map[string]string{}},
-		Providers:     map[string]Provider{},
-		Polling:       Polling{Interval: 30 * time.Second, RequestTimeout: 10 * time.Second},
-		Routing:       Routing{LowQuotaThreshold: 0.1},
-		SQLite:        SQLite{Path: "quota-router.db", BusyTimeout: 5 * time.Second},
+		LiteLLM:   LiteLLM{BaseURL: "http://127.0.0.1:4000", ModelAliases: map[string]string{}},
+		Providers: map[string]Provider{},
+		Polling:   Polling{Interval: 30 * time.Second, RequestTimeout: 10 * time.Second},
+		Routing:   Routing{LowQuotaThreshold: 0.1},
+		SQLite: SQLite{
+			Path:        "quota-router.db",
+			BusyTimeout: 5 * time.Second,
+			// A poll every 30s is ~2.9k snapshots a provider a day; a month of
+			// history is a few MB. Set a field to 0 to keep that table forever.
+			Retention: Retention{
+				QuotaSnapshots: 30 * 24 * time.Hour,
+				ProviderHealth: 30 * 24 * time.Hour,
+				UsageRecords:   90 * 24 * time.Hour,
+			},
+		},
 		Observability: Observability{Level: "info"},
 	}
 }

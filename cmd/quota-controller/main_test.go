@@ -2,17 +2,35 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gazon1/quota-router/internal/config"
+	"github.com/gazon1/quota-router/internal/store"
 )
+
+// TestMain keeps every test database inside a temporary directory: run() opens
+// the configured SQLite path, and the default would litter the package.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "quota-controller-test-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("QUOTA_ROUTER_SQLITE__PATH", filepath.Join(dir, "test.db"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func TestRunConfigError(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__READ_TIMEOUT", "bad")
@@ -255,3 +273,93 @@ func waitForTCP(t *testing.T, addr string, timeout time.Duration) {
 	}
 	t.Fatalf("server at %s did not accept connections within %s", addr, timeout)
 }
+
+// TestPrunerRunsWhileServing proves retention is not a startup-only step: a
+// controller that keeps running must not accumulate history its configuration
+// says it dropped. Driven through the real run(), so the wiring is covered too.
+func TestPrunerRunsWhileServing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.db")
+
+	st, err := store.Open(store.Config{Path: path, BusyTimeout: 5 * time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := st.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 3; i++ {
+		if err := st.SaveUsageRecord(context.Background(), store.UsageRecord{
+			Provider: "p", Provenance: store.Estimated, ObservedAt: old,
+		}); err != nil {
+			t.Fatalf("SaveUsageRecord: %v", err)
+		}
+	}
+	// Retention of one hour, so the ticker has exactly the seeded rows to remove.
+	ctx := context.Background()
+	stop := startPruner(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), st, config.Retention{UsageRecords: time.Hour}, 20*time.Millisecond)
+
+	// The ticker must delete the expired rows without touching anything else.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if n, err := countUsageRows(path); err == nil && n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			stop()
+			st.Close()
+			t.Fatal("expired usage rows survived 3s: the pruner never ran")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// A fresh row must survive the same ticker.
+	if err := st.SaveUsageRecord(ctx, store.UsageRecord{
+		Provider: "p", Provenance: store.Estimated, ObservedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveUsageRecord: %v", err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if n, err := countUsageRows(path); err != nil || n != 1 {
+		stop()
+		st.Close()
+		t.Fatalf("rows = %d (err %v) after the tick, want the 1 fresh row", n, err)
+	}
+	stop() // must wait for an in-flight tick before the store closes
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// countUsageRows reads the usage table through its own connection, so the test
+// observes what the store persisted rather than what it cached.
+func countUsageRows(path string) (int, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM usage_records").Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// TestRetentionIsFatalOnlyWhenFull pins the policy: a transient cleanup failure
+// must not stop a controller that can otherwise serve, but a full database must.
+func TestRetentionIsFatalOnlyWhenFull(t *testing.T) {
+	if !retentionBlocksStartup(store.ErrFull) {
+		t.Error("a full database must block startup: writes cannot grow")
+	}
+	for _, err := range []error{store.ErrBusy, store.ErrIO, errTest} {
+		if retentionBlocksStartup(err) {
+			t.Errorf("%v blocks startup; it is transient and the controller can serve", err)
+		}
+	}
+	if retentionBlocksStartup(nil) {
+		t.Error("nil blocks startup")
+	}
+}
+
+var errTest = errors.New("wrapped transient failure")

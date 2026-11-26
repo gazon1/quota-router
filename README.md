@@ -90,6 +90,9 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_ROUTING__LOW_QUOTA_THRESHOLD` | `0.1` | Scarce-quota fraction, in `(0, 1]` |
 | `QUOTA_ROUTER_SQLITE__PATH` | `quota-router.db` | SQLite file path |
 | `QUOTA_ROUTER_SQLITE__BUSY_TIMEOUT` | `5s` | SQLite busy timeout |
+| `QUOTA_ROUTER_SQLITE__RETENTION__QUOTA_SNAPSHOTS` | `720h` | Keep quota snapshots this long (`0` keeps all) |
+| `QUOTA_ROUTER_SQLITE__RETENTION__PROVIDER_HEALTH` | `720h` | Keep health observations this long (`0` keeps all) |
+| `QUOTA_ROUTER_SQLITE__RETENTION__USAGE_RECORDS` | `2160h` | Keep usage records this long (`0` keeps all) |
 | `QUOTA_ROUTER_AUTH__TOKEN` | unset | Bearer token for the controller API (secret) |
 | `QUOTA_ROUTER_OBSERVABILITY__LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
@@ -148,6 +151,17 @@ here.
 Local files: `config.yaml` and `.env` are git-ignored; keep real ones
 `chmod 600` (`install -m 600`). Only the `*.example.*` files are tracked, and
 they contain placeholders only.
+
+## Storage
+
+The controller persists subscription quota snapshots, local usage, provider
+health and controller state in a local SQLite database
+(`QUOTA_ROUTER_SQLITE__PATH`). Migrations are embedded in the binary and run
+before the listener starts; a database this build cannot migrate fails startup.
+
+**Run one controller per database file, on a local filesystem.** Retention,
+WAL, the backup procedure and the failure behaviour are in
+[docs/storage.md](./docs/storage.md).
 
 ## Deploy
 

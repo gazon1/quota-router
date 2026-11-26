@@ -12,8 +12,8 @@ services:
     restart: unless-stopped
     read_only: true
     # Measurement target from issue #6: measured VmHWM 14 MiB at 5.5k req/s of
-    # /health. 128 MiB leaves ~9x headroom; re-measure once SQLite and polling
-    # land (issues #12, #13).
+    # /health. With SQLite (issue #12) idle VmHWM is 10.2 MiB, so 128 MiB keeps
+    # ~12x headroom; re-measure once quota polling lands (issue #13).
     mem_limit: 128m
     cpus: 0.5
     healthcheck:
@@ -25,9 +25,15 @@ services:
     # No host port: /health is the only route today, so the controller stays
     # reachable only inside the compose network. Publish one when a real API
     # exists (issue #18).
+    # The controller writes quota snapshots, usage and health to SQLite, so its
+    # database must survive a container restart. A named volume, not a bind mount:
+    # Compose owns the path and the file stays owned by the container user.
+    # read_only stays true because the volume is mounted read-write on its own.
+    volumes:
+      - controller-db:/var/lib/quota-router
+    environment:
+      QUOTA_ROUTER_SQLITE__PATH: /var/lib/quota-router/quota-router.db
     networks: [internal]
-    # No volume yet: the controller is stateless until SQLite persistence exists
-    # (issue #12). Add one mounted at the DB path when that lands.
 
   litellm:
     # Pinned by tag and digest. v1.110.0 is a Python 3.13 proxy that ships a
@@ -58,3 +64,8 @@ services:
 
 networks:
   internal:
+
+volumes:
+  # Backup/restore for this volume is in docs/storage.md. Removing it discards
+  # the persisted quota state; the controller re-learns it by polling.
+  controller-db:
