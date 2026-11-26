@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pressly/goose/v3"
@@ -81,10 +82,29 @@ func dsn(cfg Config) string {
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Set("_txlock", "immediate")
-	// url.URL escapes the path, so a "?", "#", "%" or space in a valid file
-	// name stays part of the file name instead of becoming URI syntax. Without
-	// it the driver opens a different file than the one Migrate locks.
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(cfg.Path), RawQuery: q.Encode()}).String()
+	return "file:" + escapePath(filepath.ToSlash(cfg.Path)) + "?" + q.Encode()
+}
+
+// escapePath percent-encodes the characters that would otherwise be URI syntax,
+// and nothing else, so a "?", "#", "%" or space in a valid file name stays part
+// of the name. Without it the driver opens a different file than the one
+// Migrate locks.
+//
+// url.URL is not used here for the opposite reason: with a relative path such as
+// the default "quota-router.db" it renders "file://quota-router.db" — an
+// authority, not a relative path — and the driver then fails to open anything.
+// Slashes stay literal so relative paths keep working.
+func escapePath(p string) string {
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		switch c := p[i]; c {
+		case '?', '#', '%', ' ':
+			fmt.Fprintf(&b, "%%%02X", c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // Close releases the pool.

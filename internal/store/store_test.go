@@ -623,6 +623,41 @@ func TestConcurrentBackupsToOneTargetKeepTheWinner(t *testing.T) {
 	}
 }
 
+func TestRelativePathWorks(t *testing.T) {
+	// The default setting is a relative path ("quota-router.db"), so it must keep
+	// working. A url.URL-based DSN rendered it as "file://quota-router.db" — an
+	// authority, not a relative path — and the driver could not open anything.
+	saved, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(saved)
+
+	for _, path := range []string{"quota-router.db", filepath.Join("nested", "quota-router.db")} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, path)), 0o700); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		s, err := Open(Config{Path: path, BusyTimeout: time.Second}, testLog())
+		if err != nil {
+			t.Fatalf("Open(%q): %v", path, err)
+		}
+		if err := s.Migrate(context.Background()); err != nil {
+			t.Fatalf("Migrate(%q): %v", path, err)
+		}
+		if err := s.SaveControllerState(context.Background(), "k", "v", time.Now()); err != nil {
+			t.Fatalf("write(%q): %v", path, err)
+		}
+		s.Close()
+		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
+			t.Fatalf("relative path %q created no file: %v", path, err)
+		}
+	}
+}
+
 func TestDSNKeepsURISpecialCharactersInThePath(t *testing.T) {
 	// Review finding: the path was concatenated into the SQLite URI, so "?" began
 	// the query and the driver opened a different file than the one Migrate locks.
