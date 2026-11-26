@@ -119,14 +119,15 @@ Measured on this host with `docker stats` and `/proc/1/status` `VmHWM`:
 
 | Service | Limit | Measured |
 |---|---:|---|
-| `quota-controller` | 128 MiB | 5.8 MiB idle, 14 MiB peak after 5000 `/health` requests at 5.5k req/s |
+| `quota-controller` | 128 MiB | 10.2 MiB idle with SQLite persistence (5.8 MiB before it), 14 MiB peak after 5000 `/health` requests at 5.5k req/s |
 | `litellm` | 1 GiB | 666 MiB idle (VmHWM), one model configured; started fine under a 512 MiB cap but sat at the cap |
 
-The 128 MiB controller limit is the measurement target from issue #6 and holds
-with ~9x headroom for the current `/health`-only workload. **It is not verified
-for SQLite persistence or quota polling** (issues #12, #13) — those change the
-memory profile, so re-measure before relying on the number. Likewise, 1 GiB is a
-starting point for LiteLLM, not a measurement of it under model load.
+The 128 MiB controller limit is the measurement target from issue #6. SQLite
+persistence (issue #12) raised idle VmHWM from 5.8 to **10.2 MiB**, so the limit
+keeps ~12x headroom for the `/health`-only workload. **Quota polling (issue #13)
+is still unmeasured** — it adds in-memory state and a request path, so re-measure
+before relying on the number. Likewise, 1 GiB is a starting point for LiteLLM,
+not a measurement of it under model load.
 
 Check current values with:
 

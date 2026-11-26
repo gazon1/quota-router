@@ -49,6 +49,13 @@ func (s *Store) Backup(ctx context.Context, path string) error {
 		os.Remove(tmpPath) // a failed VACUUM INTO can leave a partial file behind
 		return fmt.Errorf("backup to %s: %w", path, classify(err))
 	}
+	// VACUUM INTO creates the file with the process umask (0644 under 0022) and
+	// a backup holds the same rows as the database, so restore the owner-only
+	// mode before it is published under its real name.
+	if err := os.Chmod(tmpPath, dbPerm); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("backup to %s: %w", path, err)
+	}
 	// os.Rename would overwrite a target that appeared meanwhile, so publish with a
 	// hard link instead: it fails with EEXIST, which is the contract callers
 	// asked for — a new file, never a silent replacement.

@@ -16,7 +16,13 @@ import (
 
 // tsLayout is the fixed-width UTC layout every timestamp column uses, so
 // retention can compare text and a backup stays readable.
-const tsLayout = "2006-01-02T15:04:05.000Z"
+//
+// Nanoseconds, not milliseconds: observations that differ only below a
+// millisecond would otherwise collapse into a tie, and the tie is broken by id —
+// so a stale observation that arrived late could outrank a newer one and become
+// the current state. RFC 3339 with 9 fractional digits keeps the fixed width and
+// lexicographic order.
+const tsLayout = "2006-01-02T15:04:05.000000000Z"
 
 func ts(t time.Time) string { return t.UTC().Format(tsLayout) }
 
@@ -119,7 +125,16 @@ func (s *Store) ControllerState(ctx context.Context, key string) (value string, 
 // It is routing state, not history: retention keeps these rows. The row is
 // chosen by newestPerProvider, the same predicate retention spares.
 func (s *Store) LatestQuotaSnapshot(ctx context.Context) ([]QuotaSnapshot, error) {
-	rows, err := s.db.QueryContext(ctx,
+	// One read transaction: a prune running between the snapshot query and the
+	// window queries would otherwise delete the selected rows (and cascade their
+	// windows), so the caller would get a snapshot with no windows.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
 		`SELECT id, provider, state, unknown_reason, source, confidence, observed_at, error
 		 FROM quota_snapshots WHERE `+newestPerProvider("quota_snapshots", true))
 	if err != nil {
@@ -153,8 +168,10 @@ func (s *Store) LatestQuotaSnapshot(ctx context.Context) ([]QuotaSnapshot, error
 	if err := rows.Err(); err != nil {
 		return nil, classify(err)
 	}
+	// Windows are read on the same transaction, before it goes away.
+	rows.Close()
 	for i, id := range ids {
-		windows, err := s.windows(ctx, id)
+		windows, err := windows(ctx, tx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -163,8 +180,8 @@ func (s *Store) LatestQuotaSnapshot(ctx context.Context) ([]QuotaSnapshot, error
 	return out, nil
 }
 
-func (s *Store) windows(ctx context.Context, snapshotID int64) ([]QuotaWindow, error) {
-	rows, err := s.db.QueryContext(ctx,
+func windows(ctx context.Context, tx *sql.Tx, snapshotID int64) ([]QuotaWindow, error) {
+	rows, err := tx.QueryContext(ctx,
 		`SELECT window, unit, limit_value, used_value, remaining_value, reset_at
 		 FROM quota_windows WHERE snapshot_id = ? ORDER BY window`, snapshotID)
 	if err != nil {

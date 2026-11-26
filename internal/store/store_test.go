@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -801,6 +802,109 @@ func TestBackupRefusesAndLeavesNoLitter(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".backup-") {
 			t.Errorf("temporary file %q survived", e.Name())
 		}
+	}
+}
+
+func TestDatabaseAndBackupFilesAreOwnerOnly(t *testing.T) {
+	// Review finding: SQLite creates its files with the process umask, so under
+	// the usual 0022 the database and every backup were world-readable.
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	// The previously common umask, restored for the rest of the suite.
+	old := syscall.Umask(0o022)
+	defer syscall.Umask(old)
+
+	s, err := Open(Config{Path: path, BusyTimeout: time.Second}, testLog())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if err := s.SaveControllerState(ctx, "k", "v", time.Now()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	backup := filepath.Join(t.TempDir(), "backup.db")
+	if err := s.Backup(ctx, backup); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+
+	for _, p := range []string{path, backup} {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if got := st.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode = %04o, want 0600: the file holds provider observations", filepath.Base(p), got)
+		}
+	}
+	s.Close()
+
+	// An existing database created 0644 by an earlier build is tightened on open,
+	// so an upgrade does not leave it exposed.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	again, err := Open(Config{Path: path, BusyTimeout: time.Second}, testLog())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer again.Close()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := st.Mode().Perm(); got != 0o600 {
+		t.Fatalf("existing database mode = %04o after open, want 0600", got)
+	}
+}
+
+func TestSubMillisecondObservationsDoNotTie(t *testing.T) {
+	// Review finding: millisecond truncation turned distinct observations into a
+	// tie, and the id tie-break then let a LATE, OLDER write outrank the newer one.
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newer := base.Add(900 * time.Microsecond)
+
+	// The newer observation is written first, so the older one gets the higher id.
+	if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: newer,
+	}); err != nil {
+		t.Fatalf("newer: %v", err)
+	}
+	if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+		Provider: "minimax", State: QuotaExhausted, Source: "s", Confidence: Reported, ObservedAt: base,
+	}); err != nil {
+		t.Fatalf("older: %v", err)
+	}
+
+	got, err := s.LatestQuotaSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LatestQuotaSnapshot: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("snapshots = %d, want 1", len(got))
+	}
+	if got[0].State != QuotaAvailable {
+		t.Fatalf("state = %s, want %s: the late older write outranked the newer observation",
+			got[0].State, QuotaAvailable)
+	}
+	if !got[0].ObservedAt.Equal(newer.Truncate(time.Nanosecond)) {
+		t.Fatalf("observed_at = %s, want %s: precision was lost", got[0].ObservedAt, newer)
+	}
+	// Retention must agree: the same row is the one that survives.
+	if _, err := s.Prune(ctx, Retention{QuotaSnapshots: time.Hour}, base.Add(90*24*time.Hour)); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	after, err := s.LatestQuotaSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("LatestQuotaSnapshot after prune: %v", err)
+	}
+	if len(after) != 1 || after[0].State != QuotaAvailable {
+		t.Fatalf("after prune %+v, want the same AVAILABLE row", after)
 	}
 }
 

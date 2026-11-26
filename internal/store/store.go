@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,6 +48,9 @@ type Config struct {
 // Open opens the database and applies the operational settings on every
 // connection. It does not migrate; call Migrate before serving.
 func Open(cfg Config, log *slog.Logger) (*Store, error) {
+	if err := chmodDB(cfg.Path); err != nil {
+		return nil, fmt.Errorf("open sqlite %q: %w", cfg.Path, err)
+	}
 	db, err := sql.Open("sqlite", dsn(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %q: %w", cfg.Path, classify(err))
@@ -77,12 +81,23 @@ func Open(cfg Config, log *slog.Logger) (*Store, error) {
 //	                  waits on busy_timeout instead of failing mid-transaction
 func dsn(cfg Config) string {
 	q := url.Values{}
-	q.Add("_pragma", "busy_timeout("+strconv.FormatInt(cfg.BusyTimeout.Milliseconds(), 10)+")")
+	q.Add("_pragma", "busy_timeout("+strconv.FormatInt(busyMillis(cfg.BusyTimeout), 10)+")")
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Set("_txlock", "immediate")
 	return "file:" + escapePath(filepath.ToSlash(cfg.Path)) + "?" + q.Encode()
+}
+
+// busyMillis rounds a positive duration up, because Millisecond() truncates: a
+// configured "500us" would otherwise become busy_timeout(0) and silently give the
+// database no waiting period at all.
+func busyMillis(d time.Duration) int64 {
+	ms := d.Milliseconds()
+	if ms == 0 && d > 0 {
+		return 1
+	}
+	return ms
 }
 
 // escapePath percent-encodes the characters that would otherwise be URI syntax,
@@ -151,6 +166,34 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	for _, r := range results {
 		s.log.Info("migration applied", "version", r.Source.Version, "file", filepath.Base(r.Source.Path))
+	}
+	return nil
+}
+
+// dbPerm is owner-only. The database holds provider observations and controller
+// state; SQLite creates its files with the process umask (0644 under 0022),
+// which would make them world-readable inside the container.
+const dbPerm = 0o600
+
+// chmodDB creates the database file if it is missing, owner-only, and brings an
+// existing one to the same mode. SQLite keeps the mode of a file it opens, so
+// this covers both the fresh and the existing-database case; a file we may not
+// chmod fails startup with the OS error rather than being served world-readable.
+func chmodDB(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE, dbPerm)
+	if err == nil {
+		err = f.Close()
+	}
+	if err != nil {
+		// A path that is a directory, or one whose directory is missing, is an
+		// unusable database location, not a permission problem.
+		if os.IsPermission(err) {
+			return errors.Join(ErrReadOnly, err)
+		}
+		return errors.Join(ErrIO, err)
+	}
+	if err := os.Chmod(path, dbPerm); err != nil {
+		return errors.Join(ErrIO, err)
 	}
 	return nil
 }
