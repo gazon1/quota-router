@@ -103,10 +103,10 @@ func TestCheckpointRefusesARawErrorOrAWholeFile(t *testing.T) {
 
 func TestCompletedResultIsASummaryNotADump(t *testing.T) {
 	// 4096 runes is the cap; anything longer is a file, not a result.
-	dump := strings.Repeat("x", maxResultRunes+1)
+	dump := strings.Repeat("x", maxFieldRunes+1)
 	got := CompletedResult("read file", dump)
-	if n := len([]rune(got.Result)); n > maxResultRunes {
-		t.Fatalf("CompletedResult kept %d runes, want at most %d", n, maxResultRunes)
+	if n := len([]rune(got.Result)); n > maxFieldRunes {
+		t.Fatalf("CompletedResult kept %d runes, want at most %d", n, maxFieldRunes)
 	}
 	cp := Checkpoint{ToolResults: []ToolResult{got}}
 	if err := cp.Validate(); err != nil {
@@ -114,14 +114,14 @@ func TestCompletedResultIsASummaryNotADump(t *testing.T) {
 	}
 
 	// A multi-byte character must not be cut in half by the cap.
-	wide := strings.Repeat("ж", maxResultRunes+10)
+	wide := strings.Repeat("ж", maxFieldRunes+10)
 	got = CompletedResult("read file", wide)
 	if !strings.HasSuffix(got.Result, "…[truncated]") || strings.Contains(got.Result, "\uFFFD") {
-		t.Fatalf("CompletedResult cut a character in half: %q", got.Result[maxResultRunes-2:])
+		t.Fatalf("CompletedResult cut a character in half: %q", got.Result[maxFieldRunes-2:])
 	}
 	// Exactly at the cap is allowed and untouched.
-	atCap := CompletedResult("read file", strings.Repeat("y", maxResultRunes))
-	if atCap.Result != strings.Repeat("y", maxResultRunes) {
+	atCap := CompletedResult("read file", strings.Repeat("y", maxFieldRunes))
+	if atCap.Result != strings.Repeat("y", maxFieldRunes) {
 		t.Fatal("CompletedResult truncated a result that was exactly within the cap")
 	}
 }
@@ -138,33 +138,93 @@ func TestFailedResultReplacesAnUndeclaredFailure(t *testing.T) {
 }
 
 func TestLargeContextMigrationPaysForItsRebuild(t *testing.T) {
-	// The same turn, the same failed route, two rebuilds. A model switch has no
-	// KV cache to inherit, so the full transcript is input tokens the next model
-	// processes and this installation pays for a second time.
+	// The same turn, same failed route, two rebuilds. A model switch inherits no
+	// KV cache, so a full transcript is input tokens the next model processes —
+	// and this installation pays for — a second time.
 	budget := Budget{MaxInputTokens: 100_000}
 	sameTurn := "minimax/MiniMax-M2"
 
-	full := Migration{Model: sameTurn, Rebuild: FullTranscript, InputTokens: 240_000}
+	full := Migration{Model: sameTurn, Rebuild: Rebuild{Kind: FullTranscript, InputTokens: 240_000}, AuthorizedBy: "agent"}
 	if full.Allowed(budget) {
 		t.Fatal("a 240k-token full replay was allowed within a 100k budget")
 	}
-	// The compact rebuild of the very same turn fits, so the refusal above is
-	// about the rebuild's cost, not about migration being unavailable at all.
-	compact := Migration{Model: sameTurn, Rebuild: FromCheckpoint, InputTokens: 6_000}
+	// A checkpoint rebuild of the same turn fits, so the refusal above is about
+	// what the rebuild costs, not about migration being unavailable at all.
+	compact := Migration{Model: sameTurn, Rebuild: Rebuild{Kind: FromCheckpoint, InputTokens: 6_000}}
 	if !compact.Allowed(budget) {
 		t.Fatal("the checkpoint rebuild of the same turn was refused")
 	}
 
-	// An estimate belongs to its own rebuild: reusing the cheap checkpoint
-	// estimate to authorize a full replay must not pass. Only the fields are
-	// public, so the caller's mistake looks exactly like this.
-	reused := Migration{Model: sameTurn, Rebuild: FullTranscript, InputTokens: compact.InputTokens}
-	if !reused.Allowed(budget) {
-		t.Fatal("a full replay with a checkpoint-sized estimate was refused, which the budget alone cannot detect")
+	// An estimate travels in the rebuild it measured, so the original mistake —
+	// a checkpoint-sized number attached to a full replay — cannot be written
+	// down at all. This is what the old flat Migration allowed and no test can
+	// pin: the type now prevents it.
+	var _ = compact.Rebuild.Kind
+}
+
+func TestFullReplayNeedsAnExplicitDecision(t *testing.T) {
+	// The issue asks that a deliberate full-context replay be an explicit
+	// decision, not something that happens by filling in a struct.
+	budget := Budget{MaxInputTokens: 100_000}
+	replay := Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FullTranscript, InputTokens: 90_000}}
+	if replay.Allowed(budget) {
+		t.Fatal("a full replay without a named decision was allowed")
 	}
-	// That is why Allowed is the last check and not the only one: the estimate is
-	// the caller's, and only the caller knows which rebuild it measured. This is
-	// the gap #23 closes with real token accounting.
+	replay.AuthorizedBy = "policy: owner-approved-large-context"
+	if !replay.Allowed(budget) {
+		t.Fatal("a budgeted, explicitly authorized full replay was refused")
+	}
+}
+
+func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
+	// The boundary is the checkpoint, not one field: prose pasted into Goal or
+	// References must be refused just like a raw tool result.
+	raw := "401 Unauthorized: Authorization: Bearer sk-live-abc"
+	tests := []struct {
+		name string
+		cp   Checkpoint
+	}{
+		{"goal carries a credential", Checkpoint{Goal: raw}},
+		{"completed carries a credential", Checkpoint{Completed: []string{"fetched " + raw}}},
+		{"decisions carries a credential", Checkpoint{Decisions: []string{"api_key=sk-live-abc"}}},
+		{"pending carries a credential", Checkpoint{Pending: []string{"retry with token=sk-live-abc"}}},
+		{"references carries a credential", Checkpoint{References: []string{"https://user:pw@api.example.com/quota"}}},
+		{"tool call name carries a credential", Checkpoint{ToolResults: []ToolResult{
+			CompletedResult("curl -H 'Authorization: Bearer sk-live-abc'", "200 OK"),
+		}}},
+		{"goal is a whole file", Checkpoint{Goal: strings.Repeat("line\n", maxFieldRunes)}},
+	}
+	for _, tc := range tests {
+		if err := tc.cp.Validate(); err == nil {
+			t.Errorf("%s: Validate() = nil, want an error", tc.name)
+		}
+	}
+
+	// A plain reference and a plain summary stay allowed: the guard is narrow on
+	// purpose, so it does not reject the checkpoint it exists to protect.
+	ok := Checkpoint{
+		Goal:       "wire the turn boundary",
+		Completed:  []string{"read issue #21"},
+		Decisions:  []string{"one checkpoint type"},
+		Pending:    []string{"write docs"},
+		References: []string{"internal/turn/checkpoint.go", "https://github.com/gazon1/quota-router/pull/58"},
+		ToolResults: []ToolResult{
+			CompletedResult("go test ./...", "81 passed"),
+		},
+	}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("Validate() rejected a legitimate checkpoint: %v", err)
+	}
+
+	// Plain prose that happens to contain "bearer" must not look like a token.
+	prose := Checkpoint{Goal: "the bearer of this report is the owner"}
+	if err := prose.Validate(); err != nil {
+		t.Fatalf("Validate() rejected plain prose: %v", err)
+	}
+	// But a real token after it is still caught.
+	if err := (Checkpoint{Goal: "sent with Bearer sk-live-abcdef123"}).Validate(); err == nil {
+		t.Fatal("Validate() let a bearer token through when it followed the keyword")
+	}
 }
 
 func TestMigrationRefusedWithoutAnAccountableCost(t *testing.T) {
@@ -174,14 +234,14 @@ func TestMigrationRefusedWithoutAnAccountableCost(t *testing.T) {
 		m    Migration
 		want bool
 	}{
-		{"checkpoint within budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: FromCheckpoint, InputTokens: 4_000}, true},
-		{"explicit full replay within budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: FullTranscript, InputTokens: 90_000}, true},
-		{"over budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: FullTranscript, InputTokens: 120_000}, false},
-		{"at the budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: FromCheckpoint, InputTokens: 100_000}, true},
-		{"no estimate", Migration{Model: "minimax/MiniMax-M2", Rebuild: FromCheckpoint}, false},
-		{"no model", Migration{Rebuild: FromCheckpoint, InputTokens: 4_000}, false},
-		{"unknown rebuild", Migration{Model: "minimax/MiniMax-M2", InputTokens: 4_000}, false},
-		{"finite tokens, but nobody set a budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: FromCheckpoint, InputTokens: 4_000}, false},
+		{"checkpoint within budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FromCheckpoint, InputTokens: 4_000}}, true},
+		{"explicit full replay within budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FullTranscript, InputTokens: 90_000}, AuthorizedBy: "agent"}, true},
+		{"over budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FullTranscript, InputTokens: 120_000}, AuthorizedBy: "agent"}, false},
+		{"at the budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FromCheckpoint, InputTokens: 100_000}}, true},
+		{"no estimate", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FromCheckpoint}}, false},
+		{"no model", Migration{Rebuild: Rebuild{Kind: FromCheckpoint, InputTokens: 4_000}}, false},
+		{"unknown rebuild", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{InputTokens: 4_000}}, false},
+		{"finite tokens, but nobody set a budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FromCheckpoint, InputTokens: 4_000}}, false},
 	}
 	for _, tc := range tests {
 		b := budget

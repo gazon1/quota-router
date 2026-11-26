@@ -47,44 +47,58 @@ next model resume *after* an executed tool instead of at it.
 
 The repository already enforces its trust boundaries in code rather than in
 comments: `quota.Failed` replaces an undeclared reason with a safe code instead of
-storing a raw provider error. The checkpoint does the same.
+storing a raw provider error, and `config` rejects a URL with embedded
+credentials. The checkpoint follows the same rule, over **every** field, not only
+the tool results.
 
 | Entry | Enforced by |
 |---|---|
-| a completed result | `CompletedResult` truncates past `maxResultRunes` (4096 runes, marker included) — a file dump is not a result |
+| a completed result | `CompletedResult` truncates past `maxFieldRunes` (4096 runes, marker included) and marks the cut — a file dump is not a result, and the next model knows to re-read the source |
 | a failed result | `FailedResult` stores one of `TOOL_ERROR`, `DENIED`, `TIMEOUT`, `OUTCOME_UNKNOWN`; an undeclared value becomes `TOOL_ERROR` |
 | a planned call | `PlannedResult`, which carries no result |
-| the whole checkpoint | `Validate()` before it leaves for another model — it refuses an undeclared status or failure, raw error text in a failed result, a result on a call that never started, an over-long result and a nameless call |
+| every string | `Validate()` refuses one over 4096 runes (a file, not a summary) or one carrying a credential shape — an `Authorization:` header, a bearer token, `api_key=`/`token=`/`password=`, or `user:password@host` in a URL |
+| every tool entry | `Validate()` refuses an undeclared status or failure, raw error text in a failed result, a result on a call that never started, and a nameless call |
 
 `TOOL_ERROR` replaces the raw error on purpose: a provider error can carry a
 credential in a URL or a header, and the next model would print it. The text stays
 in the caller's own logs. `Validate` is the last gate — a checkpoint that skipped
 the builders is refused rather than sent.
 
+What `Validate` cannot do is read prose. It catches the shapes this installation
+itself hands around, not arbitrary text: a caller that pastes a raw provider body
+into `Goal` has bypassed the contract, and the fix there is to summarize, not to
+forward. The narrowness is deliberate — "the bearer of this report" must not be
+mistaken for a token, so a bare `bearer` counts only when a token-shaped word
+follows it.
+
 `OUTCOME_UNKNOWN` counts as executed: a call whose reply never arrived may have
 run, and a retry could repeat its side effect.
 
 ## Rebuild and budget
 
-`Migration` names the model, the rebuild and its estimated input tokens.
+`Migration` names the model and the rebuild. `Rebuild` pairs its kind with its
+**own** input-token estimate, so an estimate measured for a checkpoint rebuild has
+nowhere to be attached to a full replay — the mismatch is unrepresentable rather
+than merely discouraged.
 
-| Rebuild | Use |
+| Rebuild kind | Use |
 |---|---|
 | `CHECKPOINT` | default: the compact checkpoint plus only the relevant recent/extracted history and tool results — never the whole transcript |
-| `FULL_TRANSCRIPT` | an explicit policy or agent decision, never automatic or a fallback on a failed migration |
+| `FULL_TRANSCRIPT` | a deliberate replay. It requires `AuthorizedBy`, naming the policy or agent that decided on it, and is never a fallback on a failed migration |
 
 `Migration.Allowed(budget)` fails closed. It refuses an unknown rebuild, an
-unestimated cost (`InputTokens <= 0`), a model-less migration, and an unset
-budget (`MaxInputTokens <= 0`) — a budget nobody configured must not authorize a
-rebuild. Over the budget, no migration happens.
+unestimated cost (`Rebuild.InputTokens <= 0`), a model-less migration, an unset
+budget (`MaxInputTokens <= 0`) and a `FULL_TRANSCRIPT` with no `AuthorizedBy` — a
+budget nobody configured must not authorize a rebuild, and neither must a bare
+struct literal authorize a full replay. Over the budget, no migration happens.
 
 ## What the contract does not do
 
-It holds no provider client, no tokenizer and no store. `Migration.InputTokens`
-is the caller's estimate, so `Allowed` can only compare an estimate with a budget:
-it cannot tell whether the estimate describes the rebuild it is attached to, and
-it cannot see what the failed route was actually charged. A caller that reuses a
-checkpoint-sized estimate for a full replay passes the budget. Real token
-accounting — what was charged, and therefore what a rebuild really costs — is
+It holds no provider client, no tokenizer and no store. `Rebuild.InputTokens` is
+still the caller's number: `Allowed` compares it with a budget, but it cannot
+measure the context, and it cannot see what the failed route was actually charged.
+A caller who writes a checkpoint-sized estimate inside a `FULL_TRANSCRIPT` rebuild
+passes the budget. Real token accounting — what was charged, and therefore what a
+rebuild really costs — is
 [#23](https://github.com/gazon1/quota-router/issues/23); this package only makes
 the decision refusable when no cost is accountable at all.

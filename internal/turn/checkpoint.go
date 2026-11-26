@@ -1,15 +1,24 @@
 package turn
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+)
 
 // Checkpoint is the agent-owned state a turn boundary carries into the next
 // turn. It is what makes a model switch not a replay: tool results that already
 // ran travel here, so the next model reads them instead of executing them again.
 //
-// The fields hold summaries the agent wrote, never a provider payload, a raw
-// error or a whole file. That boundary is enforced, not promised: tool results
-// come from CompletedResult and FailedResult, and Validate refuses an entry that
-// bypassed them. Call Validate before the checkpoint leaves for another model.
+// Every field holds a summary the agent wrote, never a provider payload, a raw
+// error or a whole file. Validate enforces what a type can enforce — bounded
+// size, closed vocabularies, and the credential shapes this repository already
+// refuses (config refuses a URL with embedded credentials, quota refuses a raw
+// provider error) — and refuses the rest. It cannot prove prose is secret-free:
+// a caller that pastes raw tool output into Goal has bypassed the contract, and
+// the fix is to summarize, not to forward. Call Validate before the checkpoint
+// leaves for another model.
 type Checkpoint struct {
 	// Goal is the task as the agent understands it now, after any decisions.
 	Goal string
@@ -25,6 +34,11 @@ type Checkpoint struct {
 	// ToolResults carries executed tool calls so migration never replays them.
 	ToolResults []ToolResult
 }
+
+// maxFieldRunes bounds every string in a checkpoint. A value past this is a file
+// dump rather than a summary, and resending it to another model is the cost this
+// contract exists to avoid.
+const maxFieldRunes = 4096
 
 // ToolStatus is how a tool call ended. An attempt with any executed tool has
 // side effects the next model must not repeat.
@@ -77,11 +91,6 @@ func (f ToolFailure) known() bool {
 	return false
 }
 
-// maxResultRunes bounds what a completed call may carry into a checkpoint. A
-// result longer than this is a file dump rather than a summary, and resending it
-// to another model is the cost this contract exists to avoid.
-const maxResultRunes = 4096
-
 // ToolResult is one tool call and its outcome, kept so a migrated turn resumes
 // after it instead of at it.
 type ToolResult struct {
@@ -93,7 +102,9 @@ type ToolResult struct {
 }
 
 // CompletedResult builds the entry of a call that ran and returned. Over-long
-// output is truncated, because a whole file must not cross the boundary.
+// output is truncated and marked, because a whole file must not cross the
+// boundary; the marker tells the next model to re-read the source if it needs
+// the rest, instead of trusting a silently cut summary.
 func CompletedResult(call, result string) ToolResult {
 	return ToolResult{Call: call, Status: ToolCompleted, Result: truncate(result)}
 }
@@ -117,29 +128,54 @@ func PlannedResult(call string) ToolResult {
 // character is never cut in half, and the marker counts against the cap, so the
 // stored result never exceeds it.
 func truncate(s string) string {
-	if len(s) <= maxResultRunes {
+	if len(s) <= maxFieldRunes {
 		// Cheap path: a byte-length under the cap cannot exceed it in runes.
 		return s
 	}
 	runes := []rune(s)
-	if len(runes) <= maxResultRunes {
+	if len(runes) <= maxFieldRunes {
 		return s
 	}
 	const marker = "…[truncated]"
-	return string(runes[:maxResultRunes-len([]rune(marker))]) + marker
+	return string(runes[:maxFieldRunes-len([]rune(marker))]) + marker
 }
 
-// Validate reports the entries that break the boundary: an undeclared status, a
-// failed call whose result is raw text, a not-started call carrying a result, an
-// over-long result, or a call with no name. Each of those either leaks a
-// credential or pays to resend material the checkpoint exists to keep out.
+// Validate reports the fields that break the boundary. It is the gate before a
+// checkpoint leaves for another model: a field that is a file, or carries the
+// shape of a credential, is refused rather than sent.
 func (c Checkpoint) Validate() error {
 	var errs []error
+
+	check := func(field, s string) {
+		if n := len([]rune(s)); n > maxFieldRunes {
+			errs = append(errs, fmt.Errorf("%s is %d runes, which is a file and not a summary", field, n))
+		}
+		if shape := credentialShape(s); shape != "" {
+			errs = append(errs, fmt.Errorf("%s carries %s, which must not cross the boundary", field, shape))
+		}
+	}
+
+	check("goal", c.Goal)
+	for i, s := range c.Completed {
+		check(fmt.Sprintf("completed[%d]", i), s)
+	}
+	for i, s := range c.Decisions {
+		check(fmt.Sprintf("decisions[%d]", i), s)
+	}
+	for i, s := range c.Pending {
+		check(fmt.Sprintf("pending[%d]", i), s)
+	}
+	for i, s := range c.References {
+		check(fmt.Sprintf("references[%d]", i), s)
+	}
+
 	for _, r := range c.ToolResults {
 		if r.Call == "" {
 			errs = append(errs, errors.New("tool result with an empty call name"))
 			continue
 		}
+		check("tool call "+r.Call, r.Call)
+		check("tool result of "+r.Call, r.Result)
 		switch {
 		case !r.Status.known():
 			errs = append(errs, errors.New("undeclared tool status for "+r.Call))
@@ -147,14 +183,47 @@ func (c Checkpoint) Validate() error {
 			errs = append(errs, errors.New("failed tool result must carry a declared failure, not raw output: "+r.Call))
 		case r.Status == ToolNotStarted && r.Result != "":
 			errs = append(errs, errors.New("a call that never started must not carry a result: "+r.Call))
-		case len([]rune(r.Result)) > maxResultRunes:
-			errs = append(errs, errors.New("tool result is a dump, not a summary: "+r.Call))
 		}
 	}
+
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// credentialShape names the credential form s carries, or "" when it carries
+// none. It is deliberately narrow — the header and query shapes a provider error
+// arrives in, plus the URL rule config.checkURL already applies. It is not a
+// secret scanner and does not claim to be one; it catches the shapes this
+// installation itself hands around, not arbitrary prose.
+func credentialShape(s string) string {
+	lower := strings.ToLower(s)
+	for _, p := range []struct{ name, needle string }{
+		{"an Authorization header", "authorization:"},
+		{"an api_key parameter", "api_key="},
+		{"a token parameter", "token="},
+		{"a password parameter", "password="},
+	} {
+		if strings.Contains(lower, p.needle) {
+			return p.name
+		}
+	}
+	// "bearer " alone also matches prose ("the bearer of this report"), so it
+	// counts only when a token-looking word follows it.
+	if i := strings.Index(lower, "bearer "); i >= 0 {
+		rest := strings.TrimSpace(lower[i+len("bearer "):])
+		if w, _, _ := strings.Cut(rest, " "); len(w) >= 8 {
+			return "a bearer token"
+		}
+	}
+	if strings.Contains(s, "://") {
+		// The same rule as config.checkURL: user:password@host is a credential.
+		if u, err := url.Parse(s); err == nil && u.User != nil {
+			return "credentials embedded in a URL"
+		}
+	}
+	return ""
 }
 
 // Executed counts tool calls that already ran, completed or failed. Any of them
@@ -169,19 +238,28 @@ func (c Checkpoint) Executed() int {
 	return executed
 }
 
-// Rebuild is how the next model's context is constructed.
-type Rebuild string
+// RebuildKind is how the next model's context is constructed.
+type RebuildKind string
 
 const (
 	// FromCheckpoint sends the compact checkpoint plus only the recent and
-	// extracted history and tool results the turn needs. This is the default and
-	// the only rebuild a migration uses on its own.
-	FromCheckpoint Rebuild = "CHECKPOINT"
+	// extracted history and tool results the turn needs. This is the default.
+	FromCheckpoint RebuildKind = "CHECKPOINT"
 	// FullTranscript resends the whole transcript. It is never a fallback and
-	// never automatic: it is an explicit decision with its own estimated cost,
-	// because the next model processes every token again with no KV cache reuse.
-	FullTranscript Rebuild = "FULL_TRANSCRIPT"
+	// never automatic: the next model processes every token again with no KV
+	// cache reuse, so it costs a whole input pass.
+	FullTranscript RebuildKind = "FULL_TRANSCRIPT"
 )
+
+// Rebuild pairs a kind with its own input-token estimate. The two travel as one
+// value on purpose: an estimate measured for a checkpoint rebuild has nowhere to
+// be attached to a full replay, so that mismatch cannot be expressed.
+type Rebuild struct {
+	Kind RebuildKind
+	// InputTokens estimates what this rebuild costs the next model. Zero means
+	// nobody estimated it.
+	InputTokens int64
+}
 
 // Budget bounds what a migration may cost in input tokens. Zero is not
 // "unlimited": a budget nobody set must not authorize a rebuild.
@@ -192,24 +270,35 @@ type Budget struct {
 // Migration is the route decision for the next turn, taken at a boundary.
 type Migration struct {
 	// Model is the model id the next turn starts on.
-	Model string
-	// Rebuild is how the next model's context is built.
+	Model   string
 	Rebuild Rebuild
-	// InputTokens estimates the input tokens the rebuilt context will cost.
-	// Zero means nobody estimated it.
-	InputTokens int64
+	// AuthorizedBy names the policy or agent that decided on a full-context
+	// replay. The issue requires that decision to be explicit, so Allowed
+	// refuses a full replay without it; a checkpoint rebuild needs none.
+	AuthorizedBy string
 }
 
 // Allowed reports whether this migration may proceed within b. It fails closed:
-// an unknown rebuild, an unestimated cost, an unset budget or a model-less
-// migration is refused, because each of those means paying for input the
-// installation cannot account for.
+// an unknown rebuild, an unestimated cost, an unset budget, a model-less
+// migration and an unauthorized full replay are all refused, because each of
+// those means paying for input the installation cannot account for.
+//
+// The estimate is the caller's number. Allowed can compare it with the budget,
+// but it cannot tell whether the number measures the rebuild it sits in, nor
+// what the failed route was actually charged. Real accounting is #23.
 func (m Migration) Allowed(b Budget) bool {
-	if m.Model == "" || m.InputTokens <= 0 || b.MaxInputTokens <= 0 {
+	if m.Model == "" || m.Rebuild.InputTokens <= 0 || b.MaxInputTokens <= 0 {
 		return false
 	}
-	if m.Rebuild != FromCheckpoint && m.Rebuild != FullTranscript {
+	switch m.Rebuild.Kind {
+	case FromCheckpoint:
+		// The compact rebuild is the default and needs no separate decision.
+	case FullTranscript:
+		if m.AuthorizedBy == "" {
+			return false
+		}
+	default:
 		return false
 	}
-	return m.InputTokens <= b.MaxInputTokens
+	return m.Rebuild.InputTokens <= b.MaxInputTokens
 }
