@@ -13,6 +13,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -89,7 +90,7 @@ type QuotaSnapshot struct {
 	Confidence Confidence
 	ObservedAt time.Time
 	// Error is a short, safe description of a failed fetch. Never a raw
-	// provider response: those can carry credentials.
+	// provider response: those can carry credentials. Validate enforces that.
 	Error   string
 	Windows []QuotaWindow
 }
@@ -151,6 +152,9 @@ func (s QuotaSnapshot) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("state %q must be AVAILABLE, LOW_QUOTA, EXHAUSTED or UNKNOWN", s.State))
 	}
+	if err := checkSafeError(s.Error); err != nil {
+		errs = append(errs, err)
+	}
 	for i, w := range s.Windows {
 		if w.Window == "" {
 			errs = append(errs, fmt.Errorf("window %d has no name", i))
@@ -160,6 +164,33 @@ func (s QuotaSnapshot) Validate() error {
 }
 
 func (c Confidence) valid() bool { return c == Reported || c == Estimated }
+
+// maxError bounds a stored error description. A provider message long enough to
+// carry a full response body is a raw response, not a description.
+const maxError = 512
+
+// secretMarkers are shapes that identify a credential rather than a failure.
+// Not exhaustive by design: the rule is "describe the failure", and this stops
+// the obvious mistakes from reaching a database that gets backed up.
+var secretMarkers = []string{"authorization:", "bearer ", "api_key", "apikey", "x-api-key", "password", "sk-"}
+
+// checkSafeError rejects an error string that is not a short, credential-free
+// description. It is a trust boundary: whatever a provider adapter passes here
+// is persisted, printed in logs and copied into every backup.
+func checkSafeError(v string) error {
+	if v == "" {
+		return nil
+	}
+	if len(v) > maxError {
+		return fmt.Errorf("error must be a short description, got %d bytes (raw provider responses carry credentials)", len(v))
+	}
+	for _, m := range secretMarkers {
+		if strings.Contains(strings.ToLower(v), m) {
+			return fmt.Errorf("error looks like it contains a credential (%q); store a short reason instead", m)
+		}
+	}
+	return nil
+}
 
 // Validate checks the fields the usage schema constrains.
 func (u UsageRecord) Validate() error {
@@ -189,6 +220,9 @@ func (h HealthRecord) Validate() error {
 	case Healthy, Degraded, Unavailable, Unknown:
 	default:
 		errs = append(errs, fmt.Errorf("state %q must be HEALTHY, DEGRADED, UNAVAILABLE or UNKNOWN", h.State))
+	}
+	if err := checkSafeError(h.Error); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

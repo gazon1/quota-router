@@ -1007,6 +1007,44 @@ func TestDirectoryPathKeepsItsMode(t *testing.T) {
 	}
 }
 
+func TestStoredErrorsMustBeSafeDescriptions(t *testing.T) {
+	// Review finding: Error was an unrestricted string at a persistence
+	// boundary, so a provider adapter passing err.Error() would write an
+	// authorization header into a database that gets backed up.
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	unsafe := []string{
+		`http 401: Authorization: Bearer abc123`,
+		`request failed with header x-api-key: secret`,
+		`provider said: invalid api_key=sk-live-1234`,
+		strings.Repeat("x", maxError+1), // a raw body, not a description
+	}
+	for _, e := range unsafe {
+		snap := QuotaSnapshot{
+			Provider: "p", State: QuotaUnknown, UnknownReason: ptr(ReasonFetchFailed),
+			Source: "s", Confidence: Reported, ObservedAt: time.Now(), Error: e,
+		}
+		if err := s.SaveQuotaSnapshot(ctx, snap); err == nil {
+			t.Errorf("quota snapshot stored error %q", e[:40])
+		}
+		if err := s.SaveProviderHealth(ctx, HealthRecord{
+			Provider: "p", State: Unavailable, ObservedAt: time.Now(), Error: e,
+		}); err == nil {
+			t.Errorf("health stored error %q", e[:40])
+		}
+	}
+
+	// A short reason that names no credential is still accepted.
+	if err := s.SaveProviderHealth(ctx, HealthRecord{
+		Provider: "p", State: Degraded, ObservedAt: time.Now(), Error: "http 503 from quota endpoint",
+	}); err != nil {
+		t.Fatalf("safe description rejected: %v", err)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
 func TestDiskFullIsReportedAndLeavesNoRows(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)
@@ -1233,7 +1271,7 @@ func TestFailedWriteLeavesThePreviousStateReadable(t *testing.T) {
 		err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
 			Provider: "minimax", State: QuotaExhausted, Source: "s", Confidence: Reported,
 			ObservedAt: time.Now().Add(time.Duration(i+1) * time.Second),
-			Error:      strings.Repeat("x", 8192),
+			Error:      strings.Repeat("x", maxError-1), // a full, accepted description
 			Windows:    []QuotaWindow{{Window: "5h", Remaining: floatPtr(0)}},
 		})
 		switch {
