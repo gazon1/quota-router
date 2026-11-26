@@ -59,7 +59,18 @@ func Open(cfg Config, log *slog.Logger) (*Store, error) {
 	db.SetMaxIdleConns(MaxConns)
 	db.SetConnMaxIdleTime(time.Minute)
 
-	s := &Store{db: db, path: cfg.Path, log: log}
+	// Store the resolved path, not the configured one: two controllers naming the
+	// same database through different symlinks would otherwise derive different
+	// lock files and migrate it concurrently.
+	path, err := filepath.Abs(cfg.Path)
+	if err == nil {
+		if resolved, rerr := filepath.EvalSymlinks(path); rerr == nil {
+			path = resolved
+		}
+	} else {
+		path = cfg.Path
+	}
+	s := &Store{db: db, path: path, log: log}
 	// sql.Open is lazy: this first ping is what fails on an unreadable, missing
 	// directory or corrupt file, before any request is served.
 	if err := db.Ping(); err != nil {

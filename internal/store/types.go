@@ -172,7 +172,10 @@ const maxError = 512
 // secretMarkers are shapes that identify a credential rather than a failure.
 // Not exhaustive by design: the rule is "describe the failure", and this stops
 // the obvious mistakes from reaching a database that gets backed up.
-var secretMarkers = []string{"authorization:", "bearer ", "api_key", "apikey", "x-api-key", "password", "sk-"}
+var secretMarkers = []string{
+	"authorization:", "bearer ", "api_key", "apikey", "x-api-key", "sk-",
+	"password", "access_token", "access-token", "client_secret", "client-secret",
+}
 
 // checkSafeError rejects an error string that is not a short, credential-free
 // description. It is a trust boundary: whatever a provider adapter passes here
