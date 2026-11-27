@@ -17,7 +17,7 @@ library `net/http` and `http.ServeMux` — no web framework.
 | POST | `/v1/routing/select` | bearer | Route decision: versioned request → decision with explanation. |
 | GET | `/v1/routing/decisions` | bearer | Recent decision audit records. |
 | POST | `/v1/usage` | bearer | Record one request attempt (tokens, provenance, outcome). |
-| POST | `/v1/sessions/{id}/release` | bearer | End one session's route use; safely repeatable. |
+| POST | `/v1/sessions/{id}/release` | bearer | End one session's route use (deletes its route pin); safely repeatable. |
 
 `/v1/route` and `/v1/routing/select` are the same handler: the contract names
 the decision boundary `/v1/route`, the repository documents it as
@@ -122,9 +122,20 @@ content returns `409 conflict`.
 
 ### `POST /v1/sessions/{id}/release`
 
-Auth required. Ends one session's route use. Repeating the release is safe and
-returns the same success; it stores a release marker and does not touch quota or
-health state.
+Auth required. Ends one session's route use by deleting its persisted route pin.
+Returns `{"status":"released"}` and, when a pin was actually there,
+`released_alias` naming the route that was let go.
+
+Repeating the release is safe and still returns `200`; the second response simply
+omits `released_alias`, because there is nothing left to release. It never touches
+quota or health state. `503 unavailable` when the store cannot read or delete;
+`400 validation_failed` for an empty session id and `400 invalid_request` for one
+over 256 bytes.
+
+Session affinity is applied by `POST /v1/route`: the first decision pins the
+session, and later decisions keep that route while it is still viable, so a
+released session is the only way to get an unconditional re-selection. See
+[docs/session-affinity.md](./session-affinity.md).
 
 ## Out of scope
 

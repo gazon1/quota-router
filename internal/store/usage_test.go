@@ -323,6 +323,7 @@ func TestUsageMigrationDownKeepsFirstAttempts(t *testing.T) {
 		"0003_usage_attempts.sql",
 		"0004_routing_decisions.sql",
 		"0005_provider_cooldown.sql",
+		"0006_session_affinity.sql",
 	} {
 		apply(t, dir, f, readMigration(t, f))
 	}

@@ -435,6 +435,23 @@ type Retention struct {
 func (s *Store) Prune(ctx context.Context, r Retention, now time.Time) (deleted map[string]int64, err error) {
 	deleted = map[string]int64{}
 	err = s.tx(ctx, func(tx *sql.Tx) error {
+		// Expired affinity is not history kept by a retention bound: its own TTL
+		// is what says it stopped meaning anything, so it goes regardless of the
+		// configured ages. Readers already refuse it; this only stops the table
+		// from growing with sessions nobody released. Reported only when rows
+		// actually went, so a zero-retention run still reports nothing deleted.
+		res, err := tx.ExecContext(ctx, `DELETE FROM session_affinity WHERE expires_at <= ?`, ts(now))
+		if err != nil {
+			return classify(err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return classify(err)
+		}
+		if n > 0 {
+			deleted["session_affinity"] = n
+		}
+
 		for _, p := range []struct {
 			table string
 			age   time.Duration
@@ -565,4 +582,63 @@ func (s *Store) LatestRoutingDecisions(ctx context.Context, limit int) ([]Routin
 		out = append(out, r)
 	}
 	return out, classify(rows.Err())
+}
+
+// SaveSessionAffinity pins a session to a route. The latest write wins, except
+// for created_at: a re-pin moves the alias and its expiry but not when the
+// session was first pinned. Re-pinning the same alias with a fresh expiry is how
+// an active session keeps its route alive.
+func (s *Store) SaveSessionAffinity(ctx context.Context, a SessionAffinity) error {
+	if err := a.Validate(); err != nil {
+		return fmt.Errorf("session affinity: %w", err)
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO session_affinity (session_id, alias, created_at, updated_at, expires_at) VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT (session_id) DO UPDATE SET
+			   alias = excluded.alias,
+			   updated_at = excluded.updated_at,
+			   expires_at = excluded.expires_at`,
+			a.SessionID, a.Alias, ts(a.CreatedAt), ts(a.UpdatedAt), ts(a.ExpiresAt))
+		return classify(err)
+	})
+}
+
+// SessionAffinity reads one session's pin; ok is false when none is stored. An
+// expired pin is returned as found: the caller owns the clock it evaluates the
+// pin against, and this preserves ok=false for "never pinned" only.
+func (s *Store) SessionAffinity(ctx context.Context, sessionID string) (SessionAffinity, bool, error) {
+	var (
+		a                     SessionAffinity
+		created, updated, exp string
+	)
+	err := s.db.QueryRowContext(ctx,
+		`SELECT session_id, alias, created_at, updated_at, expires_at FROM session_affinity WHERE session_id = ?`, sessionID).
+		Scan(&a.SessionID, &a.Alias, &created, &updated, &exp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SessionAffinity{}, false, nil
+	}
+	if err != nil {
+		return SessionAffinity{}, false, classify(err)
+	}
+	for _, f := range []struct {
+		dst *time.Time
+		src string
+	}{{&a.CreatedAt, created}, {&a.UpdatedAt, updated}, {&a.ExpiresAt, exp}} {
+		t, err := parseTS(f.src)
+		if err != nil {
+			return SessionAffinity{}, false, err
+		}
+		*f.dst = t
+	}
+	return a, true, nil
+}
+
+// DeleteSessionAffinity removes a session's pin. A session that was never pinned
+// is not an error: releasing twice is the documented, repeatable behaviour.
+func (s *Store) DeleteSessionAffinity(ctx context.Context, sessionID string) error {
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM session_affinity WHERE session_id = ?`, sessionID)
+		return classify(err)
+	})
 }

@@ -53,6 +53,7 @@ The schema is versioned SQL migrations under
 | `provider_health` | reachability state, independent of quota |
 | `poll_state` | per-provider `last_attempt_at` and `last_success_at`, kept separately so a failure never erases when quota was last known good |
 | `controller_state` | key/value controller state, upserted |
+| `session_affinity` | one row per session: the route it is pinned to and its `created_at` / `updated_at` / `expires_at`. Rows past `expires_at` are deleted by every retention run regardless of the configured ages, because the TTL is what says they stopped being routing state ([docs/session-affinity.md](./session-affinity.md)) |
 
 `UNKNOWN` states are constrained by the schema: `unknown_reason` is required
 exactly when `state = 'UNKNOWN'` and must be one of the documented reasons, so a
@@ -182,6 +183,12 @@ polls that fill the tables. Cleanup never removes what routing reads: the newest
 snapshot per provider and the newest health row per provider always survive, even
 when they are older than the bound. Usage has no such rule because routing does
 not read it. Each run is one transaction.
+
+`session_affinity` is not governed by a configured age at all: a pin whose
+`expires_at` has passed is deleted by every run, including one where every
+retention setting is `0`. The pin's own TTL is what says it stopped meaning
+anything, and routing already refuses it; cleanup only stops the table from
+growing with sessions nobody released.
 
 A failed run does not stop the controller: the schema is current and the database
 readable, so it keeps routing, logs a warning, and retries at the next tick.

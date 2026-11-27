@@ -24,7 +24,7 @@ The server listens on `:8080` by default and exposes:
 | `POST /v1/routing/select` | `QUOTA_ROUTER_AUTH__TOKEN` | Route decision: versioned request → decision with explanation. See [docs/routing-request.md](./docs/routing-request.md) |
 | `GET /v1/routing/decisions` | `QUOTA_ROUTER_AUTH__TOKEN` | Recent decision audit records. See [docs/routing-request.md](./docs/routing-request.md) |
 | `POST /v1/usage` | `QUOTA_ROUTER_AUTH__TOKEN` | Record one request attempt (tokens, provenance, outcome). See [docs/request-usage.md](./docs/request-usage.md) |
-| `POST /v1/sessions/{id}/release` | `QUOTA_ROUTER_AUTH__TOKEN` | End one session's route use; safely repeatable. |
+| `POST /v1/sessions/{id}/release` | `QUOTA_ROUTER_AUTH__TOKEN` | End one session's route use: deletes its route pin; safely repeatable. See [docs/session-affinity.md](./docs/session-affinity.md) |
 
 The full controller API contract — endpoints, error envelope, status-code
 mapping — lives in [docs/api.md](./docs/api.md).
@@ -111,10 +111,19 @@ order (issue #53). Lower positive integer means higher preference; model priorit
 is scoped to its provider. When configured, every enabled catalogue alias must be
 listed. Hard constraints, request-level overrides, and decision explanations are
 owned by #16/#17/#29; this config supplies the static default order. Session
-affinity and performance tie-breaks are implemented in the selector, but the HTTP
-`/v1/routing/select` integration currently loads quota/health only and does not yet
-persist/load affinity or performance observations. See
+affinity is applied before this order and is persisted per session
+([docs/session-affinity.md](./docs/session-affinity.md)); performance tie-breaks
+are implemented in the selector but no observation store feeds them yet. See
 [docs/routing-priorities.md](./docs/routing-priorities.md).
+
+## Session affinity
+
+A session's route is persisted, so the model it settled on is kept while it is
+viable — across sessions, restarts and transient exclusions such as a stale quota
+observation or a provider cooldown. A durable exclusion (exhausted quota,
+unavailable provider, disabled alias) or expiry moves it, and so does an explicit
+act: `POST /v1/sessions/{id}/release` or a manual override in the request. See
+[docs/session-affinity.md](./docs/session-affinity.md).
 
 ## Turn boundaries
 

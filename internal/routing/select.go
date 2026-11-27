@@ -57,12 +57,17 @@ type Decision struct {
 	ConfiguredPriority *ConfiguredPriority `json:"configured_priority,omitempty"`
 }
 
-// RejectedCandidate records why a candidate was eliminated.
+// RejectedCandidate records why a candidate was eliminated. Transient marks an
+// elimination that carries no information about the route itself — a measurement
+// that is missing, stale or temporarily excluded — so a pinned session keeps its
+// route through it instead of switching on an event that says nothing about the
+// route (see Affinity).
 type RejectedCandidate struct {
-	Alias    string `json:"alias"`
-	Provider string `json:"provider"`
-	Stage    string `json:"stage"`
-	Reason   string `json:"reason"`
+	Alias     string `json:"alias"`
+	Provider  string `json:"provider"`
+	Stage     string `json:"stage"`
+	Reason    string `json:"reason"`
+	Transient bool   `json:"transient,omitempty"`
 }
 
 // StageOutcome summarizes one decision stage.
@@ -89,10 +94,18 @@ type ConfiguredPriority struct {
 }
 
 // Affinity records the current viable route for a session. It is honored only
-// when the candidate still passes all hard constraints.
+// when the candidate still passes all hard constraints and the pin has not
+// expired.
+//
+// ExpiresAt is the pin's lifetime: at or past it the affinity is not read at all
+// and the decision is re-evaluated from the full candidate set, which is
+// deterministic because it no longer depends on the pin. A zero ExpiresAt is an
+// unbounded pin, which the selector refuses for the same reason a stored one
+// cannot be unbounded: a route nobody renewed must stop pinning a session.
 type Affinity struct {
 	SessionID string
 	Alias     string
+	ExpiresAt time.Time
 }
 
 // PerformanceRecord is a measured performance observation for a candidate.
@@ -147,6 +160,12 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	d.addEliminations(&candidates, elim)
 	d.recordStage("capabilities", candidates, elim, "")
 
+	// The pin is resolved here, after the durable stages and before the
+	// transient ones. A route excluded only by a missing, stale or temporarily
+	// cooled observation is still the session's route, and this is the point
+	// where that distinction is still recoverable.
+	affinityCandidate, affinityApplies := selectAffinity(candidates, req, state)
+
 	candidates, elim = filterHealth(candidates, s.Config, state)
 	d.addEliminations(&candidates, elim)
 	d.recordStage("provider_health", candidates, elim, "")
@@ -182,21 +201,42 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 		d.recordStage("manual_override", candidates, nil, "override target ineligible; continuing with normal selection")
 	}
 
-	if selected, ok := selectAffinity(candidates, req, state); ok {
-		d.SelectedAlias = selected.Alias
-		d.SelectedProvider = selected.Provider
-		d.AffinityInfluenced = true
-		d.Reasons = append(d.Reasons, fmt.Sprintf("session affinity retained viable route %q", selected.Alias))
-		if cp, ok := s.configuredPriority(selected.Alias); ok {
-			d.ConfiguredPriority = &cp
+	if affinityApplies {
+		// The pin decides unless its route is gone for a durable reason: the
+		// exclusion then says something about the route, not about the
+		// observation, so the session has to move. A transient exclusion says
+		// only that this installation cannot currently see the route.
+		held, why := false, ""
+		if !containsAlias(candidates, affinityCandidate.Alias) {
+			held, why = heldThroughTransient(d.Rejected, affinityCandidate.Alias)
 		}
-		affinityRejected := affinityEliminations(candidates, selected.Alias)
-		d.recordStage("session_affinity", []candidate{selected}, affinityRejected, "affinity retained")
-		d.Rejected = append(d.Rejected, affinityRejected...)
-		d.DecisionID = decisionID(req, state, d, s.Config)
-		return d
+		if containsAlias(candidates, affinityCandidate.Alias) || held {
+			d.SelectedAlias = affinityCandidate.Alias
+			d.SelectedProvider = affinityCandidate.Provider
+			d.AffinityInfluenced = true
+			note := "affinity retained"
+			if held {
+				// Switching here would rebuild the next model's context over an
+				// event that carries no information about the route, which is
+				// exactly the mid-turn switch this contract forbids. The pin's
+				// expiry bounds how long that patience lasts; a durable exclusion
+				// ends it immediately.
+				note = "affinity held through transient exclusions"
+				d.Reasons = append(d.Reasons, fmt.Sprintf("session affinity retained route %q held through transient exclusions: %s", affinityCandidate.Alias, why))
+			} else {
+				d.Reasons = append(d.Reasons, fmt.Sprintf("session affinity retained viable route %q", affinityCandidate.Alias))
+			}
+			if cp, ok := s.configuredPriority(affinityCandidate.Alias); ok {
+				d.ConfiguredPriority = &cp
+			}
+			affinityRejected := affinityEliminations(candidates, affinityCandidate.Alias)
+			d.recordStage("session_affinity", []candidate{affinityCandidate}, affinityRejected, note)
+			d.Rejected = append(d.Rejected, affinityRejected...)
+			d.DecisionID = decisionID(req, state, d, s.Config)
+			return d
+		}
 	}
-	d.recordStage("session_affinity", candidates, nil, "no viable affinity match")
+	d.recordStage("session_affinity", candidates, nil, affinityStageNote(req, state, affinityApplies, affinityCandidate.Alias))
 
 	ranked, prefInfluenced, perfInfluenced, rankReasons := s.rankCandidates(candidates, req, state)
 	if len(ranked) == 0 {
@@ -371,16 +411,16 @@ func filterHealth(cs []candidate, cfg config.Config, state SelectState) ([]candi
 	for _, c := range cs {
 		h, ok := state.Health[c.Provider]
 		if !ok {
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health unknown"})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health unknown", Transient: true})
 			continue
 		}
 		if h.ObservedAt.IsZero() {
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health not observed"})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health not observed", Transient: true})
 			continue
 		}
 		age := state.Now.Sub(h.ObservedAt.UTC())
 		if age < 0 || age > state.HealthMaxAge {
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health stale"})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health stale", Transient: true})
 			continue
 		}
 		if h.Health == quota.Unavailable {
@@ -396,7 +436,7 @@ func filterHealth(cs []candidate, cfg config.Config, state SelectState) ([]candi
 			if r := h.Reason(); r != "" {
 				reason += ": " + string(r)
 			}
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: reason})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: reason, Transient: true})
 			continue
 		}
 		// Degraded is allowed by explicit policy: it is not unavailable. The
@@ -412,7 +452,7 @@ func filterQuota(cs []candidate, cfg config.Config, req RouteRequest, state Sele
 	for _, c := range cs {
 		snap, ok := state.Quota[c.Provider]
 		if !ok {
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: "quota unknown: not observed"})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: "quota unknown: not observed", Transient: true})
 			continue
 		}
 		st, reason := snap.StateAt(state.Now, quotaFreshness(state))
@@ -424,7 +464,7 @@ func filterQuota(cs []candidate, cfg config.Config, req RouteRequest, state Sele
 			if reason != "" {
 				r += ": " + string(reason)
 			}
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: r})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: r, Transient: true})
 		case quota.LowQuota, quota.Available:
 			if reserveApplies(req, cfg) && belowReserve(snap, cfg.Routing.ReserveFraction) {
 				elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: fmt.Sprintf("remaining quota reserved for %s workload (reserve %.0f%%)", req.TaskClass, cfg.Routing.ReserveFraction*100)})
@@ -478,7 +518,7 @@ func filterCooldown(cs []candidate, _ config.Config, state SelectState) ([]candi
 		}
 		if h.CooldownActive(state.Now) {
 			until := h.CooldownUntil.UTC().Format(time.RFC3339)
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "temporary_exclusions", Reason: "provider in cooldown until " + until})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "temporary_exclusions", Reason: "provider in cooldown until " + until, Transient: true})
 		}
 	}
 	return cs, elim
@@ -513,6 +553,13 @@ func overrideEliminations(cs []candidate, selected string) []RejectedCandidate {
 	return elim
 }
 
+// selectAffinity reports the candidate a session's pin names, if the pin applies
+// at all. It answers "is this the session's route", not "is it viable": the
+// caller decides that, because a route excluded for a transient reason is still
+// the session's route and switching away from it is the thing this issue forbids.
+//
+// A pin is refused when it names another session, has no alias, carries no
+// expiry (an unbounded pin outlives the route it names), or has expired.
 func selectAffinity(cs []candidate, req RouteRequest, state SelectState) (candidate, bool) {
 	if state.Affinity == nil {
 		return candidate{}, false
@@ -523,12 +570,57 @@ func selectAffinity(cs []candidate, req RouteRequest, state SelectState) (candid
 	if state.Affinity.Alias == "" {
 		return candidate{}, false
 	}
+	if !state.Affinity.ExpiresAt.After(state.Now) {
+		return candidate{}, false
+	}
 	for _, c := range cs {
 		if c.Alias == state.Affinity.Alias {
 			return c, true
 		}
 	}
 	return candidate{}, false
+}
+
+// heldThroughTransient reports whether the route the session is pinned to was
+// eliminated only by transient stages. It reads the eliminations already
+// recorded, so a stage added later is treated as durable until it says
+// otherwise: switching on an unexplained exclusion would leave this decision
+// copying the same kind of mistake the transient flag exists to prevent.
+func heldThroughTransient(rejected []RejectedCandidate, alias string) (bool, string) {
+	var why []string
+	for _, r := range rejected {
+		if r.Alias != alias {
+			continue
+		}
+		if !r.Transient {
+			return false, ""
+		}
+		why = append(why, r.Reason)
+	}
+	if len(why) == 0 {
+		return false, ""
+	}
+	return true, strings.Join(why, "; ")
+}
+
+// affinityStageNote explains why the pin did not decide this decision, so the
+// audit record says "expired" instead of the ambiguous "no match". When the pin
+// still applied, the route's own elimination is already in Rejected.
+func affinityStageNote(req RouteRequest, state SelectState, applies bool, alias string) string {
+	switch {
+	case state.Affinity == nil:
+		return "no affinity stored for this session"
+	case state.Affinity.SessionID != req.SessionID:
+		return "stored affinity belongs to another session"
+	case state.Affinity.Alias == "":
+		return "stored affinity names no route"
+	case !state.Affinity.ExpiresAt.After(state.Now):
+		return fmt.Sprintf("affinity for %q expired at %s; re-evaluated from the full candidate set", state.Affinity.Alias, state.Affinity.ExpiresAt.UTC().Format(time.RFC3339))
+	case applies:
+		return fmt.Sprintf("affinity route %q eliminated by a durable exclusion; session must move", alias)
+	default:
+		return "no viable affinity match"
+	}
 }
 
 func affinityEliminations(cs []candidate, selected string) []RejectedCandidate {

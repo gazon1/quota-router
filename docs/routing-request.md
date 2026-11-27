@@ -86,11 +86,11 @@ routing state or decision audit persistence is unavailable, and `200` with the
 decision otherwise. Decision audit persistence is mandatory: a computed decision
 is not returned as success if it cannot be persisted.
 
-The HTTP integration currently loads quota and health state only. Session
-affinity and performance tie-breaks are implemented in the selector but not yet
-wired into this endpoint. Session release is honoured at the read boundary: a
-release marker recorded through `/v1/sessions/{id}/release` clears the session's
-retained affinity, so a released session is never pinned to its previous route.
+The HTTP integration loads quota, health and the session's route pin. Session
+affinity is persisted, so it survives a controller restart; see
+[docs/session-affinity.md](./session-affinity.md). Performance tie-breaks remain
+implemented in the selector with no observation store feeding them, so they never
+influence an HTTP decision yet.
 
 ## Boundaries
 

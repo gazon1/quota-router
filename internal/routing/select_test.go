@@ -293,7 +293,7 @@ func TestSelectAffinityOnlyAmongViable(t *testing.T) {
 		Now:         selNow,
 		Quota:       availableQuota(selNow, "commandcode", "minimax"),
 		Health:      healthyProviders(selNow, "commandcode", "minimax"),
-		Affinity:    &Affinity{SessionID: "session-1", Alias: "mm-general"},
+		Affinity:    &Affinity{SessionID: "session-1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)},
 		QuotaMaxAge: time.Hour,
 	}
 	d := sel.Select(req, state)
@@ -318,7 +318,7 @@ func TestSelectAffinityOnlyAmongViable(t *testing.T) {
 
 	// Affinity for different session ignored
 	state.Health = healthyProviders(selNow, "commandcode", "minimax")
-	state.Affinity = &Affinity{SessionID: "other", Alias: "mm-general"}
+	state.Affinity = &Affinity{SessionID: "other", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}
 	d = sel.Select(req, state)
 	if d.SelectedAlias == "mm-general" {
 		t.Fatal("affinity from other session applied")
@@ -559,7 +559,7 @@ func TestSelectAffinityRejectionsInDecisionRejected(t *testing.T) {
 	cfg := testConfig()
 	sel := Selector{Config: cfg}
 	req := baseRequest()
-	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: req.SessionID, Alias: "mm-general"}, QuotaMaxAge: time.Hour}
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: req.SessionID, Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
 	if !d.AffinityInfluenced {
 		t.Fatal("expected affinity influence")
@@ -657,7 +657,7 @@ func TestSelectAffinityDifferentSessionNoInfluence(t *testing.T) {
 	sel := Selector{Config: cfg}
 	req := baseRequest()
 	req.SessionID = "s2"
-	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "s1", Alias: "mm-general"}, QuotaMaxAge: time.Hour}
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
 	if d.AffinityInfluenced {
 		t.Fatal("affinity influenced for different session")
@@ -672,7 +672,7 @@ func TestSelectAffinityEmptySessionIDIgnored(t *testing.T) {
 	sel := Selector{Config: cfg}
 	req := baseRequest()
 	req.SessionID = "s1"
-	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "", Alias: "mm-general"}, QuotaMaxAge: time.Hour}
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
 	if d.AffinityInfluenced {
 		t.Fatal("empty affinity session id should not influence selection")
@@ -863,7 +863,7 @@ func TestSelectTableDrivenStages(t *testing.T) {
 
 	// Affinity
 	{
-		d := sel.Select(RouteRequest{Version: RouteRequestVersionV1, SessionID: "s1", Capabilities: &RequiredCapabilities{}}, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "s1", Alias: "mm-general"}, QuotaMaxAge: time.Hour})
+		d := sel.Select(RouteRequest{Version: RouteRequestVersionV1, SessionID: "s1", Capabilities: &RequiredCapabilities{}}, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour})
 		if !d.AffinityInfluenced || d.SelectedAlias != "mm-general" {
 			t.Fatalf("affinity: %+v", d)
 		}
@@ -899,4 +899,157 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		}
 	}
 
+}
+
+// A pin that has expired decides nothing: the decision is re-evaluated from the
+// full candidate set, and the explanation says so rather than "no match".
+func TestSelectExpiredAffinityReevaluates(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	req.SessionID = "s1"
+	state := SelectState{
+		Now:         selNow,
+		Quota:       availableQuota(selNow, "commandcode", "minimax"),
+		Health:      healthyProviders(selNow, "commandcode", "minimax"),
+		Affinity:    &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow},
+		QuotaMaxAge: time.Hour,
+	}
+	d := sel.Select(req, state)
+	if d.AffinityInfluenced {
+		t.Fatal("expired affinity influenced selection")
+	}
+	if d.SelectedAlias != "cc-coding" {
+		t.Fatalf("SelectedAlias = %q, want cc-coding from a fresh evaluation", d.SelectedAlias)
+	}
+	var note string
+	for _, s := range d.Stages {
+		if s.Stage == "session_affinity" {
+			note = s.Note
+		}
+	}
+	if !strings.Contains(note, "expired") {
+		t.Fatalf("affinity stage note = %q, want it to say the pin expired", note)
+	}
+
+	// The same inputs with an unexpired pin choose the other route, so expiry is
+	// what decided — not a different candidate set.
+	state.Affinity.ExpiresAt = selNow.Add(time.Minute)
+	if d := sel.Select(req, state); d.SelectedAlias != "mm-general" || !d.AffinityInfluenced {
+		t.Fatalf("live pin: SelectedAlias = %q influenced = %v", d.SelectedAlias, d.AffinityInfluenced)
+	}
+}
+
+// A pin without an expiry is not affinity: an unbounded pin would outlive the
+// route it names and silently override every later decision.
+func TestSelectUnboundedAffinityIgnored(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	state := SelectState{
+		Now:         selNow,
+		Quota:       availableQuota(selNow, "commandcode", "minimax"),
+		Health:      healthyProviders(selNow, "commandcode", "minimax"),
+		Affinity:    &Affinity{SessionID: req.SessionID, Alias: "mm-general"},
+		QuotaMaxAge: time.Hour,
+	}
+	d := sel.Select(req, state)
+	if d.AffinityInfluenced || d.SelectedAlias == "mm-general" {
+		t.Fatalf("pin without expiry decided the route: %+v", d)
+	}
+}
+
+// A transient exclusion — a stale, missing or temporarily cooled observation —
+// must not move a pinned session: it says nothing about the route. A durable one
+// must, because the route itself is gone.
+func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	req.SessionID = "s1"
+
+	cases := []struct {
+		name   string
+		quota  func() map[string]quota.Snapshot
+		health func() map[string]quota.ProviderState
+		// want is the selected alias: the pinned mm-general when the exclusion is
+		// transient, the next ranked route when it is durable.
+		want string
+	}{
+		{name: "healthy", want: "mm-general"},
+		{name: "stale health", want: "mm-general", health: func() map[string]quota.ProviderState {
+			h := healthyProviders(selNow, "commandcode")
+			h["minimax"] = quota.NewProviderState("minimax", quota.Healthy, quota.ReasonNone, selNow.Add(-2*time.Hour))
+			return h
+		}},
+		{name: "unobserved quota", want: "mm-general", quota: func() map[string]quota.Snapshot {
+			return availableQuota(selNow, "commandcode")
+		}},
+		{name: "unknown quota", want: "mm-general", quota: func() map[string]quota.Snapshot {
+			q := availableQuota(selNow, "commandcode")
+			q["minimax"] = quota.Failed("minimax", "test", selNow, quota.TransientFetchFailure)
+			return q
+		}},
+		{name: "cooldown", want: "mm-general", health: func() map[string]quota.ProviderState {
+			h := healthyProviders(selNow, "commandcode", "minimax")
+			hs := quota.NewProviderState("minimax", quota.Healthy, quota.ReasonNone, selNow)
+			hs.CooldownUntil = selNow.Add(5 * time.Minute)
+			h["minimax"] = hs
+			return h
+		}},
+		{name: "unavailable", want: "cc-coding", health: func() map[string]quota.ProviderState {
+			h := healthyProviders(selNow, "commandcode")
+			h["minimax"] = quota.NewProviderState("minimax", quota.Unavailable, quota.ReasonServerError, selNow)
+			return h
+		}},
+		{name: "exhausted", want: "cc-coding", quota: func() map[string]quota.Snapshot {
+			q := availableQuota(selNow, "commandcode")
+			limit, rem, used := 100.0, 0.0, 100.0
+			q["minimax"] = quota.Observed("minimax", "test", selNow, []quota.Window{{Name: "5h", Limit: &limit, Remaining: &rem, Used: &used, ResetsAt: selNow.Add(time.Hour)}}, 0.1)
+			return q
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, h := availableQuota(selNow, "commandcode", "minimax"), healthyProviders(selNow, "commandcode", "minimax")
+			if tc.quota != nil {
+				q = tc.quota()
+			}
+			if tc.health != nil {
+				h = tc.health()
+			}
+			state := SelectState{
+				Now:         selNow,
+				Quota:       q,
+				Health:      h,
+				Affinity:    &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)},
+				QuotaMaxAge: time.Hour,
+			}
+			d := sel.Select(req, state)
+			if d.SelectedAlias != tc.want {
+				t.Fatalf("SelectedAlias = %q, want %q", d.SelectedAlias, tc.want)
+			}
+			if held := tc.want == "mm-general"; d.AffinityInfluenced != held {
+				t.Fatalf("AffinityInfluenced = %v, want %v", d.AffinityInfluenced, held)
+			}
+		})
+	}
+
+	// A disabled alias is a durable exclusion too: the route is not routable.
+	off := false
+	cfg2 := testConfig()
+	m := cfg2.LiteLLM.ModelAliases["mm-general"]
+	m.Enabled = &off
+	cfg2.LiteLLM.ModelAliases["mm-general"] = m
+	d := (Selector{Config: cfg2}).Select(req, SelectState{
+		Now:         selNow,
+		Quota:       availableQuota(selNow, "commandcode", "minimax"),
+		Health:      healthyProviders(selNow, "commandcode", "minimax"),
+		Affinity:    &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)},
+		QuotaMaxAge: time.Hour,
+	})
+	if d.SelectedAlias != "cc-coding" || d.AffinityInfluenced {
+		t.Fatalf("pin survived a disabled alias: %+v", d)
+	}
 }
