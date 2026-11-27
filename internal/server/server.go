@@ -98,6 +98,10 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
+func (s *Server) writeJSONError(w http.ResponseWriter, status int, msg string) {
+	s.writeJSON(w, status, map[string]string{"error": msg})
+}
+
 type selectResponse struct {
 	Decision routing.Decision `json:"decision"`
 }
@@ -107,41 +111,41 @@ func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		s.writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
 
 	state, err := s.loadSelectState(r.Context())
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "load routing state", "error", err)
-		writeJSONError(w, http.StatusServiceUnavailable, "routing state unavailable")
+		s.writeJSONError(w, http.StatusServiceUnavailable, "routing state unavailable")
 		return
 	}
 
 	decision := s.selector.Select(req, state)
 
 	if err := s.persistDecision(r.Context(), decision); err != nil {
-		// Decision is already computed deterministically; persistence failure is
-		// surfaced but does not fabricate a different routing answer.
 		s.log.ErrorContext(r.Context(), "persist routing decision", "error", err, "decision_id", decision.DecisionID)
+		s.writeJSONError(w, http.StatusServiceUnavailable, "routing decision audit persistence failed")
+		return
 	}
 
 	status := http.StatusOK
 	if decision.SelectedAlias == "" {
 		status = http.StatusConflict
 	}
-	writeJSON(w, status, selectResponse{Decision: decision})
+	s.writeJSON(w, status, selectResponse{Decision: decision})
 }
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 	if s.decisions == nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "decision store unavailable")
+		s.writeJSONError(w, http.StatusServiceUnavailable, "decision store unavailable")
 		return
 	}
 	records, err := s.decisions.LatestRoutingDecisions(r.Context(), 50)
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "list routing decisions", "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "failed to read decisions")
+		s.writeJSONError(w, http.StatusInternalServerError, "failed to read decisions")
 		return
 	}
 	type item struct {
@@ -165,12 +169,16 @@ func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 			Decision:         json.RawMessage(r.Payload),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"decisions": out})
+	s.writeJSON(w, http.StatusOK, map[string]any{"decisions": out})
 }
 
 func (s *Server) loadSelectState(ctx context.Context) (routing.SelectState, error) {
 	now := time.Now().UTC()
 	freshness := staleAfter(s.cfg.Polling.Interval)
+	// HTTP integration currently loads quota and health observations only.
+	// Session affinity and performance ranking are supported by the selector,
+	// but their state providers/persistence are not wired into this endpoint yet;
+	// until then, HTTP selection does not apply affinity or performance tie-breaks.
 	state := routing.SelectState{
 		Now:          now,
 		Quota:        map[string]quota.Snapshot{},
@@ -296,14 +304,4 @@ func (s *Server) persistDecision(ctx context.Context, d routing.Decision) error 
 		CreatedAt:        time.Now().UTC(),
 	}
 	return s.decisions.SaveRoutingDecision(ctx, rec)
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
 }

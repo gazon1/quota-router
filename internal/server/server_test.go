@@ -210,6 +210,27 @@ func TestSelectEndpointInvalidVersion(t *testing.T) {
 	}
 }
 
+func TestSelectEndpointPersistenceFailure(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:   []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health:  []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		saveErr: context.DeadlineExceeded,
+	}
+	srv := New(nil, Options{Config: cfg})
+	srv.store = st
+	srv.decisions = st
+	srv.selector = routing.Selector{Config: cfg}
+
+	body := `{"version":1,"session_id":"s1","capabilities":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestDecisionsEndpoint(t *testing.T) {
 	cfg := testRoutingConfig()
 	st := &fakeStore{

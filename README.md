@@ -97,9 +97,12 @@ lives in #17; operator-configured priority lives in #53. See
 `routing.providers` configures static provider and per-provider model preference
 order (issue #53). Lower positive integer means higher preference; model priority
 is scoped to its provider. When configured, every enabled catalogue alias must be
-listed. Hard constraints, session affinity, request-level overrides, and decision
-explanations are owned by #16/#17/#29; this config only supplies the static
-default order. See [docs/routing-priorities.md](./docs/routing-priorities.md).
+listed. Hard constraints, request-level overrides, and decision explanations are
+owned by #16/#17/#29; this config supplies the static default order. Session
+affinity and performance tie-breaks are implemented in the selector, but the HTTP
+`/v1/routing/select` integration currently loads quota/health only and does not yet
+persist/load affinity or performance observations. See
+[docs/routing-priorities.md](./docs/routing-priorities.md).
 
 ## Turn boundaries
 
