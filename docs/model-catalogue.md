@@ -127,6 +127,7 @@ it does.
   classes are defined and validated in
   [docs/routing-request.md](./routing-request.md) (#16); selection policy
   decides whether a class has effect (#17).
-- **No priority here.** Static provider and per-provider model ordering is #53,
+- **Static priority is configured separately.** Provider and per-provider model
+  ordering lives in `routing.providers` (#53, [routing-priorities.md](./routing-priorities.md));
   selection is #17. This package only answers "which aliases may serve this
   request".

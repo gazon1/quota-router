@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 )
@@ -87,6 +88,7 @@ func (c Config) validate() error {
 
 	check(c.Routing.LowQuotaThreshold > 0 && c.Routing.LowQuotaThreshold <= 1,
 		"routing.low_quota_threshold must be in (0, 1], got %v", c.Routing.LowQuotaThreshold)
+	errs = append(errs, c.validateRouting()...)
 
 	check(c.SQLite.Path != "", "sqlite.path must not be empty")
 	// The DSN is built from this value, so a SQLite URI form here would be
@@ -121,6 +123,111 @@ func (c Config) validate() error {
 		return fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 	}
 	return nil
+}
+
+func (c Config) validateRouting() []error {
+	if len(c.Routing.Providers) == 0 {
+		return nil
+	}
+
+	var errs []error
+	byProvider := map[string][]string{}
+	for _, alias := range sortedAliases(c.LiteLLM.ModelAliases) {
+		m := c.LiteLLM.ModelAliases[alias]
+		if !m.IsEnabled() {
+			continue
+		}
+		p := m.Provider()
+		byProvider[p] = append(byProvider[p], alias)
+	}
+
+	seenPriority := map[int]string{}
+	for _, provider := range sortedProviderRouting(c.Routing.Providers) {
+		rp := c.Routing.Providers[provider]
+		where := "routing.providers." + provider
+		if provider == "" {
+			errs = append(errs, errors.New("routing.providers must not contain an empty provider name"))
+			continue
+		}
+		if rp.Priority <= 0 {
+			errs = append(errs, fmt.Errorf("%s.priority must be a positive integer (lower means higher preference), got %d", where, rp.Priority))
+		} else if prev, ok := seenPriority[rp.Priority]; ok {
+			errs = append(errs, fmt.Errorf("%s.priority duplicates %s.priority: %d", where, "routing.providers."+prev, rp.Priority))
+		} else {
+			seenPriority[rp.Priority] = provider
+		}
+
+		aliases, ok := byProvider[provider]
+		if !ok {
+			errs = append(errs, fmt.Errorf("%s references provider %q, which has no enabled catalogue aliases", where, provider))
+			continue
+		}
+		if len(rp.Models) == 0 {
+			errs = append(errs, fmt.Errorf("%s.models must list every enabled catalogue alias for provider %q", where, provider))
+			continue
+		}
+
+		seenModelPriority := map[int]string{}
+		for _, alias := range sortedModelPriorities(rp.Models) {
+			priority := rp.Models[alias]
+			mWhere := where + ".models." + alias
+			if alias == "" {
+				errs = append(errs, fmt.Errorf("%s.models must not contain an empty alias", where))
+				continue
+			}
+			m, exists := c.LiteLLM.ModelAliases[alias]
+			if !exists {
+				errs = append(errs, fmt.Errorf("%s references unknown catalogue alias %q", mWhere, alias))
+				continue
+			}
+			if !m.IsEnabled() {
+				errs = append(errs, fmt.Errorf("%s references disabled catalogue alias %q", mWhere, alias))
+				continue
+			}
+			if m.Provider() != provider {
+				errs = append(errs, fmt.Errorf("%s belongs to provider %q, not %q", mWhere, m.Provider(), provider))
+				continue
+			}
+			if priority <= 0 {
+				errs = append(errs, fmt.Errorf("%s must be a positive integer (lower means higher preference), got %d", mWhere, priority))
+			} else if prev, ok := seenModelPriority[priority]; ok {
+				errs = append(errs, fmt.Errorf("%s duplicates %s: %d", mWhere, where+".models."+prev, priority))
+			} else {
+				seenModelPriority[priority] = alias
+			}
+		}
+		for _, alias := range aliases {
+			if _, ok := rp.Models[alias]; !ok {
+				errs = append(errs, fmt.Errorf("%s.models is missing enabled catalogue alias %q", where, alias))
+			}
+		}
+	}
+
+	for provider, aliases := range byProvider {
+		if _, ok := c.Routing.Providers[provider]; ok {
+			continue
+		}
+		errs = append(errs, fmt.Errorf("routing.providers is missing provider %q for enabled catalogue aliases %s", provider, strings.Join(aliases, ", ")))
+	}
+	return errs
+}
+
+func sortedProviderRouting(m map[string]ProviderRouting) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedModelPriorities(m map[string]int) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // checkURL never echoes the value: a URL may carry user:password credentials.

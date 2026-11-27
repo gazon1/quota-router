@@ -87,6 +87,15 @@ instruction to switch models after every agent message. Selection/eligibility
 lives in #17; operator-configured priority lives in #53. See
 [docs/routing-request.md](./docs/routing-request.md).
 
+## Routing priorities
+
+`routing.providers` configures static provider and per-provider model preference
+order (issue #53). Lower positive integer means higher preference; model priority
+is scoped to its provider. When configured, every enabled catalogue alias must be
+listed. Hard constraints, session affinity, request-level overrides, and decision
+explanations are owned by #16/#17/#29; this config only supplies the static
+default order. See [docs/routing-priorities.md](./docs/routing-priorities.md).
+
 ## Turn boundaries
 
 [internal/turn](./internal/turn) is where one model's turn ends and another may
@@ -169,6 +178,8 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_POLLING__INTERVAL` | `30s` | Quota polling interval |
 | `QUOTA_ROUTER_POLLING__REQUEST_TIMEOUT` | `10s` | Per-poll request timeout |
 | `QUOTA_ROUTER_ROUTING__LOW_QUOTA_THRESHOLD` | `0.1` | Scarce-quota fraction, in `(0, 1]` |
+| `QUOTA_ROUTER_ROUTING__PROVIDERS__<PROVIDER>__PRIORITY` | unset | Static provider preference rank; lower positive integer means higher preference |
+| `QUOTA_ROUTER_ROUTING__PROVIDERS__<PROVIDER>__MODELS__<ALIAS>` | unset | Per-provider model alias preference rank; lower positive integer means higher preference, scoped to that provider. Hyphenated aliases can be written with literal hyphens in env var names; in shells that disallow hyphens, use underscores and the loader maps it to the hyphenated catalogue alias only when unambiguous. |
 | `QUOTA_ROUTER_SQLITE__PATH` | `quota-router.db` | SQLite file path |
 | `QUOTA_ROUTER_SQLITE__BUSY_TIMEOUT` | `5s` | SQLite busy timeout |
 | `QUOTA_ROUTER_SQLITE__RETENTION__QUOTA_SNAPSHOTS` | `720h` | Keep quota snapshots this long (`0` keeps all) |

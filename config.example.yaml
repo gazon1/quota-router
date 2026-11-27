@@ -77,6 +77,20 @@ polling:
 routing:
   # Remaining-quota fraction at or below which a provider counts as scarce.
   low_quota_threshold: 0.1
+  # Static preference order, applied after hard constraints and viable session
+  # affinity (#53/#17). Lower numeric priority means higher preference.
+  # Provider priority ranks providers; model priority ranks aliases within one
+  # provider and is never compared across providers. When this section is set,
+  # every enabled catalogue alias must be listed under its provider.
+  providers:
+    commandcode:
+      priority: 1
+      models:
+        free-coding: 1
+    minimax:
+      priority: 2
+      models:
+        fast: 1
 
 sqlite:
   path: quota-router.db

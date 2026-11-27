@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Polling != want.Polling {
 		t.Fatalf("Polling = %+v, want %+v", cfg.Polling, want.Polling)
 	}
-	if cfg.Routing != want.Routing {
+	if cfg.Routing.LowQuotaThreshold != want.Routing.LowQuotaThreshold || !reflect.DeepEqual(cfg.Routing.Providers, want.Routing.Providers) {
 		t.Fatalf("Routing = %+v, want %+v", cfg.Routing, want.Routing)
 	}
 	if cfg.SQLite != want.SQLite {

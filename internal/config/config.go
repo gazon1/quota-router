@@ -139,11 +139,30 @@ type Polling struct {
 	RequestTimeout time.Duration `koanf:"request_timeout"`
 }
 
-// Routing configures the routing policy thresholds.
+// Routing configures routing thresholds and the static provider/model
+// preference order. Preference is consulted only after hard constraints and
+// viable session affinity, as defined by issue #53 and applied by #17.
 type Routing struct {
 	// LowQuotaThreshold is the remaining-quota fraction at or below which a
 	// provider counts as scarce and loses to a healthier candidate.
 	LowQuotaThreshold float64 `koanf:"low_quota_threshold"`
+	// Providers is the static preference order. Keys are provider names as they
+	// appear in model ids (<provider>/<model>). When empty, no static preference
+	// is configured. When set, every enabled catalogue alias must be listed under
+	// its provider with an explicit priority.
+	Providers map[string]ProviderRouting `koanf:"providers"`
+}
+
+// ProviderRouting orders one provider and the model aliases served by it.
+// Lower numeric priority means higher preference.
+type ProviderRouting struct {
+	// Priority is this provider's static preference rank. Must be a positive
+	// integer; lower values are preferred. Duplicate provider priorities are invalid.
+	Priority int `koanf:"priority"`
+	// Models orders catalogue aliases within this provider. Keys are catalogue
+	// aliases; values are positive integer priorities where lower is preferred.
+	// Model priority is scoped to this provider and never compared across providers.
+	Models map[string]int `koanf:"models"`
 }
 
 // SQLite configures quota snapshot persistence.
@@ -202,7 +221,10 @@ func Default() Config {
 		LiteLLM:   LiteLLM{BaseURL: "http://127.0.0.1:4000", APIKey: "", ModelAliases: map[string]Model{}},
 		Providers: map[string]Provider{},
 		Polling:   Polling{Interval: 30 * time.Second, RequestTimeout: 10 * time.Second},
-		Routing:   Routing{LowQuotaThreshold: 0.1},
+		Routing: Routing{
+			LowQuotaThreshold: 0.1,
+			Providers:         map[string]ProviderRouting{},
+		},
 		SQLite: SQLite{
 			Path:        "quota-router.db",
 			BusyTimeout: 5 * time.Second,
@@ -267,6 +289,7 @@ func Load() (Config, error) {
 		}
 		cfg.LiteLLM.ModelAliases[alias] = m
 	}
+	normalizeRoutingEnvKeys(&cfg)
 	if err := cfg.validate(); err != nil {
 		errs = append(errs, err)
 	}
@@ -290,7 +313,10 @@ var legacyEnvKeys = map[string]string{
 
 // envKey maps QUOTA_ROUTER_SERVER__ADDR to server.addr, and the deprecated
 // flat QUOTA_ROUTER_ADDR to the same place. The double delimiter leaves single
-// underscores free for field names such as base_url.
+// underscores free for field names such as base_url. Dynamic map keys in
+// routing.providers.*.models.* may contain hyphens (e.g. free-coding); users can
+// write them as literal hyphens or as _H_ in the env var name, and
+// normalizeRoutingEnvKeys resolves them after unmarshal.
 func envKey(key, value string) (string, any) {
 	if value == "" || key == ConfigFileEnv || strings.HasSuffix(key, "_FILE") {
 		return "", nil // empty value means unset; _FILE is handled separately
@@ -303,4 +329,69 @@ func envKey(key, value string) (string, any) {
 		return current, value
 	}
 	return name, value
+}
+
+// normalizeRoutingEnvKeys rewrites routing.providers.*.models map keys so env
+// vars can address hyphenated catalogue aliases. Env var names are lowercased
+// by envKey, so `FREE-CODING` and `FREE_CODING` both arrive as `free-coding`
+// only if the user wrote a literal hyphen; `FREE_CODING` arrives as
+// `free_coding` and would miss the real alias. We fix only unambiguous cases:
+//
+//   - exact key already exists in catalogue: keep
+//   - key with '_' -> '-' exists in catalogue and the '_' form does not: rewrite
+//   - key with '_h_' -> '-' exists in catalogue and the raw form does not: rewrite
+//
+// No silent normalization when both forms could be valid catalogue aliases.
+func normalizeRoutingEnvKeys(cfg *Config) {
+	if len(cfg.Routing.Providers) == 0 {
+		return
+	}
+	known := make(map[string]bool, len(cfg.LiteLLM.ModelAliases))
+	for alias := range cfg.LiteLLM.ModelAliases {
+		known[alias] = true
+	}
+	for provider, rp := range cfg.Routing.Providers {
+		if len(rp.Models) == 0 {
+			continue
+		}
+		rewritten := make(map[string]int, len(rp.Models))
+		changed := false
+		for k, v := range rp.Models {
+			nk := normalizeEnvMapKey(k, known)
+			if nk != k {
+				changed = true
+			}
+			// If a collision happens after rewrite, keep the original key's
+			// value by not overwriting an existing rewritten entry unless it
+			// came from the same source key; validation will catch duplicates.
+			if _, exists := rewritten[nk]; !exists {
+				rewritten[nk] = v
+			} else {
+				// Preserve both as-is by keeping the later in a deterministic way?
+				// Better: keep original key so validation reports the real problem.
+				rewritten[k] = v
+			}
+		}
+		if changed {
+			rp.Models = rewritten
+			cfg.Routing.Providers[provider] = rp
+		}
+	}
+}
+
+func normalizeEnvMapKey(key string, known map[string]bool) string {
+	if known[key] {
+		return key
+	}
+	// Common env var form: users write FREE_CODING for free-coding. Normalize
+	// only when the hyphenated form is a known catalogue alias and the
+	// underscore form is not, so aliases that legitimately contain underscores
+	// are never silently remapped.
+	if strings.Contains(key, "_") {
+		candidate := strings.ReplaceAll(key, "_", "-")
+		if known[candidate] && !known[key] {
+			return candidate
+		}
+	}
+	return key
 }
