@@ -959,9 +959,11 @@ func TestSelectUnboundedAffinityIgnored(t *testing.T) {
 	}
 }
 
-// A transient exclusion — a stale, missing or temporarily cooled observation —
-// must not move a pinned session: it says nothing about the route. A durable one
-// must, because the route itself is gone.
+// A transient exclusion — a missing or stale observation — must not move a pinned
+// session: it says nothing about the route. A durable one must, because the route
+// itself is gone. A cooldown is durable in this sense: it is an explicit decision
+// that the provider should receive no traffic, so a new request must respect it
+// even when the session would rather stay.
 func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 	cfg := testConfig()
 	sel := Selector{Config: cfg}
@@ -990,7 +992,9 @@ func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 			q["minimax"] = quota.Failed("minimax", "test", selNow, quota.TransientFetchFailure)
 			return q
 		}},
-		{name: "cooldown", want: "mm-general", health: func() map[string]quota.ProviderState {
+		// A cooldown is an explicit "no traffic" statement, not missing
+		// information, so the pinned session moves off the cooled provider.
+		{name: "cooldown", want: "cc-coding", health: func() map[string]quota.ProviderState {
 			h := healthyProviders(selNow, "commandcode", "minimax")
 			hs := quota.NewProviderState("minimax", quota.Healthy, quota.ReasonNone, selNow)
 			hs.CooldownUntil = selNow.Add(5 * time.Minute)
@@ -1051,5 +1055,92 @@ func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 	})
 	if d.SelectedAlias != "cc-coding" || d.AffinityInfluenced {
 		t.Fatalf("pin survived a disabled alias: %+v", d)
+	}
+}
+
+// A cooldown must move a pinned session — the controller is choosing where to
+// send a new request, and "send it nowhere for five minutes" is what a cooldown
+// says. Once it expires, normal selection policy decides again, which means the
+// session does not automatically return to the old route: it is re-pinned to
+// whatever is selected then.
+func TestSelectCooldownMovesPinnedSessionAndExpiryAllowsReturn(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	req.SessionID = "s1"
+
+	cooled := healthyProviders(selNow, "commandcode", "minimax")
+	hs := quota.NewProviderState("minimax", quota.Healthy, quota.ReasonNone, selNow)
+	hs.CooldownUntil = selNow.Add(5 * time.Minute)
+	cooled["minimax"] = hs
+
+	state := SelectState{
+		Now:         selNow,
+		Quota:       availableQuota(selNow, "commandcode", "minimax"),
+		Health:      cooled,
+		Affinity:    &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)},
+		QuotaMaxAge: time.Hour,
+	}
+	d := sel.Select(req, state)
+	if d.SelectedAlias == "mm-general" || d.AffinityInfluenced {
+		t.Fatalf("pinned session held on a cooled provider: %+v", d)
+	}
+	if d.SelectedAlias != "cc-coding" {
+		t.Fatalf("SelectedAlias = %q, want cc-coding while minimax is cooled", d.SelectedAlias)
+	}
+	if r, ok := rejectedCandidate(d.Rejected, "mm-general"); !ok || r.Transient {
+		t.Fatalf("cooldown rejection = %+v transient=%v, want a durable rejection", r, r.Transient)
+	}
+	var note string
+	for _, s := range d.Stages {
+		if s.Stage == "session_affinity" {
+			note = s.Note
+		}
+	}
+	if !strings.Contains(note, "durable") {
+		t.Fatalf("affinity note = %q, want it to name the durable exclusion", note)
+	}
+
+	// After the cooldown expires, the session is pinned to whatever the policy
+	// now selects. Here that is cc-coding, because the pin it used to hold is
+	// gone from the stored route; selection is ordinary again.
+	state.Health = healthyProviders(selNow, "commandcode", "minimax")
+	state.Affinity = &Affinity{SessionID: "s1", Alias: "cc-coding", ExpiresAt: selNow.Add(time.Hour)}
+	d = sel.Select(req, state)
+	if d.SelectedAlias != "cc-coding" || !d.AffinityInfluenced {
+		t.Fatalf("after cooldown: SelectedAlias = %q influenced = %v", d.SelectedAlias, d.AffinityInfluenced)
+	}
+}
+
+// A pin excluded before the affinity stage is reached — a disabled alias or one
+// that no longer satisfies the request's capabilities — must be named in the
+// explanation, not reported as a vague "no viable affinity match".
+func TestSelectAffinityNoteNamesEarlyExclusion(t *testing.T) {
+	cfg := testConfig()
+	off := false
+	m := cfg.LiteLLM.ModelAliases["mm-general"]
+	m.Enabled = &off
+	cfg.LiteLLM.ModelAliases["mm-general"] = m
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	state := SelectState{
+		Now:         selNow,
+		Quota:       availableQuota(selNow, "commandcode", "minimax"),
+		Health:      healthyProviders(selNow, "commandcode", "minimax"),
+		Affinity:    &Affinity{SessionID: req.SessionID, Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)},
+		QuotaMaxAge: time.Hour,
+	}
+	d := sel.Select(req, state)
+	if d.AffinityInfluenced {
+		t.Fatal("disabled pin influenced selection")
+	}
+	var note string
+	for _, s := range d.Stages {
+		if s.Stage == "session_affinity" {
+			note = s.Note
+		}
+	}
+	if !strings.Contains(note, "configuration") || !strings.Contains(note, "disabled") {
+		t.Fatalf("affinity note = %q, want it to name the configuration exclusion", note)
 	}
 }

@@ -46,6 +46,10 @@ type Server struct {
 	store     StateStore
 	decisions DecisionStore
 	usage     UsageSink
+	// sessions serializes the read-decide-write of one session's route pin
+	// against a release of the same session. Per session, so unrelated sessions
+	// do not contend.
+	sessions sessionLocks
 	// token is the bearer token the API routes require. Empty disables them:
 	// the health route stays open, every other route refuses.
 	token string
@@ -247,29 +251,15 @@ func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := s.loadSelectState(r.Context(), req.SessionID)
+	// One session, one route decision at a time. The read of the pin, the decision
+	// and the write of the pin are one logical operation: a release that lands
+	// between them would be undone by the write, and two concurrent decisions for
+	// one session could each pin a different route. The lock is per session, so it
+	// costs nothing to unrelated traffic.
+	decision, err := s.routeSession(r.Context(), req)
 	if err != nil {
-		s.log.ErrorContext(r.Context(), "load routing state", "error", err, "session_id", req.SessionID)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "routing state unavailable", true)
-		return
-	}
-
-	decision := s.selector.Select(req, state)
-
-	if err := s.persistDecision(r.Context(), decision); err != nil {
-		s.log.ErrorContext(r.Context(), "persist routing decision", "error", err, "decision_id", decision.DecisionID)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "routing decision audit persistence failed", true)
-		return
-	}
-	// The pin is written after the decision is audited: a decision that cannot be
-	// stored is not returned as success, and a route that was never recorded must
-	// not persist as the session's. Every decision with a route writes the pin,
-	// including one that just kept it: the TTL is measured from the last use, so
-	// an active session does not lose its route while it is still being used, and
-	// an override replaces the pin instead of being refused by the old one.
-	if err := s.pinAffinity(r.Context(), req.SessionID, decision, state.Now); err != nil {
-		s.log.ErrorContext(r.Context(), "persist session affinity", "error", err, "session_id", req.SessionID, "decision_id", decision.DecisionID)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "session affinity could not be stored", true)
+		s.log.ErrorContext(r.Context(), "route session", "error", err, "session_id", req.SessionID)
+		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, err.Error(), true)
 		return
 	}
 
@@ -508,19 +498,19 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, errorCodeInvalidRequest, "session_id must be at most 256 bytes", false)
 		return
 	}
-	pin, pinned, err := s.store.SessionAffinity(r.Context(), id)
+	// The same lock selection takes: without it a decision that read the pin just
+	// before this delete could write it back and silently undo the release.
+	unlock := s.sessions.lock(id)
+	defer unlock()
+
+	pin, released, err := s.deleteAffinity(r.Context(), id)
 	if err != nil {
-		s.log.ErrorContext(r.Context(), "read session affinity", "error", err, "session_id", id)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "session release store unavailable", true)
-		return
-	}
-	if err := s.store.DeleteSessionAffinity(r.Context(), id); err != nil {
 		s.log.ErrorContext(r.Context(), "release session", "error", err, "session_id", id)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "session release could not be stored", true)
 		return
 	}
 	resp := map[string]string{"status": "released"}
-	if pinned {
+	if released {
 		// Naming the route that was released is what lets a caller tell which of
 		// its sessions actually moved; it is not a credential or a prompt.
 		resp["released_alias"] = pin.Alias
@@ -560,6 +550,48 @@ func isSessionReleasePath(path string) bool {
 func isMaxBytesError(err error) bool {
 	var maxErr *http.MaxBytesError
 	return errors.As(err, &maxErr)
+}
+
+// deleteAffinity removes a session's pin and reports the route that was there, so
+// a caller learns which session actually moved. An absent pin is not an error.
+func (s *Server) deleteAffinity(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error) {
+	pin, ok, err := s.store.SessionAffinity(ctx, sessionID)
+	if err != nil {
+		return store.SessionAffinity{}, false, err
+	}
+	if err := s.store.DeleteSessionAffinity(ctx, sessionID); err != nil {
+		return store.SessionAffinity{}, false, err
+	}
+	return pin, ok, nil
+}
+
+// routeSession performs the whole session-routing operation under the session's
+// lock: read state, decide, audit the decision, pin the route. It returns the
+// error the caller should report, so each failure keeps its own message.
+func (s *Server) routeSession(ctx context.Context, req routing.RouteRequest) (routing.Decision, error) {
+	unlock := s.sessions.lock(req.SessionID)
+	defer unlock()
+
+	state, err := s.loadSelectState(ctx, req.SessionID)
+	if err != nil {
+		return routing.Decision{}, errors.New("routing state unavailable")
+	}
+	decision := s.selector.Select(req, state)
+	if err := s.persistDecision(ctx, decision); err != nil {
+		return routing.Decision{}, errors.New("routing decision audit persistence failed")
+	}
+	// The pin is written after the decision is audited: a decision that cannot be
+	// stored is not returned as success, and a route that was never recorded must
+	// not persist as the session's. This is a deliberate two-write sequence, not
+	// one transaction: the audit log records what was decided, the pin records
+	// what will be used, and a failure here leaves a decision that was reported as
+	// failed. Every decision with a route writes the pin, including one that just
+	// kept it, so the TTL is measured from the last use and an active session does
+	// not lose its route while it is still being used.
+	if err := s.pinAffinity(ctx, req.SessionID, decision, state.Now); err != nil {
+		return routing.Decision{}, errors.New("session affinity could not be stored")
+	}
+	return decision, nil
 }
 
 // loadSelectState reads what selection needs for one session: quota and health

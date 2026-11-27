@@ -119,10 +119,12 @@ are implemented in the selector but no observation store feeds them yet. See
 ## Session affinity
 
 A session's route is persisted, so the model it settled on is kept while it is
-viable — across sessions, restarts and transient exclusions such as a stale quota
-observation or a provider cooldown. A durable exclusion (exhausted quota,
-unavailable provider, disabled alias) or expiry moves it, and so does an explicit
-act: `POST /v1/sessions/{id}/release` or a manual override in the request. See
+viable — across sessions, restarts and transient exclusions such as a stale or
+missing quota observation. A durable exclusion moves it: exhausted quota, an
+unavailable provider, a disabled alias, or a provider cooldown — a cooldown is an
+explicit "no traffic" decision, not missing information, so a new request respects
+it. Expiry moves it too, and so does an explicit act:
+`POST /v1/sessions/{id}/release` or a manual override in the request. See
 [docs/session-affinity.md](./docs/session-affinity.md).
 
 ## Turn boundaries

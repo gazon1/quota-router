@@ -58,10 +58,15 @@ type Decision struct {
 }
 
 // RejectedCandidate records why a candidate was eliminated. Transient marks an
-// elimination that carries no information about the route itself — a measurement
-// that is missing, stale or temporarily excluded — so a pinned session keeps its
-// route through it instead of switching on an event that says nothing about the
-// route (see Affinity).
+// elimination that carries no information about the route itself: an observation
+// that is missing or stale, so the route's availability is unknown. A pinned
+// session keeps its route through that instead of switching on an event that says
+// nothing about the route (see Affinity).
+//
+// A provider cooldown is deliberately not transient. It is an explicit
+// observation that the provider should receive no traffic, which is information
+// about the route — holding a session on it would send the conversation's
+// requests into the very rate limiting the cooldown exists to avoid.
 type RejectedCandidate struct {
 	Alias     string `json:"alias"`
 	Provider  string `json:"provider"`
@@ -236,7 +241,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 			return d
 		}
 	}
-	d.recordStage("session_affinity", candidates, nil, affinityStageNote(req, state, affinityApplies, affinityCandidate.Alias))
+	d.recordStage("session_affinity", candidates, nil, affinityStageNote(req, state, affinityApplies, d.Rejected))
 
 	ranked, prefInfluenced, perfInfluenced, rankReasons := s.rankCandidates(candidates, req, state)
 	if len(ranked) == 0 {
@@ -509,6 +514,12 @@ func belowReserve(snap quota.Snapshot, reserve float64) bool {
 	return false
 }
 
+// filterCooldown excludes a provider that routing policy has cooled down. The
+// rejection is durable for affinity's purposes even though the cooldown itself
+// expires: a cooldown is an explicit decision that this provider should receive
+// no traffic, not an absence of information about it. Holding a session on a
+// cooled provider would send a whole conversation's requests into the rate
+// limiting the cooldown exists to avoid.
 func filterCooldown(cs []candidate, _ config.Config, state SelectState) ([]candidate, []RejectedCandidate) {
 	var elim []RejectedCandidate
 	for _, c := range cs {
@@ -518,7 +529,7 @@ func filterCooldown(cs []candidate, _ config.Config, state SelectState) ([]candi
 		}
 		if h.CooldownActive(state.Now) {
 			until := h.CooldownUntil.UTC().Format(time.RFC3339)
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "temporary_exclusions", Reason: "provider in cooldown until " + until, Transient: true})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "temporary_exclusions", Reason: "provider in cooldown until " + until})
 		}
 	}
 	return cs, elim
@@ -604,9 +615,12 @@ func heldThroughTransient(rejected []RejectedCandidate, alias string) (bool, str
 }
 
 // affinityStageNote explains why the pin did not decide this decision, so the
-// audit record says "expired" instead of the ambiguous "no match". When the pin
-// still applied, the route's own elimination is already in Rejected.
-func affinityStageNote(req RouteRequest, state SelectState, applies bool, alias string) string {
+// audit record names the actual reason instead of an ambiguous "no match". A pin
+// excluded before it was even resolved — a disabled alias, a capability the
+// catalogue no longer claims — is named from its own rejection, because falling
+// back to "no viable affinity match" would hide the exclusion an operator needs
+// to see.
+func affinityStageNote(req RouteRequest, state SelectState, applies bool, rejected []RejectedCandidate) string {
 	switch {
 	case state.Affinity == nil:
 		return "no affinity stored for this session"
@@ -616,11 +630,25 @@ func affinityStageNote(req RouteRequest, state SelectState, applies bool, alias 
 		return "stored affinity names no route"
 	case !state.Affinity.ExpiresAt.After(state.Now):
 		return fmt.Sprintf("affinity for %q expired at %s; re-evaluated from the full candidate set", state.Affinity.Alias, state.Affinity.ExpiresAt.UTC().Format(time.RFC3339))
-	case applies:
-		return fmt.Sprintf("affinity route %q eliminated by a durable exclusion; session must move", alias)
-	default:
+	}
+	// A pin excluded before resolution never becomes an affinity candidate, so
+	// its elimination is the only place the reason exists.
+	if !applies {
+		if r, ok := rejectedCandidate(rejected, state.Affinity.Alias); ok {
+			return fmt.Sprintf("affinity route %q excluded at %s: %s; session must move", r.Alias, r.Stage, r.Reason)
+		}
 		return "no viable affinity match"
 	}
+	return fmt.Sprintf("affinity route %q eliminated by a durable exclusion; session must move", state.Affinity.Alias)
+}
+
+func rejectedCandidate(cs []RejectedCandidate, alias string) (RejectedCandidate, bool) {
+	for _, r := range cs {
+		if r.Alias == alias {
+			return r, true
+		}
+	}
+	return RejectedCandidate{}, false
 }
 
 func affinityEliminations(cs []candidate, selected string) []RejectedCandidate {
