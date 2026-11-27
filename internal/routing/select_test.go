@@ -511,6 +511,79 @@ func TestSelectDeterministicTieBreak(t *testing.T) {
 	}
 }
 
+func TestSelectModelPriorityNotComparedAcrossProviders(t *testing.T) {
+	cfg := testConfig()
+	cfg.LiteLLM.ModelAliases = map[string]config.Model{
+		"a1": {Model: "provider-a/model-1", Enabled: boolPtr(true), Capabilities: config.Capabilities{Streaming: config.CapabilitySupported}},
+		"b1": {Model: "provider-b/model-1", Enabled: boolPtr(true), Capabilities: config.Capabilities{Streaming: config.CapabilitySupported}},
+	}
+	cfg.Routing.Providers = map[string]config.ProviderRouting{
+		"provider-a": {Priority: 1, Models: map[string]int{"a1": 10}},
+		"provider-b": {Priority: 1, Models: map[string]int{"b1": 1}},
+	}
+	sel := Selector{Config: cfg}
+	req := RouteRequest{Version: 1, SessionID: "s1", Capabilities: &RequiredCapabilities{}}
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "provider-a", "provider-b"), Health: healthyProviders(selNow, "provider-a", "provider-b"), QuotaMaxAge: time.Hour}
+	d := sel.Select(req, state)
+	if d.SelectedProvider != "provider-a" {
+		t.Fatalf("SelectedProvider = %q, want provider-a (provider name tie-break, model ranks not cross-provider comparable)", d.SelectedProvider)
+	}
+	if d.SelectedAlias != "a1" {
+		t.Fatalf("SelectedAlias = %q, want a1", d.SelectedAlias)
+	}
+}
+
+func TestSelectProviderOnlyPriorityReported(t *testing.T) {
+	cfg := testConfig()
+	cfg.Routing.Providers = map[string]config.ProviderRouting{
+		"commandcode": {Priority: 1},
+		"minimax":     {Priority: 2},
+	}
+	sel := Selector{Config: cfg}
+	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
+	if !d.ConfiguredPreferenceInfluenced {
+		t.Fatal("provider-only configured priority should influence selection")
+	}
+	if d.ConfiguredPriority == nil {
+		t.Fatal("ConfiguredPriority should be reported for provider-only priority")
+	}
+	if d.ConfiguredPriority.Provider != "commandcode" || d.ConfiguredPriority.ProviderPriority != 1 {
+		t.Fatalf("ConfiguredPriority = %+v", d.ConfiguredPriority)
+	}
+	if d.ConfiguredPriority.ModelPriority != nil {
+		t.Fatalf("ModelPriority = %v, want nil for provider-only priority", *d.ConfiguredPriority.ModelPriority)
+	}
+}
+
+func TestSelectAffinityRejectionsInDecisionRejected(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: req.SessionID, Alias: "mm-general"}, QuotaMaxAge: time.Hour}
+	d := sel.Select(req, state)
+	if !d.AffinityInfluenced {
+		t.Fatal("expected affinity influence")
+	}
+	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "session_affinity" {
+		t.Fatalf("affinity elimination missing from Decision.Rejected: %+v", d.Rejected)
+	}
+}
+
+func TestSelectOverrideRejectionsInDecisionRejected(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	req.Override = &ManualOverride{ModelAlias: "mm-general"}
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
+	d := sel.Select(req, state)
+	if !d.OverrideApplied {
+		t.Fatal("override should apply")
+	}
+	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "manual_override" {
+		t.Fatalf("override elimination missing from Decision.Rejected: %+v", d.Rejected)
+	}
+}
+
 func TestSelectRequestPreferenceDoesNotOverrideConfiguredPriority(t *testing.T) {
 	cfg := testConfig()
 	sel := Selector{Config: cfg}

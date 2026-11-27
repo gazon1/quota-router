@@ -80,11 +80,12 @@ type StageElimination struct {
 }
 
 // ConfiguredPriority identifies the static priority that influenced selection.
+// ModelPriority is omitted when only provider-level priority influenced selection.
 type ConfiguredPriority struct {
 	Provider         string `json:"provider"`
 	ProviderPriority int    `json:"provider_priority"`
-	ModelAlias       string `json:"model_alias"`
-	ModelPriority    int    `json:"model_priority"`
+	ModelAlias       string `json:"model_alias,omitempty"`
+	ModelPriority    *int   `json:"model_priority,omitempty"`
 }
 
 // Affinity records the current viable route for a session. It is honored only
@@ -171,7 +172,9 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 			if cp, ok := s.configuredPriority(selected.Alias); ok {
 				d.ConfiguredPriority = &cp
 			}
-			d.recordStage("manual_override", []candidate{selected}, overrideEliminations(candidates, target), "manual override applied after hard constraints")
+			overrideRejected := overrideEliminations(candidates, target)
+			d.recordStage("manual_override", []candidate{selected}, overrideRejected, "manual override applied after hard constraints")
+			d.Rejected = append(d.Rejected, overrideRejected...)
 			d.DecisionID = decisionID(req, state, d, s.Config)
 			return d
 		}
@@ -187,7 +190,9 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 		if cp, ok := s.configuredPriority(selected.Alias); ok {
 			d.ConfiguredPriority = &cp
 		}
-		d.recordStage("session_affinity", []candidate{selected}, affinityEliminations(candidates, selected.Alias), "affinity retained")
+		affinityRejected := affinityEliminations(candidates, selected.Alias)
+		d.recordStage("session_affinity", []candidate{selected}, affinityRejected, "affinity retained")
+		d.Rejected = append(d.Rejected, affinityRejected...)
 		d.DecisionID = decisionID(req, state, d, s.Config)
 		return d
 	}
@@ -576,6 +581,12 @@ func (s Selector) rankCandidates(cs []candidate, req RouteRequest, state SelectS
 		if a.providerRank != b.providerRank {
 			return a.providerRank < b.providerRank
 		}
+		// Provider priorities tie: break ties by provider name deterministically,
+		// then apply model priority only within the same provider. Model priorities
+		// are scoped to a provider and must not be compared across providers (#53).
+		if a.c.Provider != b.c.Provider {
+			return a.c.Provider < b.c.Provider
+		}
 		if a.modelRank != b.modelRank {
 			return a.modelRank < b.modelRank
 		}
@@ -584,14 +595,14 @@ func (s Selector) rankCandidates(cs []candidate, req RouteRequest, state SelectS
 		if a.prefRank != b.prefRank {
 			return a.prefRank < b.prefRank
 		}
-		// Performance is only a tie-break among equal configured priority.
-		if a.providerRank == b.providerRank && a.modelRank == b.modelRank && a.prefRank == b.prefRank {
-			if a.hasPerf != b.hasPerf {
-				return a.hasPerf
-			}
-			if a.hasPerf && b.hasPerf && a.perfScore != b.perfScore {
-				return a.perfScore < b.perfScore
-			}
+		// Performance is only a tie-break among candidates with equal configured
+		// priority (same provider, same model priority scope) and equal request
+		// preference rank.
+		if a.hasPerf != b.hasPerf {
+			return a.hasPerf
+		}
+		if a.hasPerf && b.hasPerf && a.perfScore != b.perfScore {
+			return a.perfScore < b.perfScore
 		}
 		return a.c.Alias < b.c.Alias
 	})
@@ -605,14 +616,19 @@ func (s Selector) rankCandidates(cs []candidate, req RouteRequest, state SelectS
 	perfInfluenced := false
 	if len(rankedList) > 1 {
 		a, b := rankedList[0], rankedList[1]
-		if a.providerRank == b.providerRank && a.modelRank == b.modelRank && a.prefRank == b.prefRank && a.hasPerf && (!b.hasPerf || a.perfScore < b.perfScore) {
+		sameConfiguredScope := a.providerRank == b.providerRank && a.c.Provider == b.c.Provider && a.modelRank == b.modelRank
+		if sameConfiguredScope && a.prefRank == b.prefRank && a.hasPerf && (!b.hasPerf || a.perfScore < b.perfScore) {
 			perfInfluenced = true
 		}
 	}
 
 	reasons := make([]string, 0, 3)
 	if prefInfluenced {
-		reasons = append(reasons, fmt.Sprintf("configured priority selected provider %q (priority %d) model %q (priority %d)", rankedList[0].c.Provider, rankedList[0].providerRank, rankedList[0].c.Alias, rankedList[0].modelRank))
+		if rankedList[0].hasModelPref {
+			reasons = append(reasons, fmt.Sprintf("configured priority selected provider %q (priority %d) model %q (priority %d)", rankedList[0].c.Provider, rankedList[0].providerRank, rankedList[0].c.Alias, rankedList[0].modelRank))
+		} else {
+			reasons = append(reasons, fmt.Sprintf("configured priority selected provider %q (priority %d)", rankedList[0].c.Provider, rankedList[0].providerRank))
+		}
 	} else {
 		reasons = append(reasons, "selected by deterministic stable ordering")
 	}
@@ -685,11 +701,13 @@ func (s Selector) configuredPriority(alias string) (ConfiguredPriority, bool) {
 	if !ok {
 		return ConfiguredPriority{}, false
 	}
-	mp, ok := rp.Models[alias]
-	if !ok {
-		return ConfiguredPriority{}, false
+	cp := ConfiguredPriority{Provider: provider, ProviderPriority: rp.Priority}
+	if mp, ok := rp.Models[alias]; ok {
+		cp.ModelAlias = alias
+		mp := mp
+		cp.ModelPriority = &mp
 	}
-	return ConfiguredPriority{Provider: provider, ProviderPriority: rp.Priority, ModelAlias: alias, ModelPriority: mp}, true
+	return cp, true
 }
 
 func performanceStageNote(influenced bool) string {

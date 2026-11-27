@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -187,7 +188,7 @@ func (s *Server) loadSelectState(ctx context.Context) (routing.SelectState, erro
 		HealthMaxAge: freshness,
 	}
 	if s.store == nil {
-		return state, nil
+		return routing.SelectState{}, fmt.Errorf("routing state store unavailable")
 	}
 	snaps, err := s.store.LatestQuotaSnapshot(ctx)
 	if err != nil {
