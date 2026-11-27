@@ -77,6 +77,10 @@ polling:
 routing:
   # Remaining-quota fraction at or below which a provider counts as scarce.
   low_quota_threshold: 0.1
+  # Remaining-quota fraction reserved for reasoning/coding workloads (#17).
+  # A provider at or below this fraction is ineligible for those task classes
+  # while quota is not exhausted. 0 disables the reserve.
+  reserve_fraction: 0 # set > 0 to reserve quota for reasoning/coding
   # Static preference order, applied after hard constraints and viable session
   # affinity (#53/#17). Lower numeric priority means higher preference.
   # Provider priority ranks providers; model priority ranks aliases within one
