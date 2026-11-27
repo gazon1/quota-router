@@ -14,10 +14,11 @@ import (
 // can get wrong — where the file goes — is answerable without the README.
 const initConfigUsage = `usage: quota-controller init-config [path]
 
-Write a starter configuration to the user-level path and print it.
+Write a starter configuration and print where it went.
 
-With no argument the file goes to the path Load reads by default, which on this
-system is:
+With no argument the file goes to the path the daemon reads: the one named by
+QUOTA_ROUTER_CONFIG_FILE when that variable is set, otherwise the user-level
+path, which on this system is:
     %s
 
 It is created only when absent; an existing file is never overwritten, so
@@ -52,12 +53,19 @@ func initConfig(args []string, stdout, stderr io.Writer) int {
 		path = args[0]
 	}
 	if path == "" {
-		p, err := config.UserConfigPath()
-		if err != nil {
-			fmt.Fprintf(stderr, "init-config: %v; pass an explicit path\n", err)
-			return 1
+		// The same rule the daemon uses: an explicit QUOTA_ROUTER_CONFIG_FILE
+		// wins, so a file this command creates is the file the daemon reads.
+		// Otherwise fall back to the user-level path.
+		if p := config.ConfigPath(); p != "" {
+			path = p
+		} else {
+			p, err := config.UserConfigPath()
+			if err != nil {
+				fmt.Fprintf(stderr, "init-config: %v; pass an explicit path\n", err)
+				return 1
+			}
+			path = p
 		}
-		path = p
 	}
 	// 0700 for the directory and 0600 for the file: the configuration may be
 	// edited in place with real values later, and a world-readable copy of it is
@@ -98,14 +106,17 @@ func writeNewFile(path string, body []byte) error {
 	return nil
 }
 
-// defaultConfigPathHint names the default path in the usage text, falling back to
-// a description when no home directory can be resolved.
+// defaultConfigPathHint names the path the command would write to, so the usage
+// text states the same answer the command acts on. It falls back to a
+// description when no home directory can be resolved.
 func defaultConfigPathHint() string {
-	path, err := config.UserConfigPath()
-	if err != nil {
-		return "(unresolved: no user config directory; pass a path)"
+	if path := config.ConfigPath(); path != "" {
+		return path
 	}
-	return path
+	if path, err := config.UserConfigPath(); err == nil {
+		return path
+	}
+	return "(unresolved: no user config directory; pass a path)"
 }
 
 // helpText lists the subcommands. The daemon takes no flags — every setting comes

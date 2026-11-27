@@ -214,14 +214,16 @@ exist, so a typo stays visible instead of silently falling back to the
 default file.
 
 Create it with the binary itself, which writes the shipped example to exactly
-the path the daemon reads:
+the path the daemon reads — the `QUOTA_ROUTER_CONFIG_FILE` path when that
+variable is set, otherwise the user-level one:
 
 ```bash
-quota-controller init-config          # writes ~/.config/quota-router/config.yaml
-quota-controller init-config /path/custom.yaml
+quota-controller init-config          # the path the daemon reads
+quota-controller init-config /path/custom.yaml   # an explicit path instead
 ```
 
-It creates a `0700` directory and a `0600` file, prints where it went, and
+`init-config -h` prints the path it would use. It creates a `0700` directory and
+a `0600` file, prints where it went, and
 **never overwrites an existing file** — a second run fails rather than
 clobbering the values (and secrets) an operator has since put there. The file
 holds placeholders only; credentials stay in the environment

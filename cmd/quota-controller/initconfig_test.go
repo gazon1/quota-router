@@ -213,3 +213,55 @@ func TestWriteNewFileCreatesOnceAndRefusesAfter(t *testing.T) {
 		t.Fatalf("content = %q, want the first write intact", body)
 	}
 }
+
+// QUOTA_ROUTER_CONFIG_FILE is what the daemon reads, so init-config must write
+// there too. Writing to the user-level path instead let an operator believe
+// configuration was initialized while the daemon read another file.
+func TestInitConfigHonorsConfigFileEnv(t *testing.T) {
+	home := isolatedHome(t)
+	explicit := filepath.Join(t.TempDir(), "etc", "quota", "config.yaml")
+	t.Setenv("QUOTA_ROUTER_CONFIG_FILE", explicit)
+
+	var out, errOut bytes.Buffer
+	if code := initConfig(nil, &out, &errOut); code != 0 {
+		t.Fatalf("initConfig() = %d, stderr=%s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), explicit) {
+		t.Fatalf("stdout = %q, want it to name %q", out.String(), explicit)
+	}
+	if _, err := os.Stat(explicit); err != nil {
+		t.Fatalf("stat %s: %v", explicit, err)
+	}
+	// The user-level path must be untouched: one file, the one the daemon reads.
+	if _, err := os.Stat(filepath.Join(home, ".config", "quota-router", "config.yaml")); !os.IsNotExist(err) {
+		t.Fatal("init-config also wrote the user-level path, want only the configured one")
+	}
+
+	// The daemon then reads exactly what was written.
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() of the written file: %v", err)
+	}
+	if cfg.Server.Addr != ":8080" {
+		t.Fatalf("Server.Addr = %q, want it read from %s", cfg.Server.Addr, explicit)
+	}
+}
+
+// An explicit path argument still wins over the variable, so the command can
+// write a sample somewhere else on purpose.
+func TestInitConfigArgumentBeatsConfigFileEnv(t *testing.T) {
+	isolatedHome(t)
+	t.Setenv("QUOTA_ROUTER_CONFIG_FILE", filepath.Join(t.TempDir(), "from-env.yaml"))
+	argPath := filepath.Join(t.TempDir(), "from-arg.yaml")
+
+	var out, errOut bytes.Buffer
+	if code := initConfig([]string{argPath}, &out, &errOut); code != 0 {
+		t.Fatalf("initConfig(path) = %d, stderr=%s", code, errOut.String())
+	}
+	if _, err := os.Stat(argPath); err != nil {
+		t.Fatalf("stat %s: %v", argPath, err)
+	}
+	if _, err := os.Stat(os.Getenv("QUOTA_ROUTER_CONFIG_FILE")); !os.IsNotExist(err) {
+		t.Fatal("the environment path was written even though an argument named another file")
+	}
+}

@@ -270,13 +270,19 @@ func UserConfigPath() (string, error) {
 	return filepath.Join(dir, "quota-router", "config.yaml"), nil
 }
 
-// resolveConfigPath applies the documented rule for which file is read: an
-// explicit QUOTA_ROUTER_CONFIG_FILE wins; otherwise the user-level file is used
-// when it exists. A missing default is not an error — the service starts on
-// defaults — while an explicit path must exist, so a typo stays visible instead
-// of silently running on the default file. A default that exists but cannot be
-// read is left for the loader to report by name.
-func resolveConfigPath() string {
+// ConfigPath returns the path the configuration is read from, applying the one
+// documented rule both the daemon and `init-config` use: an explicit
+// QUOTA_ROUTER_CONFIG_FILE wins — whether or not the file exists yet — and
+// otherwise the user-level path is used when that file is present.
+//
+// It returns "" when nothing is configured and no default file exists: the
+// service then starts on defaults, which is not an error.
+//
+// init-config writes here rather than to UserConfigPath so a file it creates is
+// the file the daemon reads. Writing to the default path while the variable
+// named another one would let an operator believe configuration was initialized
+// while the daemon kept reading somewhere else.
+func ConfigPath() string {
 	if path := os.Getenv(ConfigFileEnv); path != "" {
 		return path
 	}
@@ -291,15 +297,14 @@ func resolveConfigPath() string {
 }
 
 // Load resolves the configuration in documented precedence order and validates
-// it. The YAML file is the one named by QUOTA_ROUTER_CONFIG_FILE, or else
-// UserConfigPath when that file exists. An explicit path that is unreadable or
-// unparsable, and a default file that is unreadable, are startup errors naming
-// the file.
+// it. The YAML file is the one ConfigPath selects. An explicit path that is
+// unreadable or unparsable, and a default file that is unreadable, are startup
+// errors naming the file.
 func Load() (Config, error) {
 	cfg := Default()
 
 	k := koanf.New(".")
-	if path := resolveConfigPath(); path != "" {
+	if path := ConfigPath(); path != "" {
 		if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
 			return Config{}, fmt.Errorf("config file %s: %w", path, err)
 		}
