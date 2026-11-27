@@ -98,7 +98,7 @@ func (u *Unavailable) validate(where string) []error {
 	var errs []error
 	if u.Timezone == "" {
 		errs = append(errs, fmt.Errorf("%s.timezone must name an IANA time zone when windows are configured", where))
-	} else if _, err := time.LoadLocation(u.Timezone); err != nil {
+	} else if !validZone(u.Timezone) {
 		errs = append(errs, fmt.Errorf("%s.timezone must name an IANA time zone", where))
 	}
 	for i, w := range u.Windows {
@@ -125,6 +125,21 @@ func (u *Unavailable) validate(where string) []error {
 		}
 	}
 	return errs
+}
+
+// validZone reports whether name is an IANA time zone the schedule may use.
+//
+// "Local" is rejected even though time.LoadLocation accepts it: it resolves to
+// the zone of the host process, so the same configuration would cover different
+// hours on a UTC server and on an operator's laptop. Refusing it keeps the
+// schedule a property of the config, not of the machine. "UTC" and real IANA
+// names such as "Asia/Yerevan" are accepted.
+func validZone(name string) bool {
+	if name == "Local" {
+		return false
+	}
+	_, err := time.LoadLocation(name)
+	return err == nil
 }
 
 // clock parses a local wall-clock HH:MM into minutes since midnight.

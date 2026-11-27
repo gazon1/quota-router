@@ -156,6 +156,11 @@ func TestUnavailableValidation(t *testing.T) {
 		{"no windows", &Unavailable{Timezone: "Nowhere/Invalid"}, ""},
 		{"missing timezone", &Unavailable{Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, "timezone must name an IANA time zone"},
 		{"unknown timezone", &Unavailable{Timezone: "Nowhere/Invalid", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, "timezone must name an IANA time zone"},
+		// Go resolves Local to the host's zone, which would make the same config
+		// cover different hours on different machines.
+		{"Local is not IANA", &Unavailable{Timezone: "Local", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, "timezone must name an IANA time zone"},
+		{"UTC is IANA", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, ""},
+		{"real IANA name", &Unavailable{Timezone: "Asia/Yerevan", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, ""},
 		{"unknown weekday", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"funday"}, Start: "02:00", End: "06:00"}}}, "days must name weekdays"},
 		{"no weekday", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Start: "02:00", End: "06:00"}}}, "days must name at least one weekday"},
 		{"malformed start", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"monday"}, Start: "2am", End: "06:00"}}}, "start must be a 24-hour HH:MM time"},

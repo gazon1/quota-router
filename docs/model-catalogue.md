@@ -64,6 +64,10 @@ litellm:
   the schedule would silently depend on the host's zone, so it is a startup
   error. The zone database is embedded ([`time/tzdata`](https://pkg.go.dev/time/tzdata)),
   so a container image without `/usr/share/zoneinfo` still resolves it.
+- `Local` is rejected even though Go's `time.LoadLocation` accepts it: it
+  resolves to the zone of the host process, so one configuration would cover
+  different hours on a UTC server and on an operator's laptop. `UTC` and real
+  IANA names such as `Asia/Yerevan` are accepted.
 - `days` are weekdays the window starts on. `start` is inclusive, `end` is
   exclusive, both `HH:MM` wall clock.
 - `start` after `end` is an overnight window that runs into the next day: the
