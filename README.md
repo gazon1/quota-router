@@ -19,7 +19,15 @@ The server listens on `:8080` by default and exposes:
 | Route | Auth | Purpose |
 |---|---|---|
 | `GET /health` | none | Liveness, `{"status":"ok"}` |
+| `GET /v1/status` | `QUOTA_ROUTER_AUTH__TOKEN` | Latest quota and provider health per provider. See [docs/api.md](./docs/api.md) |
+| `POST /v1/route` | `QUOTA_ROUTER_AUTH__TOKEN` | Route decision (the issue-named alias of `POST /v1/routing/select`). |
+| `POST /v1/routing/select` | `QUOTA_ROUTER_AUTH__TOKEN` | Route decision: versioned request → decision with explanation. See [docs/routing-request.md](./docs/routing-request.md) |
+| `GET /v1/routing/decisions` | `QUOTA_ROUTER_AUTH__TOKEN` | Recent decision audit records. See [docs/routing-request.md](./docs/routing-request.md) |
 | `POST /v1/usage` | `QUOTA_ROUTER_AUTH__TOKEN` | Record one request attempt (tokens, provenance, outcome). See [docs/request-usage.md](./docs/request-usage.md) |
+| `POST /v1/sessions/{id}/release` | `QUOTA_ROUTER_AUTH__TOKEN` | End one session's route use; safely repeatable. |
+
+The full controller API contract — endpoints, error envelope, status-code
+mapping — lives in [docs/api.md](./docs/api.md).
 
 ## Domain model
 

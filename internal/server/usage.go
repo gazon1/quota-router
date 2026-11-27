@@ -50,40 +50,50 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
 		// Without a token the route would be an unauthenticated write into the
 		// database, so an unset token refuses every report.
-		s.writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or missing bearer token"})
+		s.writeError(w, r, http.StatusUnauthorized, errorCodeUnauthorized, "invalid or missing bearer token", false)
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxUsageBody))
 	if err != nil {
-		s.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "report too large"})
+		s.writeError(w, r, http.StatusRequestEntityTooLarge, errorCodePayloadTooLarge, "report too large", false)
 		return
 	}
 	var rep usageReport
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&rep); err != nil {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "malformed report: " + err.Error()})
+		s.writeError(w, r, http.StatusBadRequest, errorCodeInvalidRequest, "malformed report: "+err.Error(), false)
+		return
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		s.writeError(w, r, http.StatusBadRequest, errorCodeInvalidRequest, "malformed report: unexpected content after JSON object", false)
 		return
 	}
 
 	rec, err := rep.record(time.Now())
 	if err != nil {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		s.writeError(w, r, http.StatusBadRequest, errorCodeValidation, err.Error(), false)
 		return
 	}
 	if s.usage == nil {
-		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "usage ingestion is not configured"})
+		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "usage ingestion is not configured", false)
 		return
 	}
 	if err := s.usage.SaveUsageRecord(r.Context(), rec); err != nil {
 		// A busy database is the caller's to retry, and the identity makes that
-		// safe: the second report stores nothing.
+		// safe: the second report stores nothing. A reused event id for different
+		// content is a conflict, not a retry of the same event.
+		if errors.Is(err, store.ErrUsageConflict) {
+			s.writeError(w, r, http.StatusConflict, errorCodeConflict, "usage event id already reported with different content", false)
+			return
+		}
 		if errors.Is(err, store.ErrBusy) {
-			s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "database busy, retry"})
+			s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "database busy, retry", true)
 			return
 		}
 		s.log.ErrorContext(r.Context(), "persist usage record", "error", err)
-		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not store the report"})
+		s.writeError(w, r, http.StatusInternalServerError, errorCodeInternal, "could not store the report", false)
 		return
 	}
 	// 202, not 201: a repeated report for an already-stored attempt writes
@@ -95,25 +105,31 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 // invented, an absent outcome is UNKNOWN and an absent observed_at is the time
 // the report arrived.
 func (r usageReport) record(now time.Time) (store.UsageRecord, error) {
-	rec := store.UsageRecord{
-		RequestID:    strings.TrimSpace(r.RequestID),
-		Attempt:      r.Attempt,
-		Provider:     strings.TrimSpace(r.Provider),
-		Model:        strings.TrimSpace(r.Model),
-		InputTokens:  r.InputTokens,
-		OutputTokens: r.OutputTokens,
-		Provenance:   store.Confidence(r.Provenance),
-		Source:       strings.TrimSpace(r.Source),
-		Outcome:      store.Outcome(r.Outcome),
-		DecisionID:   strings.TrimSpace(r.DecisionID),
-		ObservedAt:   now,
-	}
-	if r.ObservedAt != "" {
+	var observedAt time.Time
+	observedAtReported := r.ObservedAt != ""
+	if observedAtReported {
 		t, err := time.Parse(time.RFC3339Nano, r.ObservedAt)
 		if err != nil {
 			return store.UsageRecord{}, errors.New("observed_at must be RFC 3339")
 		}
-		rec.ObservedAt = t
+		observedAt = t
+	}
+	if observedAt.IsZero() {
+		observedAt = now
+	}
+	rec := store.UsageRecord{
+		RequestID:          strings.TrimSpace(r.RequestID),
+		Attempt:            r.Attempt,
+		Provider:           strings.TrimSpace(r.Provider),
+		Model:              strings.TrimSpace(r.Model),
+		InputTokens:        r.InputTokens,
+		OutputTokens:       r.OutputTokens,
+		Provenance:         store.Confidence(r.Provenance),
+		Source:             strings.TrimSpace(r.Source),
+		Outcome:            store.Outcome(r.Outcome),
+		DecisionID:         strings.TrimSpace(r.DecisionID),
+		ObservedAt:         observedAt,
+		ObservedAtReported: observedAtReported,
 	}
 	if rec.Outcome == "" {
 		rec.Outcome = store.OutcomeUnknown

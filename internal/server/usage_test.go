@@ -197,6 +197,24 @@ func TestUsageReportsBusyAsRetryable(t *testing.T) {
 	}
 }
 
+func TestUsageConflictOnConflictingEventReuse(t *testing.T) {
+	srv := New(nil, Options{Usage: &memSink{err: store.ErrUsageConflict}, AuthToken: testToken})
+	w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
+	}
+	var body errorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != errorCodeConflict {
+		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeConflict)
+	}
+	if body.Error.Retryable {
+		t.Fatal("retryable = true, want false for a conflicting reuse")
+	}
+}
+
 func TestUsageIsUnavailableWithoutASink(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken})
 	if w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`); w.Code != http.StatusServiceUnavailable {

@@ -70,11 +70,15 @@ coordinated agent/controller deployment and an explicit policy decision in #17.
 
 ## HTTP endpoints
 
-`POST /v1/routing/select` evaluates a `RouteRequest` and returns a routing
-decision. `GET /v1/routing/decisions` returns recent decision audit records.
-Both endpoints require the configured bearer token (`QUOTA_ROUTER_AUTH__TOKEN` /
-`auth.token`), same as `POST /v1/usage`; when no token is configured, requests
-are refused.
+`POST /v1/route` (alias of `POST /v1/routing/select`) evaluates a
+`RouteRequest` and returns a routing decision. `GET /v1/routing/decisions` returns
+recent decision audit records. Both endpoints require the configured bearer
+token (`QUOTA_ROUTER_AUTH__TOKEN` / `auth.token`), same as `POST /v1/usage`; when
+no token is configured, requests are refused.
+
+`/v1/route` is the issue-named spelling of the decision boundary
+([#18](https://github.com/gazon1/quota-router/issues/18)); the repository
+contract spells it `/v1/routing/select`. The two paths serve the same handler.
 
 `/v1/routing/select` returns `400` for malformed or invalid requests, `409`
 when the request is valid but no eligible model can be selected, `503` when
@@ -84,7 +88,9 @@ is not returned as success if it cannot be persisted.
 
 The HTTP integration currently loads quota and health state only. Session
 affinity and performance tie-breaks are implemented in the selector but not yet
-wired into this endpoint.
+wired into this endpoint. Session release is honoured at the read boundary: a
+release marker recorded through `/v1/sessions/{id}/release` clears the session's
+retained affinity, so a released session is never pinned to its previous route.
 
 ## Boundaries
 

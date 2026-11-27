@@ -150,6 +150,10 @@ type UsageRecord struct {
 	// it, and an id that no decision claims is kept as reported.
 	DecisionID string
 	ObservedAt time.Time
+	// ObservedAtReported records whether the reporter supplied the observation
+	// timestamp. A redelivery that omitted it carries server-stamped arrival
+	// bookkeeping, not event content, so it must not conflict on that alone.
+	ObservedAtReported bool
 }
 
 // HealthRecord is one observation of provider reachability.

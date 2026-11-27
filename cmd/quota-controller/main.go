@@ -100,6 +100,7 @@ func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 		AuthToken: string(cfg.Auth.Token),
 		Config:    cfg,
 		Store:     st,
+		Releases:  st,
 	}).Handler())
 }
 

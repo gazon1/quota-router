@@ -45,13 +45,64 @@ func TestHealthMethodNotAllowed(t *testing.T) {
 	}
 }
 
+func TestUnknownRouteReturnsErrorEnvelope(t *testing.T) {
+	srv := New(nil, Options{AuthToken: testToken})
+	req := httptest.NewRequest(http.MethodGet, "/v1/not-a-route", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
+	}
+	var body errorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != errorCodeNotFound {
+		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeNotFound)
+	}
+	if body.Error.Retryable {
+		t.Fatal("retryable = true, want false for a not-found condition")
+	}
+}
+
+func TestWrongMethodReturnsMethodNotAllowed(t *testing.T) {
+	cfg := testRoutingConfig()
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	req := httptest.NewRequest(http.MethodPost, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+	}
+	var body errorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != errorCodeMethodNotAllowed {
+		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeMethodNotAllowed)
+	}
+}
+
 type fakeStore struct {
-	snaps     []store.QuotaSnapshot
-	health    []store.HealthRecord
-	decisions []store.RoutingDecisionRecord
-	snapErr   error
-	healthErr error
-	saveErr   error
+	snaps         []store.QuotaSnapshot
+	health        []store.HealthRecord
+	decisions     []store.RoutingDecisionRecord
+	snapErr       error
+	healthErr     error
+	saveErr       error
+	controller    map[string]string
+	controllerErr error
+}
+
+func (f *fakeStore) ControllerState(_ context.Context, key string) (string, bool, error) {
+	if f.controllerErr != nil {
+		return "", false, f.controllerErr
+	}
+	v, ok := f.controller[key]
+	return v, ok, nil
 }
 
 func (f *fakeStore) LatestQuotaSnapshot(context.Context) ([]store.QuotaSnapshot, error) {
@@ -114,6 +165,28 @@ const testRoutingToken = "secret-token"
 func postSelect(t *testing.T, srv *Server, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+func postRoute(t *testing.T, srv *Server, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/route", strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+func postRelease(t *testing.T, srv *Server, token, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+id+"/release", nil)
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -203,12 +276,21 @@ func TestSelectEndpointInvalidVersion(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var resp map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+	var body errorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !strings.Contains(resp["error"], "invalid routing request") {
-		t.Fatalf("error=%q", resp["error"])
+	if body.Error.Code != errorCodeValidation {
+		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeValidation)
+	}
+	if !strings.Contains(body.Error.Message, "version must be 1") {
+		t.Fatalf("message = %q, want it to name the version error", body.Error.Message)
+	}
+	if body.Error.RequestID == "" {
+		t.Fatal("error response must carry the request id")
+	}
+	if body.Error.Retryable {
+		t.Fatal("retryable = true, want false for a validation failure")
 	}
 }
 
@@ -363,9 +445,313 @@ func TestSelectEndpointBodyLimit(t *testing.T) {
 	srv.decisions = &fakeStore{}
 	huge := `{"version":1,"session_id":"s1","capabilities":{},"task_class":"` + strings.Repeat("x", maxSelectBody) + `"}`
 	w := postSelect(t, srv, testRoutingToken, huge)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body errorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != errorCodePayloadTooLarge {
+		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodePayloadTooLarge)
+	}
+	if body.Error.Retryable {
+		t.Fatal("retryable = true, want false for a payload size failure")
+	}
+}
+
+// The size bound covers the whole body, including content appended after a
+// valid JSON object: the limit refuses the request rather than silently
+// decoding only the first value.
+func TestSelectEndpointBodyLimitAfterValidJSON(t *testing.T) {
+	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
+	srv.store = &fakeStore{}
+	srv.decisions = &fakeStore{}
+	body := `{"version":1,"session_id":"s1","capabilities":{}}` + `{"pad":"` + strings.Repeat("x", maxSelectBody) + `"}`
+	w := postSelect(t, srv, testRoutingToken, body)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSelectEndpointRejectsTrailingJSON(t *testing.T) {
+	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}} {"unexpected":true}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
+	var body errorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != errorCodeInvalidRequest {
+		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeInvalidRequest)
+	}
+}
+
+// The status endpoint reports the actionable quota and health state per provider
+// through the same freshness bound the selector uses.
+func TestStatusEndpoint(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("minimax", store.Healthy)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp statusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Providers) == 0 {
+		t.Fatal("status returned no providers")
+	}
+	var found *statusProvider
+	for i := range resp.Providers {
+		if resp.Providers[i].Provider == "minimax" {
+			found = &resp.Providers[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("providers = %+v", resp.Providers)
+	}
+	if found.Quota == nil {
+		t.Fatal("quota state missing")
+	}
+	if found.Quota.State != "AVAILABLE" {
+		t.Fatalf("quota state = %q, want AVAILABLE", found.Quota.State)
+	}
+	if found.Health == nil {
+		t.Fatal("health state missing")
+	}
+	if found.Health.State != "HEALTHY" {
+		t.Fatalf("health state = %q, want HEALTHY", found.Health.State)
+	}
+}
+
+// The status endpoint applies the same freshness bound as the selector: a
+// provider whose health observation is older than the bound must not be
+// reported healthy.
+func TestStatusEndpointStaleHealthNotHealthy(t *testing.T) {
+	cfg := testRoutingConfig()
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = &fakeStore{
+		snaps: []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{{
+			Provider:   "minimax",
+			State:      store.Healthy,
+			ObservedAt: time.Now().UTC().Add(-2 * time.Hour),
+		}},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp statusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found *statusProvider
+	for i := range resp.Providers {
+		if resp.Providers[i].Provider == "minimax" {
+			found = &resp.Providers[i]
+		}
+	}
+	if found == nil || found.Health == nil {
+		t.Fatalf("providers = %+v", resp.Providers)
+	}
+	if found.Health.State == "HEALTHY" {
+		t.Fatalf("stale health reported as HEALTHY, want a non-healthy actionable state, got %q", found.Health.State)
+	}
+}
+
+func TestStatusRequiresAuth(t *testing.T) {
+	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body errorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error.Code != errorCodeUnauthorized {
+		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeUnauthorized)
+	}
+}
+
+func TestStatusUnavailableWithoutStore(t *testing.T) {
+	srv := New(nil, Options{AuthToken: testRoutingToken})
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestStatusUnavailableOnStoreError(t *testing.T) {
+	cfg := testRoutingConfig()
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = &fakeStore{snapErr: context.DeadlineExceeded}
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// The issue names the route-decision endpoint /v1/route; the repository also
+// serves the contract name /v1/routing/select, so both must behave identically.
+func TestRouteAliasEndpoint(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("minimax", store.Healthy)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+	srv.decisions = st
+	srv.selector = routing.Selector{Config: cfg}
+
+	w := postRoute(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Decision routing.Decision `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Decision.DecisionID == "" {
+		t.Fatal("decision id missing")
+	}
+}
+
+// Session release ends a session's route use and must be safely repeatable.
+func TestReleaseEndpoint(t *testing.T) {
+	fr := &fakeReleaser{}
+	srv := New(nil, Options{AuthToken: testToken})
+	srv.releases = fr
+
+	w := postRelease(t, srv, testToken, "sess-1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "released" {
+		t.Fatalf("status = %q, want released", body.Status)
+	}
+	if len(fr.keys) != 1 || fr.keys[0] != releaseKeyPrefix+"sess-1" {
+		t.Fatalf("keys = %v, want [%q]", fr.keys, releaseKeyPrefix+"sess-1")
+	}
+
+	w = postRelease(t, srv, testToken, "sess-1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("repeat release status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestReleaseEndpointValidation(t *testing.T) {
+	srv := New(nil, Options{AuthToken: testToken})
+	srv.releases = &fakeReleaser{}
+
+	if w := postRelease(t, srv, testToken, strings.Repeat("s", maxSessionIDLength+1)); w.Code != http.StatusBadRequest {
+		t.Fatalf("long session id status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := postRelease(t, srv, "", "sess-1"); w.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated release status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := postRelease(t, srv, testToken, "sess-1"); w.Code != http.StatusOK {
+		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestReleaseEndpointUnavailableWithoutReleaser(t *testing.T) {
+	srv := New(nil, Options{AuthToken: testToken})
+	if w := postRelease(t, srv, testToken, "sess-1"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// A released session must not keep its retained affinity: the selection path
+// reads the release marker and drops the session's affinity.
+func TestApplyReleasedClearsAffinity(t *testing.T) {
+	ctx := context.Background()
+	srv := New(nil, Options{AuthToken: testToken})
+	srv.store = &fakeStore{controller: map[string]string{releaseKeyPrefix + "sess-1": releaseValueReleased}}
+
+	state := routing.SelectState{Affinity: &routing.Affinity{SessionID: "sess-1", Alias: "cc-coding"}}
+	if err := srv.applyReleased(ctx, &state, "sess-1"); err != nil {
+		t.Fatalf("applyReleased released session: %v", err)
+	}
+	if state.Affinity != nil {
+		t.Fatalf("affinity for released session = %+v, want nil", state.Affinity)
+	}
+
+	state = routing.SelectState{Affinity: &routing.Affinity{SessionID: "sess-2", Alias: "cc-coding"}}
+	if err := srv.applyReleased(ctx, &state, "sess-2"); err != nil {
+		t.Fatalf("applyReleased live session: %v", err)
+	}
+	if state.Affinity == nil {
+		t.Fatal("affinity for a live session must be kept")
+	}
+}
+
+func TestSelectEndpointHonorsSessionRelease(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+		controller: map[string]string{
+			releaseKeyPrefix + "sess-1": releaseValueReleased,
+		},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+	srv.decisions = st
+	srv.selector = routing.Selector{Config: cfg}
+
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+type fakeReleaser struct {
+	err  error
+	keys []string
+}
+
+func (f *fakeReleaser) SaveControllerState(_ context.Context, key, _ string, _ time.Time) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.keys = append(f.keys, key)
+	return nil
 }
 
 var _ = bytes.NewBuffer

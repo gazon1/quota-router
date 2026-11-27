@@ -57,15 +57,19 @@ curl -fsS -X POST http://127.0.0.1:8080/v1/usage \
 | `observed_at` | no | RFC 3339. Absent means the time the report arrived. |
 
 Responses: `202` for a stored or already-stored report, `400` for a malformed or
-unrepresentable one, `401` for a bad token, `413` for a body over 64 KiB, `503`
-when the database is busy (retry: the identity makes it safe) or when ingestion
-is not wired.
+unrepresentable one, `401` for a bad token, `409` when an event id is reused for
+different content, `413` for a body over 64 KiB, `503` when the database is busy
+(retry: the identity makes it safe) or when ingestion is not wired.
 
 ## Guarantees
 
 - **Idempotent.** `(request_id, attempt)` is unique. A repeated report of an
   already-stored attempt writes nothing and still returns `202`, so a client
   retry does not double-count.
+- **Conflicting reuse is a conflict.** The same event id delivered again with
+  different content is not a retry: the store returns a conflict and the API
+  answers `409` with the stable error envelope, instead of silently overwriting
+  the stored attempt.
 - **Retries are separate.** A retry is attempt 2 of the same request: the failed
   attempt keeps its outcome and no usage, the successful one keeps its own. No
   row copies another's token counts.

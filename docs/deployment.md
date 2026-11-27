@@ -95,15 +95,19 @@ host reboot or a Docker daemon restart until you explicitly stop them.
 | Service | Published | Notes |
 |---|---|---|
 | `litellm` | `127.0.0.1:4000` | Only local API port. `127.0.0.1` prefix keeps it off the LAN; use `"4000:4000"` to serve the LAN, and put a TLS terminator in front before you do. |
-| `quota-controller` | none | Reachable only as `http://quota-controller:8080` from inside the `internal` network. `/health` needs no auth; `POST /v1/usage` requires `QUOTA_ROUTER_AUTH__TOKEN` ([docs/request-usage.md](./request-usage.md)). |
+| `quota-controller` | none | Reachable only as `http://quota-controller:8080` from inside the `internal` network. `/health` needs no auth; the `/v1/*` API requires `QUOTA_ROUTER_AUTH__TOKEN` ([docs/api.md](./api.md)). |
+
+The controller API now exists: `/health`, `/v1/status`, `/v1/route`,
+`/v1/routing/select`, `/v1/routing/decisions`, `/v1/usage` and
+`/v1/sessions/{id}/release` all require the bearer token except `/health`.
 
 A usage reporter running on the same compose network posts to
 `http://quota-controller:8080/v1/usage`; nothing outside needs the port. Set
 `QUOTA_ROUTER_AUTH__TOKEN` (or its `_FILE` form) before enabling reports:
 with no token the route refuses every report, which is the intended default.
 
-Publish the controller's port only when its real API exists (issue #18), and
-then bind it to `127.0.0.1` as well.
+Publish the controller's port when a real API consumer needs it, and bind it to
+`127.0.0.1` as well.
 
 LiteLLM's admin UI lives on the same port under `/ui`. It is not a separate
 port, so the `127.0.0.1` binding covers it too.
@@ -222,9 +226,11 @@ Back up with `VACUUM INTO` — a plain copy of the file misses rows still in
 
 ## Known gaps
 
-- The controller has no API beyond `GET /health`, so the stack proves
-  independence, health checks and limits but routes no traffic through the
-  controller yet.
+- The controller API now exists (issue #18 added `/v1/status`, `/v1/route`,
+  `/v1/routing/select`, `/v1/routing/decisions`, `/v1/usage` and
+  `/v1/sessions/{id}/release`); the stack exercises the full local contract.
+  The proxy still routes traffic directly and does not call the controller yet,
+  so wiring LiteLLM to the controller is the remaining operational step.
 - Four models configured: MiniMax `MiniMax-M2.7` and three Command Code
   models. Two of the Command Code models are free-tier and hit a daily request
   cap, so a `429` from them is the plan signal, not a routing fault. Quota

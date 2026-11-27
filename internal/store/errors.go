@@ -23,6 +23,11 @@ var ErrFull = errors.New("sqlite: disk full")
 // ErrIO reports an I/O or corruption fault. Not retryable in-process.
 var ErrIO = errors.New("sqlite: I/O failure")
 
+// ErrUsageConflict reports an event identity was reused for different attempt
+// content: a redelivered event is a no-op, a conflicting reuse is an error the
+// caller must resolve rather than silently overwrite the stored attempt.
+var ErrUsageConflict = errors.New("usage: conflicting reuse of an event id")
+
 // ErrReadOnly reports the database file is not writable.
 var ErrReadOnly = errors.New("sqlite: database is read-only")
 
