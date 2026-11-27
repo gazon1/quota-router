@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -101,6 +102,71 @@ func TestUsageProvenanceIsNotPromoted(t *testing.T) {
 	}
 	if got["req-reported"] != "reported" || got["req-estimated"] != "estimated" {
 		t.Fatalf("provenance = %v, want each row to keep its own", got)
+	}
+}
+
+// A redelivered event with identical content is a no-op; the same event id
+// reused for different content is a conflict, not a silent overwrite.
+func TestUsageConflictingEventReuseIsConflict(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	base := UsageRecord{RequestID: "req-1", Attempt: 1, Provider: "minimax", Source: "agent",
+		Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: time.Now()}
+	if err := s.SaveUsageRecord(ctx, base); err != nil {
+		t.Fatalf("SaveUsageRecord: %v", err)
+	}
+
+	conflict := base
+	conflict.InputTokens = intPtr(999)
+	if err := s.SaveUsageRecord(ctx, conflict); !errors.Is(err, ErrUsageConflict) {
+		t.Fatalf("SaveUsageRecord conflict = %v, want ErrUsageConflict", err)
+	}
+
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM usage_records").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows = %d, want 1: a conflicting reuse must not overwrite", n)
+	}
+
+	if err := s.SaveUsageRecord(ctx, base); err != nil {
+		t.Fatalf("identical redelivery: %v", err)
+	}
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM usage_records").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows = %d, want 1 after an identical redelivery", n)
+	}
+}
+
+// A redelivered event whose reporter-supplied observation timestamp differs is
+// a conflicting reuse, not an identical redelivery: the stored attempt must not
+// accept a different observed_at as the same content.
+func TestUsageConflictingEventReuseWithDifferentObservedAt(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	base := UsageRecord{RequestID: "req-2", Attempt: 1, Provider: "minimax", Source: "agent",
+		Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: time.Now(), ObservedAtReported: true}
+	if err := s.SaveUsageRecord(ctx, base); err != nil {
+		t.Fatalf("SaveUsageRecord: %v", err)
+	}
+
+	conflict := base
+	conflict.ObservedAt = base.ObservedAt.Add(time.Hour)
+	if err := s.SaveUsageRecord(ctx, conflict); !errors.Is(err, ErrUsageConflict) {
+		t.Fatalf("SaveUsageRecord conflicting observed_at = %v, want ErrUsageConflict", err)
+	}
+
+	var n int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM usage_records").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("rows = %d, want 1: a conflicting observed_at must not overwrite", n)
 	}
 }
 

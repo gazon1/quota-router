@@ -66,10 +66,11 @@ func (s *Store) SaveQuotaSnapshot(ctx context.Context, snap QuotaSnapshot) error
 }
 
 // SaveUsageRecord appends one request attempt. A report for an attempt that is
-// already stored is ignored, so a retried report does not double-count tokens;
-// a retry is a different attempt and gets its own row. An empty outcome is
-// stored as UNKNOWN and attempt 0 as the first attempt, because neither is a
-// value this store may invent.
+// already stored is ignored when the event content is identical, so a retried
+// report does not double-count tokens; a retry is a different attempt and gets
+// its own row. An empty outcome is stored as UNKNOWN and attempt 0 as the first
+// attempt, because neither is a value this store may invent. Reusing an event
+// identity for different content is ErrUsageConflict, not an overwrite.
 func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	if u.Attempt == 0 {
 		u.Attempt = 1
@@ -77,19 +78,118 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	if u.Outcome == "" {
 		u.Outcome = OutcomeUnknown
 	}
+	observedAtSet := u.ObservedAtReported
+	if u.ObservedAt.IsZero() {
+		u.ObservedAt = time.Now().UTC()
+	}
 	if err := u.Validate(); err != nil {
 		return fmt.Errorf("usage record: %w", err)
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`INSERT INTO usage_records
 			   (request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT (request_id, attempt) DO NOTHING`,
 			nullString(u.RequestID), u.Attempt, u.Provider, nullString(u.Model), u.InputTokens, u.OutputTokens,
 			u.Provenance, u.Source, u.Outcome, nullString(u.DecisionID), ts(u.ObservedAt))
-		return classify(err)
+		if err != nil {
+			return classify(err)
+		}
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return classify(err)
+		}
+		if rows == 0 {
+			// The attempt identity was taken by an earlier report. The same
+			// event redelivered is a no-op; the same identity carrying different
+			// content is a conflicting reuse and fails the write.
+			return s.usageConflict(ctx, tx, u, observedAtSet)
+		}
+		return nil
 	})
+}
+
+// usageConflict decides what a skipped duplicate means. A redelivered event with
+// identical content leaves the stored attempt alone and succeeds; the same event
+// id reused for different content is a conflict, not a retry, and must surface.
+// observedAtSet reports whether the reporter supplied an observation timestamp;
+// a redelivery that omitted it carries server-stamped arrival bookkeeping, not
+// event content, so it must not conflict on that alone.
+func (s *Store) usageConflict(ctx context.Context, tx *sql.Tx, u UsageRecord, observedAtSet bool) error {
+	var (
+		provider   string
+		model      sql.NullString
+		input      sql.NullInt64
+		output     sql.NullInt64
+		prov       string
+		src        string
+		outcome    string
+		decision   sql.NullString
+		observedAt string
+	)
+	err := tx.QueryRowContext(ctx,
+		`SELECT provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at
+		 FROM usage_records WHERE request_id = ? AND attempt = ?`,
+		u.RequestID, u.Attempt).Scan(&provider, &model, &input, &output, &prov, &src, &outcome, &decision, &observedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrUsageConflict
+		}
+		return classify(err)
+	}
+	storedObservedAt, err := parseTS(observedAt)
+	if err != nil {
+		return fmt.Errorf("usage record: stored observed_at: %w", err)
+	}
+	existing := UsageRecord{
+		RequestID:    u.RequestID,
+		Attempt:      u.Attempt,
+		Provider:     provider,
+		Model:        model.String,
+		InputTokens:  intFromNull(&input),
+		OutputTokens: intFromNull(&output),
+		Provenance:   Confidence(prov),
+		Source:       src,
+		Outcome:      Outcome(outcome),
+		DecisionID:   decision.String,
+		ObservedAt:   storedObservedAt,
+	}
+	if existing.Provider == "" || existing.Source == "" || existing.Outcome == "" {
+		return ErrUsageConflict
+	}
+	same := existing.Provider == u.Provider &&
+		existing.Model == u.Model &&
+		intValueEqual(existing.InputTokens, u.InputTokens) &&
+		intValueEqual(existing.OutputTokens, u.OutputTokens) &&
+		existing.Provenance == u.Provenance &&
+		existing.Source == u.Source &&
+		existing.Outcome == u.Outcome &&
+		existing.DecisionID == u.DecisionID
+	if same && observedAtSet && !existing.ObservedAt.Equal(u.ObservedAt) {
+		same = false
+	}
+	if !same {
+		return ErrUsageConflict
+	}
+	return nil
+}
+
+// intValueEqual compares optional counts without dereferencing a nil: an absent
+// count is unknown, not zero, and must not match a reported zero.
+func intValueEqual(a, b *int) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
+}
+
+func intFromNull(v *sql.NullInt64) *int {
+	if !v.Valid {
+		return nil
+	}
+	n := int(v.Int64)
+	return &n
 }
 
 // SaveProviderHealth appends one health observation.
