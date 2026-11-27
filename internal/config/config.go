@@ -180,9 +180,9 @@ type SQLite struct {
 // Retention bounds how long persisted history is kept. The newest state per
 // provider always survives, so cleanup never removes what routing reads.
 type Retention struct {
-	QuotaSnapshots  time.Duration `koanf:"quota_snapshots"`
-	ProviderHealth  time.Duration `koanf:"provider_health"`
-	UsageRecords    time.Duration `koanf:"usage_records"`
+	QuotaSnapshots   time.Duration `koanf:"quota_snapshots"`
+	ProviderHealth   time.Duration `koanf:"provider_health"`
+	UsageRecords     time.Duration `koanf:"usage_records"`
 	RoutingDecisions time.Duration `koanf:"routing_decisions"`
 }
 
