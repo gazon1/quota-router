@@ -54,10 +54,78 @@ type Server struct {
 
 // LiteLLM locates the proxy the controller routes through.
 type LiteLLM struct {
+	// BaseURL is the proxy root, for example http://127.0.0.1:4000; model
+	// requests go to /v1/... below it.
 	BaseURL string `koanf:"base_url"`
-	// ModelAliases maps a routing alias to the LiteLLM "<provider>/<model>" id.
-	ModelAliases map[string]string `koanf:"model_aliases"`
+	// APIKey is the proxy's master key, used only to verify the catalogue
+	// against GET /v1/models. Unset skips that verification.
+	APIKey Secret `koanf:"api_key"`
+	// ModelAliases is the model catalogue: a routing alias to the entry the
+	// proxy serves under that name.
+	ModelAliases map[string]Model `koanf:"model_aliases"`
 }
+
+// Model is one catalogue entry: the model an alias resolves to and what was
+// verified about it. Nothing in the entry is discovered at runtime — the model
+// id comes from the configuration and from the reference measured in
+// docs/litellm-provider-compatibility.md. Provider and alias are not duplicated
+// here: the provider is the prefix of Model and the alias is the map key.
+type Model struct {
+	// Model is LiteLLM's model_name, exactly "<provider>/<model>" as the proxy
+	// lists and resolves it.
+	Model string `koanf:"model"`
+	// Enabled reports whether routing may use this entry. Absent means enabled,
+	// so listing a model is enough to use it.
+	Enabled *bool `koanf:"enabled"`
+	// ContextLimit is the verified input context window in tokens. Zero means
+	// unverified; a request constraint never relies on it then.
+	ContextLimit int          `koanf:"context_limit"`
+	Capabilities Capabilities `koanf:"capabilities"`
+	// Tasks are the task classes this model is suitable for, for example
+	// "coding" or "reasoning".
+	Tasks []string `koanf:"tasks"`
+}
+
+// Capabilities are what a model was verified to support. Each field is
+// tri-state and defaults to CapabilityUnknown, so a model that never claimed a
+// capability is not treated as supporting it.
+type Capabilities struct {
+	Streaming        Capability `koanf:"streaming"`
+	ToolCalling      Capability `koanf:"tool_calling"`
+	StructuredOutput Capability `koanf:"structured_output"`
+}
+
+// IsEnabled reports whether routing may use this entry. Listing a model is
+// enough to use it; the field only exists to switch one off.
+func (m Model) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
+
+// Provider is the provider prefix of the model id. It is derived rather than
+// stored, so the entry cannot name two different providers at once.
+func (m Model) Provider() string {
+	p, _, _ := strings.Cut(m.Model, "/")
+	return p
+}
+
+// UnmarshalText accepts the short form the catalogue shipped with
+// (`fast: minimax/MiniMax-M2.7`) as a model id with everything else unknown, so
+// widening the entry did not break an existing configuration file.
+func (m *Model) UnmarshalText(b []byte) error {
+	m.Model = string(b)
+	return nil
+}
+
+// Capability is a verified capability claim. CapabilityUnknown is the zero value
+// and means nobody verified it, which is weaker than CapabilityUnsupported.
+type Capability string
+
+const (
+	CapabilityUnknown     Capability = ""
+	CapabilitySupported   Capability = "supported"
+	CapabilityUnsupported Capability = "unsupported"
+)
+
+// Supported reports whether the capability is explicitly supported.
+func (c Capability) Supported() bool { return c == CapabilitySupported }
 
 // Provider is a quota provider the controller polls directly.
 type Provider struct {
@@ -131,7 +199,7 @@ func Default() Config {
 			WriteTimeout:      10 * time.Second,
 			IdleTimeout:       60 * time.Second,
 		},
-		LiteLLM:   LiteLLM{BaseURL: "http://127.0.0.1:4000", ModelAliases: map[string]string{}},
+		LiteLLM:   LiteLLM{BaseURL: "http://127.0.0.1:4000", APIKey: "", ModelAliases: map[string]Model{}},
 		Providers: map[string]Provider{},
 		Polling:   Polling{Interval: 30 * time.Second, RequestTimeout: 10 * time.Second},
 		Routing:   Routing{LowQuotaThreshold: 0.1},
@@ -187,6 +255,17 @@ func Load() (Config, error) {
 		),
 	}}); err != nil {
 		errs = append(errs, fmt.Errorf("decode configuration: %w", err))
+	}
+	// Tasks is the one list an operator sets from the environment, where a value
+	// cannot be a YAML sequence: accept "coding,reasoning" as two classes.
+	for alias, m := range cfg.LiteLLM.ModelAliases {
+		if len(m.Tasks) == 1 {
+			m.Tasks = strings.Split(m.Tasks[0], ",")
+		}
+		for i := range m.Tasks {
+			m.Tasks[i] = strings.TrimSpace(m.Tasks[i])
+		}
+		cfg.LiteLLM.ModelAliases[alias] = m
 	}
 	if err := cfg.validate(); err != nil {
 		errs = append(errs, err)

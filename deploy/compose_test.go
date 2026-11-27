@@ -344,6 +344,44 @@ func TestEnvExampleCoversConfig(t *testing.T) {
 	}
 }
 
+// TestCatalogueMatchesLiteLLMConfig is the offline half of issue #15's "validate
+// aliases against the LiteLLM configuration": the shipped example catalogue and
+// the proxy config are two files that must name the same models, and nothing else
+// ever compares them. The runtime half is cfg.VerifyCatalogue in internal/config.
+func TestCatalogueMatchesLiteLLMConfig(t *testing.T) {
+	served := map[string]bool{}
+	for _, m := range readLiteLLMConfig(t).models {
+		served[m.name] = true
+	}
+
+	raw, err := os.ReadFile("../config.example.yaml")
+	if err != nil {
+		t.Fatalf("read ../config.example.yaml: %v", err)
+	}
+	var doc struct {
+		LiteLLM struct {
+			// Both catalogue forms are legal: `fast: minimax/MiniMax-M2.7` and
+			// `fast: {model: minimax/MiniMax-M2.7}`.
+			ModelAliases map[string]any `yaml:"model_aliases"`
+		} `yaml:"litellm"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse ../config.example.yaml: %v", err)
+	}
+	if len(doc.LiteLLM.ModelAliases) == 0 {
+		t.Fatal("config.example.yaml: no model_aliases to check")
+	}
+	for alias, entry := range doc.LiteLLM.ModelAliases {
+		model, ok := entry.(string)
+		if !ok {
+			model, _ = entry.(map[string]any)["model"].(string)
+		}
+		if !served[model] {
+			t.Errorf("config.example.yaml: alias %q names %q, which litellm-config.yaml does not serve", alias, model)
+		}
+	}
+}
+
 // TestDockerignoreExcludesSecrets guards the controller's build context: the
 // Dockerfile runs COPY . . from the repository root, so an unignored .env or
 // config.yaml would reach the builder and its layer cache.

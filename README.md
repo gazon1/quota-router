@@ -39,6 +39,12 @@ Token Plan adapter that produces these observations; see
 [docs/minimax-quota-adapter.md](./docs/minimax-quota-adapter.md) for the key
 type, endpoint, response semantics and limitations.
 
+[internal/provider/commandcode](./internal/provider/commandcode) is the mirror
+case: the #4 gate found no documented Command Code quota interface, so it reports
+`UNKNOWN`/`UNSUPPORTED_NO_DOCUMENTED_QUOTA_API` without making a request. See
+[docs/commandcode-quota-adapter.md](./docs/commandcode-quota-adapter.md) for why
+the undocumented `/alpha` routes are deliberately not implemented.
+
 
 Three details worth knowing before using the model:
 
@@ -56,6 +62,20 @@ Three details worth knowing before using the model:
 - Both reason vocabularies are enforced, not just documented: `Failed` and
   `NewProviderState` replace an undeclared reason with a safe code, so turning
   a raw provider error into a reason cannot smuggle a credential into the model.
+
+## Model catalogue
+
+[internal/config](./internal/config) holds the configured model catalogue:
+`litellm.model_aliases` maps a routing alias to the model LiteLLM serves under
+that name, with the verification status of its context limit, streaming, tool and
+structured-output capabilities, and the task classes it suits. Nothing is
+discovered at runtime — model ids are configuration, and with
+`litellm.api_key` set, startup rejects an alias `GET /v1/models` does not serve.
+
+Capabilities are tri-state and **only an explicit `supported` satisfies a
+request**, so a model nobody measured is never selected for a job it cannot prove
+it does. Full field table, conservative matching rule and the fatal-versus-warn
+split of the startup check: [docs/model-catalogue.md](./docs/model-catalogue.md).
 
 ## Turn boundaries
 
@@ -126,7 +146,14 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_SERVER__WRITE_TIMEOUT` | `10s` | HTTP write timeout |
 | `QUOTA_ROUTER_SERVER__IDLE_TIMEOUT` | `60s` | HTTP idle timeout |
 | `QUOTA_ROUTER_LITELLM__BASE_URL` | `http://127.0.0.1:4000` | LiteLLM proxy URL |
-| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>` | unset | Routing alias → `<provider>/<model>` |
+| `QUOTA_ROUTER_LITELLM__API_KEY` | unset | LiteLLM master key, used to verify the catalogue (secret) |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__MODEL` | unset | Routing alias → `<provider>/<model>` id |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__ENABLED` | `true` | `false` keeps the entry out of routing |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CONTEXT_LIMIT` | `0` | Verified input window in tokens (`0` unverified) |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CAPABILITIES__STREAMING` | unverified | `supported` or `unsupported` |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CAPABILITIES__TOOL_CALLING` | unverified | `supported` or `unsupported` |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CAPABILITIES__STRUCTURED_OUTPUT` | unverified | `supported` or `unsupported` |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__TASKS` | unset | Comma-separated task classes the model suits |
 | `QUOTA_ROUTER_PROVIDERS__<NAME>__BASE_URL` | unset | Provider API URL |
 | `QUOTA_ROUTER_PROVIDERS__<NAME>__API_KEY` | unset | Provider credential (secret) |
 | `QUOTA_ROUTER_POLLING__INTERVAL` | `30s` | Quota polling interval |

@@ -117,7 +117,7 @@ providers:
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.LiteLLM.ModelAliases["fast"] != "minimax/MiniMax-M2.7" {
+	if got := cfg.LiteLLM.ModelAliases["fast"]; got.Model != "minimax/MiniMax-M2.7" {
 		t.Fatalf("ModelAliases = %v, want the fast alias", cfg.LiteLLM.ModelAliases)
 	}
 	if got := cfg.Providers["minimax"]; got.BaseURL != "https://api.minimax.io/v1" {
@@ -189,7 +189,7 @@ func TestLoadEnvSetsModelAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got := cfg.LiteLLM.ModelAliases["fast"]; got != "minimax/MiniMax-M2.7" {
+	if got := cfg.LiteLLM.ModelAliases["fast"].Model; got != "minimax/MiniMax-M2.7" {
 		t.Fatalf("ModelAliases = %v, want the fast alias from the environment", cfg.LiteLLM.ModelAliases)
 	}
 }
