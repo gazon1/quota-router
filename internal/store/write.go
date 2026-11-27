@@ -94,6 +94,57 @@ func (s *Store) SaveProviderHealth(ctx context.Context, h HealthRecord) error {
 	})
 }
 
+// SavePollState records when a provider was last polled and, when the attempt
+// established quota, when it last did. A zero successAt leaves the recorded
+// success alone: a failure must not erase when quota was last known good, and
+// the two timestamps are read independently.
+func (s *Store) SavePollState(ctx context.Context, provider string, attemptAt, successAt time.Time) error {
+	if provider == "" {
+		return errors.New("poll state: provider must not be empty")
+	}
+	if attemptAt.IsZero() {
+		return errors.New("poll state: attempt time must be set")
+	}
+	var success *string
+	if !successAt.IsZero() {
+		v := ts(successAt)
+		success = &v
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO poll_state (provider, last_attempt_at, last_success_at) VALUES (?, ?, ?)
+			 ON CONFLICT (provider) DO UPDATE SET
+			   last_attempt_at = excluded.last_attempt_at,
+			   last_success_at = COALESCE(excluded.last_success_at, poll_state.last_success_at)`,
+			provider, ts(attemptAt), success)
+		return classify(err)
+	})
+}
+
+// PollState reports when a provider was last polled and last succeeded. A zero
+// success time means no attempt has established quota yet.
+func (s *Store) PollState(ctx context.Context, provider string) (attemptAt, successAt time.Time, err error) {
+	var attempt, success sql.NullString
+	err = s.db.QueryRowContext(ctx,
+		`SELECT last_attempt_at, last_success_at FROM poll_state WHERE provider = ?`, provider).
+		Scan(&attempt, &success)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, time.Time{}, classify(err)
+	}
+	if attemptAt, err = parseTS(attempt.String); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	if success.Valid {
+		if successAt, err = parseTS(success.String); err != nil {
+			return time.Time{}, time.Time{}, err
+		}
+	}
+	return attemptAt, successAt, nil
+}
+
 // SaveControllerState stores one controller key. The latest write wins.
 func (s *Store) SaveControllerState(ctx context.Context, key, value string, updatedAt time.Time) error {
 	if key == "" {

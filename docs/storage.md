@@ -40,10 +40,10 @@ Go does. Nothing here requires `libsqlite3`.
 
 ## Schema and migrations
 
-The schema is one versioned SQL migration,
-[migrations/0001_persistence.sql](../internal/store/migrations/0001_persistence.sql),
-embedded with `go:embed`. There is no second copy and no ORM: every query is
-explicit SQL in [internal/store](../internal/store).
+The schema is versioned SQL migrations under
+[internal/store/migrations](../internal/store/migrations), embedded with
+`go:embed`. There is no second copy and no ORM: every query is explicit SQL in
+[internal/store](../internal/store).
 
 | Table | Holds |
 |---|---|
@@ -51,6 +51,7 @@ explicit SQL in [internal/store](../internal/store).
 | `quota_windows` | one row per quota window (`5h`, `weekly`, …) with limit/used/remaining/reset-at, each nullable so "not reported" ≠ `0` |
 | `usage_records` | locally observed usage, `reported` vs `estimated`, deduplicated by `request_id` |
 | `provider_health` | reachability state, independent of quota |
+| `poll_state` | per-provider `last_attempt_at` and `last_success_at`, kept separately so a failure never erases when quota was last known good |
 | `controller_state` | key/value controller state, upserted |
 
 `UNKNOWN` states are constrained by the schema: `unknown_reason` is required

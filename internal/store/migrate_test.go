@@ -30,7 +30,7 @@ func TestBrokenMigrationRollsBack(t *testing.T) {
 	// A copy of the real migrations plus one that creates a table and then fails.
 	mig := t.TempDir()
 	apply(t, mig, "0001_persistence.sql", readMigration(t, "0001_persistence.sql"))
-	apply(t, mig, "0002_broken.sql", `
+	apply(t, mig, "0003_broken.sql", `
 -- +goose Up
 CREATE TABLE half_applied (id INTEGER PRIMARY KEY);
 INSERT INTO no_such_table (id) VALUES (1);
@@ -53,19 +53,20 @@ DROP TABLE half_applied;
 		t.Fatal("half_applied survived: the failed migration was not rolled back")
 	}
 	var applied int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 2 AND is_applied = 1").Scan(&applied); err != nil {
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 3 AND is_applied = 1").Scan(&applied); err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
 	if applied != 0 {
 		t.Fatal("the failed version is recorded as applied")
 	}
-	// Version 1 must still be intact and usable: startup can report where it stopped.
+	// The versions that already committed must still be intact and usable:
+	// startup can report where it stopped.
 	v, err := s.Version(ctx)
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 1 {
-		t.Fatalf("version = %d after a failed migration, want 1", v)
+	if v != 2 {
+		t.Fatalf("version = %d after a failed migration, want 2", v)
 	}
 	if err := s.SaveUsageRecord(ctx, UsageRecord{Provider: "p", Provenance: Reported, ObservedAt: time.Now()}); err != nil {
 		t.Fatalf("the database is not usable after a rolled-back migration: %v", err)
