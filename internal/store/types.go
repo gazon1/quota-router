@@ -332,3 +332,46 @@ func (r RoutingDecisionRecord) Validate() error {
 	}
 	return errors.Join(errs...)
 }
+
+// SessionAffinity is the route one agent session is currently pinned to. It is
+// routing state, not history: the row stops being affinity at ExpiresAt, and a
+// reader must not pin a session past it on its own authority.
+//
+// CreatedAt survives a re-pin so an operator can see when the pin started;
+// UpdatedAt is what a re-pin moves. Both are set by the store, never by the
+// caller, so a restart cannot rewind them.
+type SessionAffinity struct {
+	SessionID string
+	Alias     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	ExpiresAt time.Time
+}
+
+// Validate checks the affinity row fields. A pin without a future expiry is not
+// affinity: an unbounded pin would outlive the route it names.
+func (a SessionAffinity) Validate() error {
+	var errs []error
+	if a.SessionID == "" {
+		errs = append(errs, errors.New("session_id must not be empty"))
+	}
+	if a.Alias == "" {
+		errs = append(errs, errors.New("alias must not be empty"))
+	}
+	if a.CreatedAt.IsZero() {
+		errs = append(errs, errors.New("created_at must be set"))
+	}
+	if a.UpdatedAt.IsZero() {
+		errs = append(errs, errors.New("updated_at must be set"))
+	}
+	if a.ExpiresAt.IsZero() {
+		errs = append(errs, errors.New("expires_at must be set"))
+	}
+	if !a.ExpiresAt.After(a.UpdatedAt) {
+		errs = append(errs, fmt.Errorf("expires_at %s must be after updated_at %s", a.ExpiresAt, a.UpdatedAt))
+	}
+	if a.ExpiresAt.Before(a.CreatedAt) {
+		errs = append(errs, fmt.Errorf("expires_at %s must not precede created_at %s", a.ExpiresAt, a.CreatedAt))
+	}
+	return errors.Join(errs...)
+}

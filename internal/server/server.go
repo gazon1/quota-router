@@ -26,22 +26,15 @@ type DecisionStore interface {
 	LatestRoutingDecisions(ctx context.Context, limit int) ([]store.RoutingDecisionRecord, error)
 }
 
-// StateStore reads the latest quota and provider health observations, plus the
-// controller state keys (session release markers and operational modes).
+// StateStore reads the latest quota and provider health observations and the
+// session-to-route pins. Affinity lives here rather than behind a second seam
+// because it is routing state the selection path reads and writes, like quota.
 type StateStore interface {
 	LatestQuotaSnapshot(ctx context.Context) ([]store.QuotaSnapshot, error)
 	LatestProviderHealth(ctx context.Context) ([]store.HealthRecord, error)
-	ControllerState(ctx context.Context, key string) (string, bool, error)
-}
-
-// SessionReleaser persists session release markers through the controller
-// state. A release marker for a session ends that session's route use; the
-// selection path reads it back and drops any retained affinity for the session,
-// so a released session is never pinned to its previous route. A repeat release
-// simply rewrites the same marker, which is the repeatable behaviour callers rely
-// on.
-type SessionReleaser interface {
-	SaveControllerState(ctx context.Context, key, value string, updatedAt time.Time) error
+	SessionAffinity(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error)
+	SaveSessionAffinity(ctx context.Context, a store.SessionAffinity) error
+	DeleteSessionAffinity(ctx context.Context, sessionID string) error
 }
 
 // Server wires HTTP routes and handlers.
@@ -53,7 +46,10 @@ type Server struct {
 	store     StateStore
 	decisions DecisionStore
 	usage     UsageSink
-	releases  SessionReleaser
+	// sessions serializes the read-decide-write of one session's route pin
+	// against a release of the same session. Per session, so unrelated sessions
+	// do not contend.
+	sessions sessionLocks
 	// token is the bearer token the API routes require. Empty disables them:
 	// the health route stays open, every other route refuses.
 	token string
@@ -61,14 +57,13 @@ type Server struct {
 
 // Options carries what the routes read. A nil Usage or an empty Token leaves
 // the usage route registered but refusing every report. A nil Store leaves the
-// routing and status routes registered but returning 503. A nil Releases leaves
-// the session release route registered but returning 503.
+// routing, status and session release routes registered but returning 503:
+// affinity is routing state, so the store that holds it also ends route use.
 type Options struct {
 	Usage     UsageSink
 	AuthToken string
 	Config    config.Config
 	Store     *store.Store
-	Releases  SessionReleaser
 }
 
 // New creates a server with registered routes.
@@ -86,7 +81,6 @@ func New(log *slog.Logger, opts Options) *Server {
 		cfg:      cfg,
 		selector: routing.Selector{Config: cfg},
 		usage:    opts.Usage,
-		releases: opts.Releases,
 		token:    opts.AuthToken,
 	}
 	if opts.Store != nil {
@@ -213,12 +207,11 @@ const maxSelectBody = 64 << 10
 // and an error message.
 const maxSessionIDLength = 256
 
-// releaseKeyPrefix namespaces session release markers inside the controller
-// state store. releaseValueReleased marks a session whose route use has ended.
-const (
-	releaseKeyPrefix     = "session_release:"
-	releaseValueReleased = "released"
-)
+// sessionAffinityTTL is how long a pin outlives its last use. Long enough that a
+// working session keeps its model across a pause, short enough that an abandoned
+// session stops being pinned without anyone releasing it. It is deliberately not
+// configurable yet: nothing has measured a better value.
+const sessionAffinityTTL = 24 * time.Hour
 
 type selectResponse struct {
 	Decision routing.Decision `json:"decision"`
@@ -258,23 +251,15 @@ func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	state, err := s.loadSelectState(r.Context())
+	// One session, one route decision at a time. The read of the pin, the decision
+	// and the write of the pin are one logical operation: a release that lands
+	// between them would be undone by the write, and two concurrent decisions for
+	// one session could each pin a different route. The lock is per session, so it
+	// costs nothing to unrelated traffic.
+	decision, err := s.routeSession(r.Context(), req)
 	if err != nil {
-		s.log.ErrorContext(r.Context(), "load routing state", "error", err)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "routing state unavailable", true)
-		return
-	}
-	if err := s.applyReleased(r.Context(), &state, req.SessionID); err != nil {
-		s.log.ErrorContext(r.Context(), "apply session release", "error", err, "session_id", req.SessionID)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "routing state unavailable", true)
-		return
-	}
-
-	decision := s.selector.Select(req, state)
-
-	if err := s.persistDecision(r.Context(), decision); err != nil {
-		s.log.ErrorContext(r.Context(), "persist routing decision", "error", err, "decision_id", decision.DecisionID)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "routing decision audit persistence failed", true)
+		s.log.ErrorContext(r.Context(), "route session", "error", err, "session_id", req.SessionID)
+		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, err.Error(), true)
 		return
 	}
 
@@ -490,15 +475,17 @@ func statusWindows(ws []quota.Window) []statusWindow {
 	return out
 }
 
-// Session release ends one agent session's route use. It is idempotent by design:
-// repeating it rewrites the same marker instead of failing, and it never touches
-// quota or health state.
+// Session release ends one agent session's route use: the pin is deleted, so the
+// next decision for that session starts from the normal candidate set. Deleting
+// an absent pin is not an error, which is what makes a repeat release safe. It
+// never touches quota or health state, and it reports whether a pin was actually
+// there, because "released" and "nothing to release" are different answers.
 func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 	if !s.authorized(r) {
 		s.writeError(w, r, http.StatusUnauthorized, errorCodeUnauthorized, "invalid or missing bearer token", false)
 		return
 	}
-	if s.releases == nil {
+	if s.store == nil {
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "session release store unavailable", true)
 		return
 	}
@@ -511,12 +498,24 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, errorCodeInvalidRequest, "session_id must be at most 256 bytes", false)
 		return
 	}
-	if err := s.releases.SaveControllerState(r.Context(), releaseKeyPrefix+id, "released", time.Now().UTC()); err != nil {
+	// The same lock selection takes: without it a decision that read the pin just
+	// before this delete could write it back and silently undo the release.
+	unlock := s.sessions.lock(id)
+	defer unlock()
+
+	pin, released, err := s.deleteAffinity(r.Context(), id)
+	if err != nil {
 		s.log.ErrorContext(r.Context(), "release session", "error", err, "session_id", id)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "session release could not be stored", true)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "released"})
+	resp := map[string]string{"status": "released"}
+	if released {
+		// Naming the route that was released is what lets a caller tell which of
+		// its sessions actually moved; it is not a credential or a prompt.
+		resp["released_alias"] = pin.Alias
+	}
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // handleFallback answers requests that no registered route owns. An unknown
@@ -553,30 +552,57 @@ func isMaxBytesError(err error) bool {
 	return errors.As(err, &maxErr)
 }
 
-// applyReleased honours a recorded session release. A released session must not
-// retain the route it was pinned to, so retained affinity is dropped and the next
-// decision starts from the normal candidate set.
-func (s *Server) applyReleased(ctx context.Context, state *routing.SelectState, sessionID string) error {
-	if s.store == nil {
-		return fmt.Errorf("routing state store unavailable")
-	}
-	value, ok, err := s.store.ControllerState(ctx, releaseKeyPrefix+sessionID)
+// deleteAffinity removes a session's pin and reports the route that was there, so
+// a caller learns which session actually moved. An absent pin is not an error.
+func (s *Server) deleteAffinity(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error) {
+	pin, ok, err := s.store.SessionAffinity(ctx, sessionID)
 	if err != nil {
-		return err
+		return store.SessionAffinity{}, false, err
 	}
-	if ok && value == releaseValueReleased {
-		state.Affinity = nil
+	if err := s.store.DeleteSessionAffinity(ctx, sessionID); err != nil {
+		return store.SessionAffinity{}, false, err
 	}
-	return nil
+	return pin, ok, nil
 }
 
-func (s *Server) loadSelectState(ctx context.Context) (routing.SelectState, error) {
+// routeSession performs the whole session-routing operation under the session's
+// lock: read state, decide, audit the decision, pin the route. It returns the
+// error the caller should report, so each failure keeps its own message.
+func (s *Server) routeSession(ctx context.Context, req routing.RouteRequest) (routing.Decision, error) {
+	unlock := s.sessions.lock(req.SessionID)
+	defer unlock()
+
+	state, err := s.loadSelectState(ctx, req.SessionID)
+	if err != nil {
+		return routing.Decision{}, errors.New("routing state unavailable")
+	}
+	decision := s.selector.Select(req, state)
+	if err := s.persistDecision(ctx, decision); err != nil {
+		return routing.Decision{}, errors.New("routing decision audit persistence failed")
+	}
+	// The pin is written after the decision is audited: a decision that cannot be
+	// stored is not returned as success, and a route that was never recorded must
+	// not persist as the session's. This is a deliberate two-write sequence, not
+	// one transaction: the audit log records what was decided, the pin records
+	// what will be used, and a failure here leaves a decision that was reported as
+	// failed. Every decision with a route writes the pin, including one that just
+	// kept it, so the TTL is measured from the last use and an active session does
+	// not lose its route while it is still being used.
+	if err := s.pinAffinity(ctx, req.SessionID, decision, state.Now); err != nil {
+		return routing.Decision{}, errors.New("session affinity could not be stored")
+	}
+	return decision, nil
+}
+
+// loadSelectState reads what selection needs for one session: quota and health
+// observations plus that session's route pin, if it has a live one. An expired
+// pin is dropped here as well as in the selector, so the decision explanation
+// and the stored state agree on what the session is pinned to. Performance
+// tie-breaks are implemented in the selector but no observation store feeds them
+// yet; they stay unused rather than being loaded from nothing.
+func (s *Server) loadSelectState(ctx context.Context, sessionID string) (routing.SelectState, error) {
 	now := time.Now().UTC()
 	freshness := staleAfter(s.cfg.Polling.Interval)
-	// HTTP integration currently loads quota and health observations only.
-	// Session affinity and performance ranking are supported by the selector,
-	// but their state providers/persistence are not wired into this endpoint yet;
-	// until then, HTTP selection does not apply affinity or performance tie-breaks.
 	state := routing.SelectState{
 		Now:          now,
 		Quota:        map[string]quota.Snapshot{},
@@ -601,7 +627,34 @@ func (s *Server) loadSelectState(ctx context.Context) (routing.SelectState, erro
 	for _, h := range health {
 		state.Health[h.Provider] = providerStateFromStore(h)
 	}
+	pin, ok, err := s.store.SessionAffinity(ctx, sessionID)
+	if err != nil {
+		return routing.SelectState{}, err
+	}
+	if ok && pin.ExpiresAt.After(now) {
+		state.Affinity = &routing.Affinity{SessionID: pin.SessionID, Alias: pin.Alias, ExpiresAt: pin.ExpiresAt}
+	}
 	return state, nil
+}
+
+// pinAffinity records the route the session is now on. The write is one upsert
+// and the store keeps an existing created_at, so an active session shows when its
+// pin started while updated_at and the TTL move with each decision. A decision
+// with no route pins nothing: there is no route to keep.
+func (s *Server) pinAffinity(ctx context.Context, sessionID string, d routing.Decision, now time.Time) error {
+	if s.store == nil {
+		return fmt.Errorf("routing state store unavailable")
+	}
+	if d.SelectedAlias == "" {
+		return nil
+	}
+	return s.store.SaveSessionAffinity(ctx, store.SessionAffinity{
+		SessionID: sessionID,
+		Alias:     d.SelectedAlias,
+		CreatedAt: now,
+		UpdatedAt: now,
+		ExpiresAt: now.Add(sessionAffinityTTL),
+	})
 }
 
 func staleAfter(interval time.Duration) time.Duration {

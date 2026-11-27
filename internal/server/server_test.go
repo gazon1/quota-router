@@ -87,22 +87,41 @@ func TestWrongMethodReturnsMethodNotAllowed(t *testing.T) {
 }
 
 type fakeStore struct {
-	snaps         []store.QuotaSnapshot
-	health        []store.HealthRecord
-	decisions     []store.RoutingDecisionRecord
-	snapErr       error
-	healthErr     error
-	saveErr       error
-	controller    map[string]string
-	controllerErr error
+	snaps       []store.QuotaSnapshot
+	health      []store.HealthRecord
+	decisions   []store.RoutingDecisionRecord
+	snapErr     error
+	healthErr   error
+	saveErr     error
+	affinity    map[string]store.SessionAffinity
+	affinityErr error
 }
 
-func (f *fakeStore) ControllerState(_ context.Context, key string) (string, bool, error) {
-	if f.controllerErr != nil {
-		return "", false, f.controllerErr
+func (f *fakeStore) SessionAffinity(_ context.Context, sessionID string) (store.SessionAffinity, bool, error) {
+	if f.affinityErr != nil {
+		return store.SessionAffinity{}, false, f.affinityErr
 	}
-	v, ok := f.controller[key]
-	return v, ok, nil
+	a, ok := f.affinity[sessionID]
+	return a, ok, nil
+}
+
+func (f *fakeStore) SaveSessionAffinity(_ context.Context, a store.SessionAffinity) error {
+	if f.affinityErr != nil {
+		return f.affinityErr
+	}
+	if f.affinity == nil {
+		f.affinity = map[string]store.SessionAffinity{}
+	}
+	f.affinity[a.SessionID] = a
+	return nil
+}
+
+func (f *fakeStore) DeleteSessionAffinity(_ context.Context, sessionID string) error {
+	if f.affinityErr != nil {
+		return f.affinityErr
+	}
+	delete(f.affinity, sessionID)
+	return nil
 }
 
 func (f *fakeStore) LatestQuotaSnapshot(context.Context) ([]store.QuotaSnapshot, error) {
@@ -646,38 +665,54 @@ func TestRouteAliasEndpoint(t *testing.T) {
 	}
 }
 
-// Session release ends a session's route use and must be safely repeatable.
+// Session release ends a session's route use and must be safely repeatable: the
+// pin is deleted, and releasing an unpinned session succeeds too.
 func TestReleaseEndpoint(t *testing.T) {
-	fr := &fakeReleaser{}
+	st := &fakeStore{affinity: map[string]store.SessionAffinity{
+		"sess-1": pin("sess-1", "cc-coding", time.Now().UTC()),
+	}}
 	srv := New(nil, Options{AuthToken: testToken})
-	srv.releases = fr
+	srv.store = st
 
 	w := postRelease(t, srv, testToken, "sess-1")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var body struct {
-		Status string `json:"status"`
+	type releaseBody struct {
+		Status        string `json:"status"`
+		ReleasedAlias string `json:"released_alias"`
 	}
+	var body releaseBody
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if body.Status != "released" {
 		t.Fatalf("status = %q, want released", body.Status)
 	}
-	if len(fr.keys) != 1 || fr.keys[0] != releaseKeyPrefix+"sess-1" {
-		t.Fatalf("keys = %v, want [%q]", fr.keys, releaseKeyPrefix+"sess-1")
+	if body.ReleasedAlias != "cc-coding" {
+		t.Fatalf("released_alias = %q, want the route that was let go", body.ReleasedAlias)
+	}
+	if _, ok := st.affinity["sess-1"]; ok {
+		t.Fatal("pin survived release")
 	}
 
+	// A repeat release has nothing left to delete and must still succeed.
 	w = postRelease(t, srv, testToken, "sess-1")
 	if w.Code != http.StatusOK {
 		t.Fatalf("repeat release status=%d body=%s", w.Code, w.Body.String())
+	}
+	var repeat releaseBody
+	if err := json.Unmarshal(w.Body.Bytes(), &repeat); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if repeat.ReleasedAlias != "" {
+		t.Fatalf("released_alias = %q on a repeat release, want empty", repeat.ReleasedAlias)
 	}
 }
 
 func TestReleaseEndpointValidation(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken})
-	srv.releases = &fakeReleaser{}
+	srv.store = &fakeStore{}
 
 	if w := postRelease(t, srv, testToken, strings.Repeat("s", maxSessionIDLength+1)); w.Code != http.StatusBadRequest {
 		t.Fatalf("long session id status=%d body=%s", w.Code, w.Body.String())
@@ -690,68 +725,204 @@ func TestReleaseEndpointValidation(t *testing.T) {
 	}
 }
 
-func TestReleaseEndpointUnavailableWithoutReleaser(t *testing.T) {
+func TestReleaseEndpointUnavailableWithoutStore(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken})
 	if w := postRelease(t, srv, testToken, "sess-1"); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
-// A released session must not keep its retained affinity: the selection path
-// reads the release marker and drops the session's affinity.
-func TestApplyReleasedClearsAffinity(t *testing.T) {
-	ctx := context.Background()
+func TestReleaseEndpointUnavailableOnStoreError(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken})
-	srv.store = &fakeStore{controller: map[string]string{releaseKeyPrefix + "sess-1": releaseValueReleased}}
-
-	state := routing.SelectState{Affinity: &routing.Affinity{SessionID: "sess-1", Alias: "cc-coding"}}
-	if err := srv.applyReleased(ctx, &state, "sess-1"); err != nil {
-		t.Fatalf("applyReleased released session: %v", err)
-	}
-	if state.Affinity != nil {
-		t.Fatalf("affinity for released session = %+v, want nil", state.Affinity)
-	}
-
-	state = routing.SelectState{Affinity: &routing.Affinity{SessionID: "sess-2", Alias: "cc-coding"}}
-	if err := srv.applyReleased(ctx, &state, "sess-2"); err != nil {
-		t.Fatalf("applyReleased live session: %v", err)
-	}
-	if state.Affinity == nil {
-		t.Fatal("affinity for a live session must be kept")
+	srv.store = &fakeStore{affinityErr: context.DeadlineExceeded}
+	if w := postRelease(t, srv, testToken, "sess-1"); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
+// A released session must not keep its retained affinity: release deletes the
+// pin, so the next selection starts from the full candidate set.
 func TestSelectEndpointHonorsSessionRelease(t *testing.T) {
 	cfg := testRoutingConfig()
 	st := &fakeStore{
-		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
-		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
-		controller: map[string]string{
-			releaseKeyPrefix + "sess-1": releaseValueReleased,
-		},
+		snaps:    []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health:   []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "mm-fast", time.Now().UTC())},
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
 
-	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
+	// Pinned to mm-fast, which the configured priority would not pick.
+	if got := selectAlias(t, srv, "sess-1"); got != "mm-fast" {
+		t.Fatalf("pinned alias = %q, want mm-fast", got)
+	}
+
+	if w := postRelease(t, srv, testRoutingToken, "sess-1"); w.Code != http.StatusOK {
+		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
+		t.Fatalf("alias after release = %q, want the normally selected cc-coding", got)
+	}
+}
+
+// pin builds a stored affinity row the way the selection path writes one.
+func pin(sessionID, alias string, now time.Time) store.SessionAffinity {
+	return store.SessionAffinity{SessionID: sessionID, Alias: alias, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(sessionAffinityTTL)}
+}
+
+// selectAlias runs one route decision and returns the selected alias.
+func selectAlias(t *testing.T, srv *Server, sessionID string) string {
+	t.Helper()
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"`+sessionID+`","capabilities":{}}`)
 	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("select status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Decision routing.Decision `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp.Decision.SelectedAlias
+}
+
+func affinityServer(t *testing.T, st *fakeStore) *Server {
+	t.Helper()
+	cfg := testRoutingConfig()
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+	srv.decisions = st
+	srv.selector = routing.Selector{Config: cfg}
+	return srv
+}
+
+// The first decision pins the session; every later one keeps that route even
+// when the configured priority would pick another, which is the whole point of
+// affinity.
+func TestSelectPinsAndKeepsTheRoute(t *testing.T) {
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+	}
+	srv := affinityServer(t, st)
+
+	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
+		t.Fatalf("first selection = %q, want the ranked cc-coding", got)
+	}
+	stored, ok := st.affinity["sess-1"]
+	if !ok {
+		t.Fatal("first selection did not persist a pin")
+	}
+	if stored.Alias != "cc-coding" {
+		t.Fatalf("stored alias = %q, want cc-coding", stored.Alias)
+	}
+	if !stored.ExpiresAt.After(stored.UpdatedAt) {
+		t.Fatalf("stored pin expires %s, not after its update %s", stored.ExpiresAt, stored.UpdatedAt)
+	}
+
+	// The pinned route's quota observation goes stale. That says nothing about the
+	// route, so the session keeps it; an unpinned session, seeing the same state,
+	// is routed to the other provider.
+	stale := quotaSnap("commandcode", store.QuotaAvailable, 80)
+	stale.ObservedAt = time.Now().UTC().Add(-time.Hour)
+	st.snaps = []store.QuotaSnapshot{stale, quotaSnap("minimax", store.QuotaAvailable, 80)}
+	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
+		t.Fatalf("selection through a transient exclusion = %q, want the held cc-coding", got)
+	}
+	if got := selectAlias(t, srv, "sess-2"); got != "mm-fast" {
+		t.Fatalf("unpinned session = %q, want mm-fast", got)
+	}
+
+	// Exhausted quota is durable: the route is really gone, so the session moves.
+	st.snaps = []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaExhausted, 0), quotaSnap("minimax", store.QuotaAvailable, 80)}
+	if got := selectAlias(t, srv, "sess-1"); got != "mm-fast" {
+		t.Fatalf("selection after the pinned route was exhausted = %q, want mm-fast", got)
+	}
+	if got := st.affinity["sess-1"].Alias; got != "mm-fast" {
+		t.Fatalf("stored alias after the move = %q, want mm-fast", got)
 	}
 }
 
-type fakeReleaser struct {
-	err  error
-	keys []string
+// A stored pin that has expired must not decide anything: the session is
+// re-evaluated, and the new route becomes its pin.
+func TestSelectExpiredPinReevaluatesAndRepins(t *testing.T) {
+	now := time.Now().UTC()
+	st := &fakeStore{
+		snaps:    []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health:   []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "mm-fast", now.Add(-2*sessionAffinityTTL))},
+	}
+	srv := affinityServer(t, st)
+	// pin() computed its expiry from the old now, so it is already past.
+	if st.affinity["sess-1"].ExpiresAt.After(now) {
+		t.Fatal("fixture pin is not expired")
+	}
+
+	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
+		t.Fatalf("expired pin selected %q, want a fresh cc-coding", got)
+	}
+	if got := st.affinity["sess-1"].Alias; got != "cc-coding" {
+		t.Fatalf("stored alias after re-pin = %q, want cc-coding", got)
+	}
+	if !st.affinity["sess-1"].ExpiresAt.After(now) {
+		t.Fatal("re-pin did not renew the expiry")
+	}
 }
 
-func (f *fakeReleaser) SaveControllerState(_ context.Context, key, _ string, _ time.Time) error {
-	if f.err != nil {
-		return f.err
+// A manual override is the caller asking for another route, so it must re-pin
+// instead of being refused by the pin it is replacing.
+func TestSelectOverrideRepinsSession(t *testing.T) {
+	now := time.Now().UTC()
+	st := &fakeStore{
+		snaps:    []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health:   []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "cc-coding", now)},
 	}
-	f.keys = append(f.keys, key)
-	return nil
+	srv := affinityServer(t, st)
+
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{},"override":{"model_alias":"mm-fast"}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("override status=%d body=%s", w.Code, w.Body.String())
+	}
+	if got := st.affinity["sess-1"].Alias; got != "mm-fast" {
+		t.Fatalf("stored alias after override = %q, want mm-fast", got)
+	}
+	// And the next plain request stays on the overridden route.
+	if got := selectAlias(t, srv, "sess-1"); got != "mm-fast" {
+		t.Fatalf("selection after override = %q, want mm-fast", got)
+	}
+}
+
+// An affinity write that fails must not let the caller believe the route stuck.
+func TestSelectFailsWhenAffinityCannotBeStored(t *testing.T) {
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+	}
+	srv := affinityServer(t, st)
+	st.affinityErr = context.DeadlineExceeded
+
+	if w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503 when the pin cannot be stored", w.Code, w.Body.String())
+	}
+}
+
+// A decision with no eligible route pins nothing: there is no route to keep.
+func TestSelectWithoutCandidatePinsNothing(t *testing.T) {
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaExhausted, 0)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+	}
+	srv := affinityServer(t, st)
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409", w.Code, w.Body.String())
+	}
+	if len(st.affinity) != 0 {
+		t.Fatalf("affinity = %+v, want none pinned without a route", st.affinity)
+	}
 }
 
 var _ = bytes.NewBuffer

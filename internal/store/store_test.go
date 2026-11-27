@@ -42,8 +42,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 5 {
-		t.Fatalf("version = %d, want 5", v)
+	if v != 6 {
+		t.Fatalf("version = %d, want 6", v)
 	}
 
 	// A restart must not re-apply or fail: this is the existing-database path.
@@ -60,7 +60,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err := again.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate after restart: %v", err)
 	}
-	for _, table := range []string{"quota_snapshots", "quota_windows", "usage_records", "provider_health", "controller_state", "poll_state", "routing_decisions"} {
+	for _, table := range []string{"quota_snapshots", "quota_windows", "usage_records", "provider_health", "controller_state", "poll_state", "routing_decisions", "session_affinity"} {
 		var name string
 		if err := again.db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
 			t.Errorf("table %s missing after restart: %v", table, err)
@@ -1215,8 +1215,8 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 5 {
-		t.Fatalf("version = %d, want 5", v)
+	if v != 6 {
+		t.Fatalf("version = %d, want 6", v)
 	}
 	var applied int
 	if err := first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied); err != nil {
@@ -1432,5 +1432,139 @@ func TestPollStateTracksAttemptAndSuccessSeparately(t *testing.T) {
 	}
 	if err := s.SavePollState(ctx, "minimax", time.Time{}, later); err == nil {
 		t.Fatal("SavePollState accepted a zero attempt time")
+	}
+}
+
+// A pin must survive a restart with its timestamps intact: that is what makes
+// affinity something a controller can lose its process on and still honour.
+func TestSessionAffinitySurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	s, path := openMigrated(t)
+	created := time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)
+	pin := SessionAffinity{SessionID: "sess-1", Alias: "cc-coding", CreatedAt: created, UpdatedAt: created.Add(time.Hour), ExpiresAt: created.Add(25 * time.Hour)}
+	if err := s.SaveSessionAffinity(ctx, pin); err != nil {
+		t.Fatalf("SaveSessionAffinity: %v", err)
+	}
+	s.Close()
+
+	reopened, err := Open(Config{Path: path, BusyTimeout: 5 * time.Second}, testLog())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate after restart: %v", err)
+	}
+	got, ok, err := reopened.SessionAffinity(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("SessionAffinity: %v", err)
+	}
+	if !ok {
+		t.Fatal("pin lost across restart")
+	}
+	if got != pin {
+		t.Fatalf("pin = %+v after restart, want %+v", got, pin)
+	}
+}
+
+// A re-pin moves the route and the timestamps a re-pin owns, but not when the
+// session was first pinned.
+func TestSessionAffinityRepinKeepsCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	created := time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)
+	first := SessionAffinity{SessionID: "sess-1", Alias: "cc-coding", CreatedAt: created, UpdatedAt: created, ExpiresAt: created.Add(time.Hour)}
+	if err := s.SaveSessionAffinity(ctx, first); err != nil {
+		t.Fatalf("SaveSessionAffinity: %v", err)
+	}
+	second := SessionAffinity{SessionID: "sess-1", Alias: "mm-fast", CreatedAt: created, UpdatedAt: created.Add(30 * time.Minute), ExpiresAt: created.Add(2 * time.Hour)}
+	if err := s.SaveSessionAffinity(ctx, second); err != nil {
+		t.Fatalf("re-pin: %v", err)
+	}
+	got, ok, err := s.SessionAffinity(ctx, "sess-1")
+	if err != nil || !ok {
+		t.Fatalf("SessionAffinity = ok:%v err:%v", ok, err)
+	}
+	if got.Alias != "mm-fast" || !got.UpdatedAt.Equal(second.UpdatedAt) || !got.ExpiresAt.Equal(second.ExpiresAt) {
+		t.Fatalf("pin = %+v, want the re-pinned values %+v", got, second)
+	}
+	if !got.CreatedAt.Equal(created) {
+		t.Fatalf("created_at = %s, want the original %s", got.CreatedAt, created)
+	}
+}
+
+// Release deletes the pin and is repeatable: a session that was never pinned, or
+// already released, is not an error.
+func TestSessionAffinityDeleteIsRepeatable(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	now := time.Now().UTC()
+	if err := s.DeleteSessionAffinity(ctx, "never-pinned"); err != nil {
+		t.Fatalf("DeleteSessionAffinity on an unpinned session: %v", err)
+	}
+	if err := s.SaveSessionAffinity(ctx, SessionAffinity{SessionID: "sess-1", Alias: "cc-coding", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("SaveSessionAffinity: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := s.DeleteSessionAffinity(ctx, "sess-1"); err != nil {
+			t.Fatalf("DeleteSessionAffinity #%d: %v", i+1, err)
+		}
+	}
+	if _, ok, err := s.SessionAffinity(ctx, "sess-1"); err != nil || ok {
+		t.Fatalf("pin still readable after release: ok=%v err=%v", ok, err)
+	}
+}
+
+// Validation refuses a row that could not be honoured: no session, no route,
+// missing timestamps, or an expiry that is not in the row's own future.
+func TestSessionAffinityValidation(t *testing.T) {
+	now := time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)
+	good := SessionAffinity{SessionID: "s", Alias: "a", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("valid row refused: %v", err)
+	}
+	for _, bad := range []SessionAffinity{
+		{SessionID: "", Alias: "a", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)},
+		{SessionID: "s", Alias: "", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)},
+		{SessionID: "s", Alias: "a", CreatedAt: now, UpdatedAt: now},
+		{SessionID: "s", Alias: "a", CreatedAt: now, UpdatedAt: now, ExpiresAt: now},
+		{SessionID: "s", Alias: "a", CreatedAt: now, UpdatedAt: now.Add(time.Hour), ExpiresAt: now.Add(30 * time.Minute)},
+		{SessionID: "s", Alias: "a", CreatedAt: now, UpdatedAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)},
+	} {
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("invalid row accepted: %+v", bad)
+		}
+	}
+	s, _ := openMigrated(t)
+	if err := s.SaveSessionAffinity(context.Background(), SessionAffinity{SessionID: "s"}); err == nil {
+		t.Fatal("SaveSessionAffinity accepted an invalid row")
+	}
+}
+
+// Expired pins are routing state whose TTL already ran out, so a retention run
+// removes them even when every configured age is zero, and a live pin survives.
+func TestPruneRemovesExpiredAffinityOnly(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	now := time.Date(2026, 11, 27, 9, 0, 0, 0, time.UTC)
+	old := SessionAffinity{SessionID: "old", Alias: "cc-coding", CreatedAt: now.Add(-48 * time.Hour), UpdatedAt: now.Add(-48 * time.Hour), ExpiresAt: now.Add(-24 * time.Hour)}
+	live := SessionAffinity{SessionID: "live", Alias: "mm-fast", CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	for _, p := range []SessionAffinity{old, live} {
+		if err := s.SaveSessionAffinity(ctx, p); err != nil {
+			t.Fatalf("SaveSessionAffinity: %v", err)
+		}
+	}
+	deleted, err := s.Prune(ctx, Retention{}, now)
+	if err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if deleted["session_affinity"] != 1 {
+		t.Fatalf("deleted session_affinity = %d, want 1", deleted["session_affinity"])
+	}
+	if _, ok, _ := s.SessionAffinity(ctx, "old"); ok {
+		t.Fatal("expired pin survived retention")
+	}
+	if _, ok, err := s.SessionAffinity(ctx, "live"); err != nil || !ok {
+		t.Fatalf("live pin removed: ok=%v err=%v", ok, err)
 	}
 }
