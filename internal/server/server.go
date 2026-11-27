@@ -103,16 +103,28 @@ func (s *Server) writeJSONError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
 }
 
+const maxSelectBody = 64 << 10
+
 type selectResponse struct {
 	Decision routing.Decision `json:"decision"`
 }
 
 func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		s.writeJSONError(w, http.StatusUnauthorized, "invalid or missing bearer token")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxSelectBody)
 	var req routing.RouteRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		s.writeJSONError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if err := req.Validate(); err != nil {
+		s.writeJSONError(w, http.StatusBadRequest, "invalid routing request: "+err.Error())
 		return
 	}
 
@@ -139,6 +151,10 @@ func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
+	if !s.authorized(r) {
+		s.writeJSONError(w, http.StatusUnauthorized, "invalid or missing bearer token")
+		return
+	}
 	if s.decisions == nil {
 		s.writeJSONError(w, http.StatusServiceUnavailable, "decision store unavailable")
 		return

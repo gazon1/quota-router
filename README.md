@@ -89,8 +89,12 @@ request contract: required capabilities, session ID, optional task class,
 optional request-level preference, and optional explicit manual override with
 bounded semantics. A routing request is an explicit decision boundary, not an
 instruction to switch models after every agent message. Selection/eligibility
-lives in #17; operator-configured priority lives in #53. See
-[docs/routing-request.md](./docs/routing-request.md).
+lives in #17; operator-configured priority lives in #53.
+
+HTTP endpoints: `POST /v1/routing/select` and `GET /v1/routing/decisions`
+require the configured bearer token. Invalid requests return `400`; valid requests
+with no eligible model return `409`; audit persistence or state failures return
+`503`. See [docs/routing-request.md](./docs/routing-request.md).
 
 ## Routing priorities
 

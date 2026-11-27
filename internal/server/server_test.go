@@ -109,21 +109,32 @@ func healthRec(provider string, state store.HealthState) store.HealthRecord {
 	return store.HealthRecord{Provider: provider, State: state, ObservedAt: time.Now().UTC()}
 }
 
+const testRoutingToken = "secret-token"
+
+func postSelect(t *testing.T, srv *Server, token, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
 func TestSelectEndpoint(t *testing.T) {
 	cfg := testRoutingConfig()
 	st := &fakeStore{
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, Options{Config: cfg})
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{"tool_calling":true},"task_class":"coding"}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	w := postSelect(t, srv, testRoutingToken, body)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
@@ -154,15 +165,13 @@ func TestSelectEndpointNoEligible(t *testing.T) {
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaExhausted, 0), quotaSnap("minimax", store.QuotaExhausted, 0)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, Options{Config: cfg})
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	w := postSelect(t, srv, testRoutingToken, body)
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -186,27 +195,20 @@ func TestSelectEndpointInvalidVersion(t *testing.T) {
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, Options{Config: cfg})
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
-	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(`{"version":2,"session_id":"s1","capabilities":{}}`))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusConflict {
+	w := postSelect(t, srv, testRoutingToken, `{"version":2,"session_id":"s1","capabilities":{}}`)
+	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
-	var resp struct {
-		Decision routing.Decision `json:"decision"`
-	}
+	var resp map[string]string
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Decision.SelectedAlias != "" {
-		t.Fatalf("selected=%q", resp.Decision.SelectedAlias)
-	}
-	if len(resp.Decision.Reasons) == 0 || !strings.Contains(resp.Decision.Reasons[0], "request invalid") {
-		t.Fatalf("reasons=%v", resp.Decision.Reasons)
+	if !strings.Contains(resp["error"], "invalid routing request") {
+		t.Fatalf("error=%q", resp["error"])
 	}
 }
 
@@ -217,15 +219,13 @@ func TestSelectEndpointPersistenceFailure(t *testing.T) {
 		health:  []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 		saveErr: context.DeadlineExceeded,
 	}
-	srv := New(nil, Options{Config: cfg})
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	w := postSelect(t, srv, testRoutingToken, body)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -237,20 +237,19 @@ func TestDecisionsEndpoint(t *testing.T) {
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, Options{Config: cfg})
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
-	r := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(body))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
+	w := postSelect(t, srv, testRoutingToken, body)
 	if w.Code != http.StatusOK {
 		t.Fatalf("select status=%d body=%s", w.Code, w.Body.String())
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/routing/decisions", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w2, req)
 	if w2.Code != http.StatusOK {
@@ -270,35 +269,100 @@ func TestDecisionsEndpoint(t *testing.T) {
 func TestSelectEndpointStateLoadError(t *testing.T) {
 	cfg := testRoutingConfig()
 	st := &fakeStore{snapErr: context.DeadlineExceeded}
-	srv := New(nil, Options{Config: cfg})
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(`{"version":1,"session_id":"s1","capabilities":{}}`))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
 func TestSelectEndpointInvalidJSON(t *testing.T) {
-	srv := New(nil, Options{Config: testRoutingConfig()})
-	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(`{`))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
+	w := postSelect(t, srv, testRoutingToken, `{`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 
 func TestSelectEndpointRejectsUnknownField(t *testing.T) {
-	srv := New(nil, Options{Config: testRoutingConfig()})
+	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
 	srv.selector = routing.Selector{Config: testRoutingConfig()}
-	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(`{"version":1,"session_id":"s1","capabilities":{},"unknown":true}`))
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{},"unknown":true}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestSelectEndpointRequiresAuth(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+	srv.decisions = st
+	srv.selector = routing.Selector{Config: cfg}
+	body := `{"version":1,"session_id":"s1","capabilities":{}}`
+
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  int
+	}{
+		{"missing token", "", http.StatusUnauthorized},
+		{"wrong token", "wrong", http.StatusUnauthorized},
+		{"valid token", testRoutingToken, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := postSelect(t, srv, tc.token, body)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestDecisionsEndpointRequiresAuth(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+	srv.decisions = st
+
+	for _, tc := range []struct {
+		name  string
+		token string
+		want  int
+	}{
+		{"missing token", "", http.StatusUnauthorized},
+		{"wrong token", "wrong", http.StatusUnauthorized},
+		{"valid token", testRoutingToken, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/routing/decisions", nil)
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestSelectEndpointBodyLimit(t *testing.T) {
+	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
+	srv.store = &fakeStore{}
+	srv.decisions = &fakeStore{}
+	huge := `{"version":1,"session_id":"s1","capabilities":{},"task_class":"` + strings.Repeat("x", maxSelectBody) + `"}`
+	w := postSelect(t, srv, testRoutingToken, huge)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
