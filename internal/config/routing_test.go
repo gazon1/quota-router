@@ -295,3 +295,79 @@ routing:
 		t.Fatalf("error %q missing provider p2", err)
 	}
 }
+
+func TestLoadRoutingProviderModelFromEnvHyphenatedAlias(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FREE-CODING__MODEL", "commandcode/stealth/glyph-cluster:free")
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST__MODEL", "minimax/MiniMax-M2.7")
+	// Literal hyphens in env var names are supported and map to hyphenated aliases.
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__PRIORITY", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE-CODING", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__PRIORITY", "2")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__MODELS__FAST", "1")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Routing.Providers["commandcode"].Models["free-coding"]; got != 1 {
+		t.Fatalf("commandcode free-coding priority = %d, want 1; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
+	}
+}
+
+func TestLoadRoutingProviderModelFromEnvUnderscoreAliasNormalized(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FREE-CODING__MODEL", "commandcode/stealth/glyph-cluster:free")
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST__MODEL", "minimax/MiniMax-M2.7")
+	// Common env-var convention uses underscores; normalize only when the
+	// hyphenated form is a known catalogue alias and the underscore form is not.
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__PRIORITY", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_CODING", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__PRIORITY", "2")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__MODELS__FAST", "1")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Routing.Providers["commandcode"].Models["free-coding"]; got != 1 {
+		t.Fatalf("commandcode free-coding priority = %d, want 1; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
+	}
+	if _, ok := cfg.Routing.Providers["commandcode"].Models["free_coding"]; ok {
+		t.Fatalf("underscore key should have been normalized; models=%v", cfg.Routing.Providers["commandcode"].Models)
+	}
+}
+
+func TestLoadRoutingProviderModelEnvNoAmbiguousNormalize(t *testing.T) {
+	cleanEnv(t)
+	// Both forms exist as catalogue aliases - no silent normalization.
+	t.Setenv(ConfigFileEnv, writeConfig(t, `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+    free_coding:
+      model: commandcode/other:free
+routing:
+  providers:
+    commandcode:
+      priority: 1
+      models:
+        free-coding: 1
+        free_coding: 2
+`))
+	// Env override targets the underscore alias literally via exact key.
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_CODING", "3")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	// free_coding is a real alias, so env sets it directly; free-coding stays 1.
+	if got := cfg.Routing.Providers["commandcode"].Models["free_coding"]; got != 3 {
+		t.Fatalf("free_coding priority = %d, want 3; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
+	}
+	if got := cfg.Routing.Providers["commandcode"].Models["free-coding"]; got != 1 {
+		t.Fatalf("free-coding priority = %d, want 1; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
+	}
+}

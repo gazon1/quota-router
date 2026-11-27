@@ -68,13 +68,18 @@ Environment variables override file values, same as other config (#7):
 
 ```sh
 QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__PRIORITY=1
-QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_CODING=1
+QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE-CODING=1
 QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__PRIORITY=2
 QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__MODELS__FAST=1
 ```
 
-`__` separates nesting levels; the alias/provider segment is the map key as written
-after the prefix.
+`__` separates nesting levels. For map-key segments such as provider names and
+catalogue aliases, literal hyphens are supported in the environment variable name
+(for example `FREE-CODING` for alias `free-coding`). In shells where `export`
+does not allow hyphens in identifiers, use underscores (`FREE_CODING`); on load,
+an underscore form is mapped to the hyphenated catalogue alias only when that
+hyphenated alias exists and the underscore form is not itself a configured
+catalogue alias. Aliases that legitimately contain underscores are not remapped.
 
 ## Validation
 
