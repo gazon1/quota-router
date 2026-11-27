@@ -139,11 +139,30 @@ type Polling struct {
 	RequestTimeout time.Duration `koanf:"request_timeout"`
 }
 
-// Routing configures the routing policy thresholds.
+// Routing configures routing thresholds and the static provider/model
+// preference order. Preference is consulted only after hard constraints and
+// viable session affinity, as defined by issue #53 and applied by #17.
 type Routing struct {
 	// LowQuotaThreshold is the remaining-quota fraction at or below which a
 	// provider counts as scarce and loses to a healthier candidate.
 	LowQuotaThreshold float64 `koanf:"low_quota_threshold"`
+	// Providers is the static preference order. Keys are provider names as they
+	// appear in model ids (<provider>/<model>). When empty, no static preference
+	// is configured. When set, every enabled catalogue alias must be listed under
+	// its provider with an explicit priority.
+	Providers map[string]ProviderRouting `koanf:"providers"`
+}
+
+// ProviderRouting orders one provider and the model aliases served by it.
+// Lower numeric priority means higher preference.
+type ProviderRouting struct {
+	// Priority is this provider's static preference rank. Must be a positive
+	// integer; lower values are preferred. Duplicate provider priorities are invalid.
+	Priority int `koanf:"priority"`
+	// Models orders catalogue aliases within this provider. Keys are catalogue
+	// aliases; values are positive integer priorities where lower is preferred.
+	// Model priority is scoped to this provider and never compared across providers.
+	Models map[string]int `koanf:"models"`
 }
 
 // SQLite configures quota snapshot persistence.
@@ -202,7 +221,10 @@ func Default() Config {
 		LiteLLM:   LiteLLM{BaseURL: "http://127.0.0.1:4000", APIKey: "", ModelAliases: map[string]Model{}},
 		Providers: map[string]Provider{},
 		Polling:   Polling{Interval: 30 * time.Second, RequestTimeout: 10 * time.Second},
-		Routing:   Routing{LowQuotaThreshold: 0.1},
+		Routing: Routing{
+			LowQuotaThreshold: 0.1,
+			Providers:         map[string]ProviderRouting{},
+		},
 		SQLite: SQLite{
 			Path:        "quota-router.db",
 			BusyTimeout: 5 * time.Second,

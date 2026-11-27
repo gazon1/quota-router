@@ -124,6 +124,7 @@ it does.
   re-check is a later change.
 - **`tasks` are a free vocabulary.** Validation rejects an empty class but not an
   unknown one, because the task vocabulary is defined in issue #16.
-- **No priority here.** Static provider and per-provider model ordering is #53,
+- **Static priority is configured separately.** Provider and per-provider model
+  ordering lives in `routing.providers` (#53, [routing-priorities.md](./routing-priorities.md));
   selection is #17. This package only answers "which aliases may serve this
   request".
