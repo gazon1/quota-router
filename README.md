@@ -29,6 +29,13 @@ The server listens on `:8080` by default and exposes:
 The full controller API contract — endpoints, error envelope, status-code
 mapping — lives in [docs/api.md](./docs/api.md).
 
+[internal/agent](./internal/agent) is the agent-side client for the same
+contract: ask for a route, call LiteLLM directly with the returned alias, report
+the attempt. Only task metadata and a session id reach the controller; the prompt
+and the stream go straight to the proxy. A controller outage fails closed unless
+an operator-configured manual route is set. See
+[docs/agent-integration.md](./docs/agent-integration.md).
+
 ## Domain model
 
 [internal/quota](./internal/quota) defines three signals that are deliberately
