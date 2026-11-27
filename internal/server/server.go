@@ -145,11 +145,13 @@ func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadSelectState(ctx context.Context) (routing.SelectState, error) {
 	now := time.Now().UTC()
+	freshness := staleAfter(s.cfg.Polling.Interval)
 	state := routing.SelectState{
-		Now:         now,
-		Quota:       map[string]quota.Snapshot{},
-		Health:      map[string]quota.ProviderState{},
-		QuotaMaxAge: staleAfter(s.cfg.Polling.Interval),
+		Now:          now,
+		Quota:        map[string]quota.Snapshot{},
+		Health:       map[string]quota.ProviderState{},
+		QuotaMaxAge:  freshness,
+		HealthMaxAge: freshness,
 	}
 	if s.store == nil {
 		return state, nil

@@ -114,16 +114,18 @@ type Selector struct {
 
 // Select chooses a viable model alias for req. The decision is deterministic
 // for identical inputs, state, and policy version.
-// DefaultQuotaMaxAge is used when SelectState.QuotaMaxAge is not set. It keeps
-// selection conservative without requiring every caller to plumb polling config.
-// Snapshots marked stale or dated implausibly in the future are still rejected
-// by quota.Snapshot.StateAt.
+// DefaultQuotaMaxAge is used only when SelectState.QuotaMaxAge is not set.
+// Callers should pass an explicit freshness bound derived from polling config;
+// the fallback is conservative for direct selector use in tests/tools.
 const DefaultQuotaMaxAge = 24 * time.Hour
 
 func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	state.Now = normalizeNow(state.Now)
 	if state.QuotaMaxAge <= 0 {
 		state.QuotaMaxAge = DefaultQuotaMaxAge
+	}
+	if state.HealthMaxAge <= 0 {
+		state.HealthMaxAge = state.QuotaMaxAge
 	}
 	d := Decision{
 		Request:           req,
@@ -132,7 +134,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	}
 	if err := req.Validate(); err != nil {
 		d.Reasons = []string{fmt.Sprintf("request invalid: %v", err)}
-		d.DecisionID = decisionID(req, state, d)
+		d.DecisionID = decisionID(req, state, d, s.Config)
 		return d
 	}
 
@@ -170,7 +172,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 				d.ConfiguredPriority = &cp
 			}
 			d.recordStage("manual_override", []candidate{selected}, overrideEliminations(candidates, target), "manual override applied after hard constraints")
-			d.DecisionID = decisionID(req, state, d)
+			d.DecisionID = decisionID(req, state, d, s.Config)
 			return d
 		}
 		d.Reasons = append(d.Reasons, fmt.Sprintf("manual override %q rejected: target is not eligible after hard constraints", target))
@@ -186,7 +188,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 			d.ConfiguredPriority = &cp
 		}
 		d.recordStage("session_affinity", []candidate{selected}, affinityEliminations(candidates, selected.Alias), "affinity retained")
-		d.DecisionID = decisionID(req, state, d)
+		d.DecisionID = decisionID(req, state, d, s.Config)
 		return d
 	}
 	d.recordStage("session_affinity", candidates, nil, "no viable affinity match")
@@ -194,7 +196,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	ranked, prefInfluenced, perfInfluenced, rankReasons := s.rankCandidates(candidates, req, state)
 	if len(ranked) == 0 {
 		d.Reasons = append(d.Reasons, "no eligible candidate after all decision stages")
-		d.DecisionID = decisionID(req, state, d)
+		d.DecisionID = decisionID(req, state, d, s.Config)
 		return d
 	}
 
@@ -210,7 +212,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	d.recordStage("configured_preference", ranked, nil, "ranked by configured preference")
 	d.recordStage("performance_preference", ranked, nil, performanceStageNote(perfInfluenced))
 	d.recordStage("tie_break", ranked, nil, "stable alias ordering")
-	d.DecisionID = decisionID(req, state, d)
+	d.DecisionID = decisionID(req, state, d, s.Config)
 	return d
 }
 
@@ -228,8 +230,13 @@ type SelectState struct {
 	// Performance holds optional performance records keyed by alias.
 	Performance map[string]PerformanceRecord
 	// QuotaMaxAge bounds how old a quota snapshot may be to be acted on. Zero
-	// fails closed: quota.StateAt treats non-positive max age as unknown.
+	// fails closed: quota.StateAt treats non-positive max age as unknown. The
+	// server sets this from polling interval (3*interval); direct callers should
+	// set it explicitly.
 	QuotaMaxAge time.Duration
+	// HealthMaxAge bounds how old a provider health observation may be to be
+	// acted on. Zero defaults to QuotaMaxAge.
+	HealthMaxAge time.Duration
 	// MaxPerformanceAge bounds performance freshness. Zero disables performance
 	// influence.
 	MaxPerformanceAge time.Duration
@@ -360,6 +367,15 @@ func filterHealth(cs []candidate, cfg config.Config, state SelectState) ([]candi
 		h, ok := state.Health[c.Provider]
 		if !ok {
 			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health unknown"})
+			continue
+		}
+		if h.ObservedAt.IsZero() {
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health not observed"})
+			continue
+		}
+		age := state.Now.Sub(h.ObservedAt.UTC())
+		if age < 0 || age > state.HealthMaxAge {
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health stale"})
 			continue
 		}
 		if h.Health == quota.Unavailable {
@@ -496,7 +512,7 @@ func selectAffinity(cs []candidate, req RouteRequest, state SelectState) (candid
 	if state.Affinity == nil {
 		return candidate{}, false
 	}
-	if state.Affinity.SessionID != "" && state.Affinity.SessionID != req.SessionID {
+	if state.Affinity.SessionID == "" || state.Affinity.SessionID != req.SessionID {
 		return candidate{}, false
 	}
 	if state.Affinity.Alias == "" {
@@ -589,7 +605,7 @@ func (s Selector) rankCandidates(cs []candidate, req RouteRequest, state SelectS
 	perfInfluenced := false
 	if len(rankedList) > 1 {
 		a, b := rankedList[0], rankedList[1]
-		if a.providerRank == b.providerRank && a.modelRank == b.modelRank && a.hasPerf && (!b.hasPerf || a.perfScore < b.perfScore) {
+		if a.providerRank == b.providerRank && a.modelRank == b.modelRank && a.prefRank == b.prefRank && a.hasPerf && (!b.hasPerf || a.perfScore < b.perfScore) {
 			perfInfluenced = true
 		}
 	}
@@ -617,7 +633,11 @@ func usablePerformance(state SelectState, alias string) (PerformanceRecord, bool
 	if !ok || !rec.Fresh || !rec.Sufficient {
 		return PerformanceRecord{}, false
 	}
-	if rec.ObservedAt.IsZero() || state.Now.Sub(rec.ObservedAt.UTC()) > state.MaxPerformanceAge {
+	if rec.ObservedAt.IsZero() {
+		return PerformanceRecord{}, false
+	}
+	age := state.Now.Sub(rec.ObservedAt.UTC())
+	if age < 0 || age > state.MaxPerformanceAge {
 		return PerformanceRecord{}, false
 	}
 	return rec, true
@@ -679,7 +699,7 @@ func performanceStageNote(influenced bool) string {
 	return "performance did not override configured preference; stale/sparse data ignored"
 }
 
-func decisionID(req RouteRequest, state SelectState, d Decision) string {
+func decisionID(req RouteRequest, state SelectState, d Decision, cfg config.Config) string {
 	h := sha256.New()
 	write := func(parts ...string) {
 		for _, p := range parts {
@@ -688,6 +708,7 @@ func decisionID(req RouteRequest, state SelectState, d Decision) string {
 		}
 	}
 	write(PolicyVersion)
+	write(configFingerprint(cfg))
 	write(fmt.Sprintf("%d", req.Version), req.SessionID, string(req.TaskClass))
 	if req.Capabilities != nil {
 		write(fmt.Sprintf("%t", req.Capabilities.Streaming), fmt.Sprintf("%t", req.Capabilities.ToolCalling), fmt.Sprintf("%t", req.Capabilities.StructuredOutput))
@@ -711,6 +732,7 @@ func decisionID(req RouteRequest, state SelectState, d Decision) string {
 	}
 	write("now", state.Now.UTC().Format(time.RFC3339Nano))
 	write("quota_max_age", state.QuotaMaxAge.String())
+	write("health_max_age", state.HealthMaxAge.String())
 	write("max_perf_age", state.MaxPerformanceAge.String())
 	quotaKeys := make([]string, 0, len(state.Quota))
 	for k := range state.Quota {
@@ -743,6 +765,51 @@ func decisionID(req RouteRequest, state SelectState, d Decision) string {
 	write("selected", d.SelectedAlias, d.SelectedProvider)
 	for _, r := range d.Rejected {
 		write("rej", r.Alias, r.Provider, r.Stage, r.Reason)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:24]
+}
+
+func configFingerprint(cfg config.Config) string {
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, p := range parts {
+			_, _ = h.Write([]byte(p))
+			_, _ = h.Write([]byte{0})
+		}
+	}
+	write("routing.low_quota_threshold", fmt.Sprintf("%.17g", cfg.Routing.LowQuotaThreshold))
+	write("routing.reserve_fraction", fmt.Sprintf("%.17g", cfg.Routing.ReserveFraction))
+
+	aliasKeys := make([]string, 0, len(cfg.LiteLLM.ModelAliases))
+	for k := range cfg.LiteLLM.ModelAliases {
+		aliasKeys = append(aliasKeys, k)
+	}
+	sort.Strings(aliasKeys)
+	for _, alias := range aliasKeys {
+		m := cfg.LiteLLM.ModelAliases[alias]
+		write("model", alias, m.Model, m.Provider(), fmt.Sprintf("%t", m.IsEnabled()), fmt.Sprintf("%d", m.ContextLimit))
+		write("cap", string(m.Capabilities.Streaming), string(m.Capabilities.ToolCalling), string(m.Capabilities.StructuredOutput))
+		tasks := append([]string(nil), m.Tasks...)
+		sort.Strings(tasks)
+		write("tasks", strings.Join(tasks, ","))
+	}
+
+	providerKeys := make([]string, 0, len(cfg.Routing.Providers))
+	for k := range cfg.Routing.Providers {
+		providerKeys = append(providerKeys, k)
+	}
+	sort.Strings(providerKeys)
+	for _, p := range providerKeys {
+		rp := cfg.Routing.Providers[p]
+		write("provider", p, fmt.Sprintf("%d", rp.Priority))
+		modelKeys := make([]string, 0, len(rp.Models))
+		for k := range rp.Models {
+			modelKeys = append(modelKeys, k)
+		}
+		sort.Strings(modelKeys)
+		for _, a := range modelKeys {
+			write("provider-model", p, a, fmt.Sprintf("%d", rp.Models[a]))
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil))[:24]
 }

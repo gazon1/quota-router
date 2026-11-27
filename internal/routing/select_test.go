@@ -122,6 +122,23 @@ func TestSelectDeterministic(t *testing.T) {
 	}
 }
 
+func TestDecisionIDChangesWhenConfigChanges(t *testing.T) {
+	cfg1 := testConfig()
+	cfg2 := testConfig()
+	// Change a configured priority that does not alter the selected alias.
+	cfg2.Routing.Providers["minimax"] = config.ProviderRouting{Priority: 5, Models: map[string]int{"mm-general": 1}}
+	req := baseRequest()
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
+	d1 := (Selector{Config: cfg1}).Select(req, state)
+	d2 := (Selector{Config: cfg2}).Select(req, state)
+	if d1.SelectedAlias != "cc-coding" || d2.SelectedAlias != "cc-coding" {
+		t.Fatalf("selected aliases = %q, %q; want cc-coding, cc-coding", d1.SelectedAlias, d2.SelectedAlias)
+	}
+	if d1.DecisionID == d2.DecisionID {
+		t.Fatal("decision id should change when routing configuration changes")
+	}
+}
+
 func TestSelectNeverSelectsIneligible(t *testing.T) {
 	cfg := testConfig()
 	cfg.LiteLLM.ModelAliases["cc-coding"] = config.Model{Model: "commandcode/glyph:free", Enabled: boolPtr(false), Capabilities: cfg.LiteLLM.ModelAliases["cc-coding"].Capabilities, Tasks: cfg.LiteLLM.ModelAliases["cc-coding"].Tasks}
@@ -201,6 +218,26 @@ func TestSelectReserveForReasoningCoding(t *testing.T) {
 	d = sel.Select(routine, state)
 	if d.SelectedProvider != "commandcode" {
 		t.Fatalf("routine task should still use low-quota provider, got %+v", d)
+	}
+}
+
+func TestSelectHealthFreshness(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	h := healthyProviders(selNow, "commandcode", "minimax")
+	h["commandcode"] = quota.NewProviderState("commandcode", quota.Healthy, quota.ReasonNone, selNow.Add(-2*time.Hour))
+	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour, HealthMaxAge: time.Hour})
+	if d.SelectedProvider == "commandcode" {
+		t.Fatal("stale healthy provider selected")
+	}
+	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "provider_health" || !strings.Contains(r.Reason, "stale") {
+		t.Fatalf("rejection=%+v ok=%v", r, ok)
+	}
+
+	h["commandcode"] = quota.NewProviderState("commandcode", quota.Healthy, quota.ReasonNone, selNow.Add(2*time.Minute))
+	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour, HealthMaxAge: time.Hour})
+	if d.SelectedProvider == "commandcode" {
+		t.Fatal("future-dated healthy provider selected")
 	}
 }
 
@@ -337,6 +374,13 @@ func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
 	d = sel2.Select(baseRequest(), state)
 	if d.SelectedAlias != "cc-coding" {
 		t.Fatalf("stale performance influenced selection: %q", d.SelectedAlias)
+	}
+
+	// Future-dated performance ignored
+	state.Performance["cc-fast"] = PerformanceRecord{Alias: "cc-fast", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow.Add(2 * time.Minute)}
+	d = sel2.Select(baseRequest(), state)
+	if d.SelectedAlias != "cc-coding" {
+		t.Fatalf("future performance influenced selection: %q", d.SelectedAlias)
 	}
 
 	// Sparse performance ignored
@@ -505,6 +549,36 @@ func TestSelectRequestPreferenceBreaksEqualPriority(t *testing.T) {
 	}
 }
 
+func TestSelectPerformanceNotInfluencedWhenPreferenceDecides(t *testing.T) {
+	cfg := config.Default()
+	cfg.LiteLLM.ModelAliases = map[string]config.Model{
+		"a": {Model: "p1/m1", Enabled: boolPtr(true)},
+		"b": {Model: "p1/m2", Enabled: boolPtr(true)},
+	}
+	cfg.Routing.Providers = map[string]config.ProviderRouting{"p1": {Priority: 1, Models: map[string]int{"a": 1, "b": 1}}}
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	req.Preference = &RoutePreference{ModelAlias: "a"}
+	state := SelectState{
+		Now:               selNow,
+		Quota:             availableQuota(selNow, "p1"),
+		Health:            healthyProviders(selNow, "p1"),
+		QuotaMaxAge:       time.Hour,
+		MaxPerformanceAge: time.Hour,
+		Performance: map[string]PerformanceRecord{
+			"a": {Alias: "a", Score: 100, Fresh: true, Sufficient: true, ObservedAt: selNow},
+			"b": {Alias: "b", Score: 1, Fresh: true, Sufficient: true, ObservedAt: selNow},
+		},
+	}
+	d := sel.Select(req, state)
+	if d.SelectedAlias != "a" {
+		t.Fatalf("SelectedAlias = %q, want a", d.SelectedAlias)
+	}
+	if d.PerformanceInfluenced {
+		t.Fatal("performance should not be reported as influence when request preference decided")
+	}
+}
+
 func TestSelectAffinityDifferentSessionNoInfluence(t *testing.T) {
 	cfg := testConfig()
 	sel := Selector{Config: cfg}
@@ -517,6 +591,21 @@ func TestSelectAffinityDifferentSessionNoInfluence(t *testing.T) {
 	}
 	if d.SelectedAlias == "mm-general" {
 		t.Fatal("wrong-session affinity selected")
+	}
+}
+
+func TestSelectAffinityEmptySessionIDIgnored(t *testing.T) {
+	cfg := testConfig()
+	sel := Selector{Config: cfg}
+	req := baseRequest()
+	req.SessionID = "s1"
+	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "", Alias: "mm-general"}, QuotaMaxAge: time.Hour}
+	d := sel.Select(req, state)
+	if d.AffinityInfluenced {
+		t.Fatal("empty affinity session id should not influence selection")
+	}
+	if d.SelectedAlias == "mm-general" {
+		t.Fatal("empty affinity session id acted as wildcard")
 	}
 }
 
@@ -620,39 +709,6 @@ func TestSelectTableDrivenStages(t *testing.T) {
 
 	limit100b, rem0, used100 := 100.0, 0.0, 100.0
 	exhaustedWin := []quota.Window{{Name: "5h", Limit: &limit100b, Remaining: &rem0, Used: &used100, ResetsAt: selNow.Add(time.Hour)}}
-
-	tests := []struct {
-		name           string
-		req            RouteRequest
-		state          SelectState
-		wantAlias      string
-		wantNoSelect   bool
-		wantRejected   map[string]string // alias -> stage
-		wantAffinity   bool
-		wantPref       bool
-		wantPerf       bool
-		wantOverride   bool
-		wantOverrideOK bool
-	}{
-		{
-			name: "configuration disabled excluded",
-			req:  baseRequest(),
-			state: func() SelectState {
-				c := testConfig()
-				m := c.LiteLLM.ModelAliases["cc-coding"]
-				off := false
-				m.Enabled = &off
-				// Can't modify sel.Config here; build a local selector in test below.
-				_ = c
-				return SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
-			}(),
-			wantAlias: "mm-general", // placeholder, handled specially below
-		},
-	}
-
-	for _, tc := range tests {
-		_ = tc
-	}
 
 	// Configuration/disabled
 	{
