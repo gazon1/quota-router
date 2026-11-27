@@ -22,8 +22,43 @@ server:
 
 litellm:
   base_url: http://127.0.0.1:4000
+  # model_aliases is the model catalogue: a routing alias to the entry LiteLLM
+  # serves under that name. The model id is LiteLLM's model_name, exactly
+  # "<provider>/<model>"; the provider is its prefix and the alias is the key, so
+  # neither is repeated. Nothing is discovered at runtime, so set
+  # QUOTA_ROUTER_LITELLM__API_KEY and startup checks every id against GET
+  # /v1/models; an alias LiteLLM does not serve is then a startup error.
+  #
+  # Every field except model is optional, and an absent one claims nothing. A
+  # capability is `supported`, `unsupported`, or absent = unverified, and only
+  # an explicit `supported` satisfies a request that needs it. The values below
+  # are what docs/litellm-provider-compatibility.md actually measured, not what a
+  # provider documents: claim no more than that.
   model_aliases:
+    # Short form: the model id and nothing verified about it. Inference on this
+    # account was blocked by plan exhaustion (429/2056), so no capability and no
+    # context limit was measured for M2.7; it is therefore unusable for any
+    # request with capability requirements, and usable only as a fallback.
     fast: minimax/MiniMax-M2.7
+    # Full form: measured through LiteLLM. Chat completions, SSE streaming and
+    # tool calls returned 200; structured output was never verified, so it is
+    # unsupported rather than assumed. 256000 is the max_input_tokens value
+    # GET /v1/models reports for it.
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      context_limit: 256000
+      capabilities:
+        streaming: supported
+        tool_calling: supported
+        structured_output: unsupported
+      tasks: [coding]
+    # `enabled: false` keeps an entry configured but out of routing, for a model
+    # that is being retired or is currently out of quota. Nothing is claimed here,
+    # because only the OpenAI-shaped route was measured and this one is
+    # Anthropic-shaped (/messages).
+    retired:
+      model: commandcode/deepseek-v4.1-flash
+      enabled: false
 
 providers:
   # Provider base URLs are quota surfaces read by the Controller, never inference

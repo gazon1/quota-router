@@ -41,6 +41,18 @@ func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 	}
 	level.Set(cfg.Observability.SlogLevel())
 
+	// A configured alias the proxy does not serve cannot work at request time, so
+	// that is fatal. A proxy that is merely not answering is not: the two
+	// containers have no dependency edge and either may start first.
+	if err := cfg.VerifyCatalogue(ctx, nil); err != nil {
+		if errors.Is(err, config.ErrCatalogueUnavailable) {
+			log.Warn("model catalogue not verified; routing may hit an unknown alias", "error", err)
+		} else {
+			log.Error("model catalogue error", "error", err)
+			return 1
+		}
+	}
+
 	st, err := store.Open(store.Config{Path: cfg.SQLite.Path, BusyTimeout: cfg.SQLite.BusyTimeout}, log)
 	if err != nil {
 		log.Error("storage unavailable", "error", err)
