@@ -185,6 +185,7 @@ func TestVerifyCatalogue(t *testing.T) {
 		{"matching", `{"data":[{"id":"minimax/MiniMax-M2.7"}]}`, http.StatusOK, nil, ""},
 		{"unknown alias", `{"data":[{"id":"minimax/MiniMax-M3"}]}`, http.StatusOK, nil, "litellm.model_aliases.fast"},
 		{"empty list", `{"data":[]}`, http.StatusOK, ErrCatalogueUnavailable, ""},
+		{"entry without id", `{"data":[{}]}`, http.StatusOK, ErrCatalogueUnavailable, ""},
 		{"not json", `not a model list`, http.StatusOK, ErrCatalogueUnavailable, ""},
 		{"unauthorized", `{"error":"bad key"}`, http.StatusUnauthorized, ErrCatalogueUnavailable, ""},
 	} {

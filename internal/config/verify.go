@@ -102,6 +102,9 @@ func (c Config) liteLLMModels(ctx context.Context, client *http.Client) (map[str
 	}
 	known := make(map[string]bool, len(doc.Data))
 	for _, m := range doc.Data {
+		if m.ID == "" {
+			return nil, errors.New("model list entry without an id")
+		}
 		known[m.ID] = true
 	}
 	return known, nil
