@@ -14,7 +14,12 @@ go build ./cmd/quota-controller
 go run ./cmd/quota-controller
 ```
 
-The server listens on `:8080` by default and exposes `GET /health`, which returns `{"status":"ok"}`.
+The server listens on `:8080` by default and exposes:
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /health` | none | Liveness, `{"status":"ok"}` |
+| `POST /v1/usage` | `QUOTA_ROUTER_AUTH__TOKEN` | Record one request attempt (tokens, provenance, outcome). See [docs/request-usage.md](./docs/request-usage.md) |
 
 ## Domain model
 
@@ -24,7 +29,7 @@ separate types, because none can be derived from another:
 | Signal | Type | Meaning |
 |---|---|---|
 | Subscription quota | `Snapshot` | Windows from a documented provider quota source, with observed-at, source, confidence and raw-field provenance |
-| Local usage | `Usage` | Requests and tokens this installation saw; `Origin` records provider-reported vs locally observed vs estimated |
+| Local usage | `Usage` | Requests and tokens this installation saw; `Origin` records provider-reported vs locally observed vs estimated. Persisted per attempt by `POST /v1/usage` ([docs/request-usage.md](./docs/request-usage.md)) |
 | Provider health | `ProviderState` | Healthy, degraded, unavailable or unknown, plus an optional routing cooldown and a closed `HealthReason` code |
 
 Unusable quota is `UNKNOWN` with an `UnknownReason` (`UNSUPPORTED_NO_DOCUMENTED_QUOTA_API`,

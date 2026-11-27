@@ -34,26 +34,46 @@ type Server struct {
 	selector  routing.Selector
 	store     StateStore
 	decisions DecisionStore
+	usage     UsageSink
+	// token is the bearer token the usage route requires. Empty disables it.
+	token string
+}
+
+// Options carries what the routes read. A nil Usage or an empty Token leaves
+// the usage route registered but refusing every report. A nil Store leaves the
+// routing routes registered but returning 503.
+type Options struct {
+	Usage     UsageSink
+	AuthToken string
+	Config    config.Config
+	Store     *store.Store
 }
 
 // New creates a server with registered routes.
-func New(log *slog.Logger, cfg config.Config, st *store.Store) *Server {
+func New(log *slog.Logger, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
+	}
+	cfg := opts.Config
+	if opts.Config.Polling.Interval == 0 && len(opts.Config.LiteLLM.ModelAliases) == 0 && len(opts.Config.Routing.Providers) == 0 {
+		cfg = config.Default()
 	}
 	s := &Server{
 		log:      log,
 		mux:      http.NewServeMux(),
 		cfg:      cfg,
 		selector: routing.Selector{Config: cfg},
+		usage:    opts.Usage,
+		token:    opts.AuthToken,
 	}
-	if st != nil {
-		s.store = st
-		s.decisions = st
+	if opts.Store != nil {
+		s.store = opts.Store
+		s.decisions = opts.Store
 	}
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /v1/routing/select", s.handleSelect)
 	s.mux.HandleFunc("GET /v1/routing/decisions", s.handleDecisions)
+	s.mux.HandleFunc("POST /v1/usage", s.handleUsage)
 	return s
 }
 
@@ -67,9 +87,14 @@ type healthResponse struct {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+}
+
+func (s *Server) writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(healthResponse{Status: "ok"}); err != nil {
-		s.log.ErrorContext(r.Context(), "encode health response", "error", err)
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		s.log.Error("encode response", "error", err)
 	}
 }
 

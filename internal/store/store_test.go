@@ -42,8 +42,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 4 {
-		t.Fatalf("version = %d, want 4", v)
+	if v != 5 {
+		t.Fatalf("version = %d, want 5", v)
 	}
 
 	// A restart must not re-apply or fail: this is the existing-database path.
@@ -226,7 +226,7 @@ func TestUsageIsSeparateAndDeduplicated(t *testing.T) {
 	s, _ := openMigrated(t)
 
 	u := UsageRecord{
-		RequestID: "req-1", Provider: "minimax", Model: "MiniMax-M3.1-Flash",
+		Source: "test", RequestID: "req-1", Provider: "minimax", Model: "MiniMax-M3.1-Flash",
 		InputTokens: intPtr(10), OutputTokens: intPtr(20),
 		Provenance: Estimated, ObservedAt: time.Now(),
 	}
@@ -259,7 +259,7 @@ func TestUsageWithoutRequestIDIsKept(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)
 
-	u := UsageRecord{Provider: "minimax", Provenance: Estimated, ObservedAt: time.Now()}
+	u := UsageRecord{Source: "test", Provider: "minimax", Provenance: Estimated, ObservedAt: time.Now()}
 	for i := 0; i < 2; i++ {
 		if err := s.SaveUsageRecord(ctx, u); err != nil {
 			t.Fatalf("SaveUsageRecord #%d: %v", i, err)
@@ -437,7 +437,7 @@ func TestPruneKeepsTheLatestStateItMustNotRemove(t *testing.T) {
 	if err := s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: old}); err != nil {
 		t.Fatalf("SaveProviderHealth: %v", err)
 	}
-	if err := s.SaveUsageRecord(ctx, UsageRecord{Provider: "minimax", Provenance: Estimated, ObservedAt: old}); err != nil {
+	if err := s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "minimax", Provenance: Estimated, ObservedAt: old}); err != nil {
 		t.Fatalf("SaveUsageRecord: %v", err)
 	}
 
@@ -484,7 +484,7 @@ func TestPruneKeepsEverythingWhenRetentionIsZero(t *testing.T) {
 	s, _ := openMigrated(t)
 
 	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	if err := s.SaveUsageRecord(ctx, UsageRecord{Provider: "p", Provenance: Estimated, ObservedAt: old}); err != nil {
+	if err := s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: old}); err != nil {
 		t.Fatalf("SaveUsageRecord: %v", err)
 	}
 	deleted, err := s.Prune(ctx, Retention{}, time.Now())
@@ -503,7 +503,7 @@ func TestPruneIsAtomicOnFailure(t *testing.T) {
 	// A cancelled context fails the transaction; nothing may be deleted.
 	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 3; i++ {
-		if err := s.SaveUsageRecord(ctx, UsageRecord{Provider: "p", Provenance: Estimated, ObservedAt: old}); err != nil {
+		if err := s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: old}); err != nil {
 			t.Fatalf("SaveUsageRecord: %v", err)
 		}
 	}
@@ -1157,7 +1157,7 @@ func TestBusyIsClassifiedAndLosesNoWrite(t *testing.T) {
 		t.Fatalf("open impatient: %v", err)
 	}
 	defer impatient.Close()
-	err = impatient.SaveUsageRecord(ctx, UsageRecord{Provider: "p", Provenance: Estimated, ObservedAt: time.Now()})
+	err = impatient.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: time.Now()})
 	if !errors.Is(err, ErrBusy) {
 		t.Fatalf("error = %v, want ErrBusy while another writer holds the lock", err)
 	}
@@ -1166,7 +1166,7 @@ func TestBusyIsClassifiedAndLosesNoWrite(t *testing.T) {
 		t.Fatalf("rollback: %v", err)
 	}
 	// Once the lock is free the write lands, and exactly once.
-	if err := impatient.SaveUsageRecord(ctx, UsageRecord{Provider: "p", Provenance: Estimated, ObservedAt: time.Now()}); err != nil {
+	if err := impatient.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: time.Now()}); err != nil {
 		t.Fatalf("write after the lock was released: %v", err)
 	}
 	var n int
@@ -1215,8 +1215,8 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 4 {
-		t.Fatalf("version = %d, want 4", v)
+	if v != 5 {
+		t.Fatalf("version = %d, want 5", v)
 	}
 	var applied int
 	if err := first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied); err != nil {
@@ -1373,7 +1373,7 @@ func TestReadOnlyFileFailsWritesWithErrReadOnly(t *testing.T) {
 		return // some systems refuse to open read-write at all; that is also fine
 	}
 	defer ro.Close()
-	err = ro.SaveUsageRecord(ctx, UsageRecord{Provider: "p", Provenance: Estimated, ObservedAt: time.Now()})
+	err = ro.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: time.Now()})
 	if err == nil {
 		t.Skip("the filesystem allowed a write to a read-only file (running as root?)")
 	}

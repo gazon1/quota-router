@@ -16,7 +16,7 @@ import (
 )
 
 func TestHealth(t *testing.T) {
-	srv := New(nil, config.Default(), nil)
+	srv := New(nil, Options{})
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 
@@ -34,7 +34,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHealthMethodNotAllowed(t *testing.T) {
-	srv := New(nil, config.Default(), nil)
+	srv := New(nil, Options{})
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
 	w := httptest.NewRecorder()
 
@@ -115,7 +115,7 @@ func TestSelectEndpoint(t *testing.T) {
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, cfg, nil)
+	srv := New(nil, Options{Config: cfg})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
@@ -154,7 +154,7 @@ func TestSelectEndpointNoEligible(t *testing.T) {
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaExhausted, 0), quotaSnap("minimax", store.QuotaExhausted, 0)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, cfg, nil)
+	srv := New(nil, Options{Config: cfg})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
@@ -186,7 +186,7 @@ func TestSelectEndpointInvalidVersion(t *testing.T) {
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, cfg, nil)
+	srv := New(nil, Options{Config: cfg})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
@@ -216,7 +216,7 @@ func TestDecisionsEndpoint(t *testing.T) {
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
-	srv := New(nil, cfg, nil)
+	srv := New(nil, Options{Config: cfg})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
@@ -249,7 +249,7 @@ func TestDecisionsEndpoint(t *testing.T) {
 func TestSelectEndpointStateLoadError(t *testing.T) {
 	cfg := testRoutingConfig()
 	st := &fakeStore{snapErr: context.DeadlineExceeded}
-	srv := New(nil, cfg, nil)
+	srv := New(nil, Options{Config: cfg})
 	srv.store = st
 	srv.decisions = st
 	srv.selector = routing.Selector{Config: cfg}
@@ -263,7 +263,7 @@ func TestSelectEndpointStateLoadError(t *testing.T) {
 }
 
 func TestSelectEndpointInvalidJSON(t *testing.T) {
-	srv := New(nil, testRoutingConfig(), nil)
+	srv := New(nil, Options{Config: testRoutingConfig()})
 	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(`{`))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
@@ -273,7 +273,7 @@ func TestSelectEndpointInvalidJSON(t *testing.T) {
 }
 
 func TestSelectEndpointRejectsUnknownField(t *testing.T) {
-	srv := New(nil, testRoutingConfig(), nil)
+	srv := New(nil, Options{Config: testRoutingConfig()})
 	srv.selector = routing.Selector{Config: testRoutingConfig()}
 	req := httptest.NewRequest(http.MethodPost, "/v1/routing/select", strings.NewReader(`{"version":1,"session_id":"s1","capabilities":{},"unknown":true}`))
 	w := httptest.NewRecorder()

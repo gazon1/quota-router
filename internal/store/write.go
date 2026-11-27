@@ -65,18 +65,29 @@ func (s *Store) SaveQuotaSnapshot(ctx context.Context, snap QuotaSnapshot) error
 	})
 }
 
-// SaveUsageRecord appends one local usage observation. A repeated RequestID is
-// ignored, so a retried report does not double-count.
+// SaveUsageRecord appends one request attempt. A report for an attempt that is
+// already stored is ignored, so a retried report does not double-count tokens;
+// a retry is a different attempt and gets its own row. An empty outcome is
+// stored as UNKNOWN and attempt 0 as the first attempt, because neither is a
+// value this store may invent.
 func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
+	if u.Attempt == 0 {
+		u.Attempt = 1
+	}
+	if u.Outcome == "" {
+		u.Outcome = OutcomeUnknown
+	}
 	if err := u.Validate(); err != nil {
 		return fmt.Errorf("usage record: %w", err)
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO usage_records (request_id, provider, model, input_tokens, output_tokens, provenance, observed_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT (request_id) DO NOTHING`,
-			nullString(u.RequestID), u.Provider, nullString(u.Model), u.InputTokens, u.OutputTokens, u.Provenance, ts(u.ObservedAt))
+			`INSERT INTO usage_records
+			   (request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT (request_id, attempt) DO NOTHING`,
+			nullString(u.RequestID), u.Attempt, u.Provider, nullString(u.Model), u.InputTokens, u.OutputTokens,
+			u.Provenance, u.Source, u.Outcome, nullString(u.DecisionID), ts(u.ObservedAt))
 		return classify(err)
 	})
 }

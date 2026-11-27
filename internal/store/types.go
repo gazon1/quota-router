@@ -95,18 +95,60 @@ type QuotaSnapshot struct {
 	Windows []QuotaWindow
 }
 
-// UsageRecord is one locally observed request. It is accounting data, never a
-// substitute for subscription quota.
+// Outcome is how one attempt ended, as the reporter observed it. It is a
+// closed set because the store must not guess between "the stream broke" and
+// "the caller cancelled".
+type Outcome string
+
+const (
+	// OutcomeSuccess means the attempt completed and the response was delivered.
+	OutcomeSuccess Outcome = "SUCCESS"
+	// OutcomeFailedBeforeFirstToken means the attempt produced no output. The
+	// provider may still have charged the input.
+	OutcomeFailedBeforeFirstToken Outcome = "FAILED_BEFORE_FIRST_TOKEN"
+	// OutcomePartialStream means part of the response was delivered before the
+	// attempt stopped.
+	OutcomePartialStream Outcome = "PARTIAL_STREAM"
+	// OutcomeCancelled means the caller abandoned the attempt.
+	OutcomeCancelled Outcome = "CANCELLED"
+	// OutcomeUnknown means the reporter did not say. It is not a failure and
+	// not a success, and no usage is inferred from it.
+	OutcomeUnknown Outcome = "UNKNOWN"
+)
+
+func (o Outcome) valid() bool {
+	switch o {
+	case OutcomeSuccess, OutcomeFailedBeforeFirstToken, OutcomePartialStream, OutcomeCancelled, OutcomeUnknown:
+		return true
+	}
+	return false
+}
+
+// UsageRecord is one attempt of one request, as this installation observed it.
+// It is accounting data, never a substitute for subscription quota: a reported
+// token count describes what the provider reported for that request, not how
+// much subscription quota it consumed.
 type UsageRecord struct {
 	// RequestID deduplicates retried or repeated reports; empty means the
 	// source supplied none and duplicates cannot be detected.
 	RequestID string
-	Provider  string
-	Model     string
+	// Attempt numbers the attempt within the request, starting at 1. A retry is
+	// a new attempt, not a second copy of the usage it replaces. Zero means the
+	// first attempt.
+	Attempt  int
+	Provider string
+	Model    string
 	// Nil means the number was not supplied; it is not estimated to zero.
 	InputTokens,
 	OutputTokens *int
 	Provenance Confidence
+	// Source names the channel that reported the row, for provenance.
+	Source  string
+	Outcome Outcome
+	// DecisionID is the routing decision this attempt was routed by, when the
+	// reporter knows it. Routing history owns that record; this only references
+	// it, and an id that no decision claims is kept as reported.
+	DecisionID string
 	ObservedAt time.Time
 }
 
@@ -205,11 +247,35 @@ func (u UsageRecord) Validate() error {
 	if u.ObservedAt.IsZero() {
 		errs = append(errs, errors.New("observed_at must be set"))
 	}
+	if u.Attempt < 0 {
+		errs = append(errs, fmt.Errorf("attempt must be >= 1 (or 0 for the first), got %d", u.Attempt))
+	}
 	if !u.Provenance.valid() {
 		errs = append(errs, fmt.Errorf("provenance %q must be %s or %s", u.Provenance, Reported, Estimated))
 	}
+	if u.Source == "" {
+		errs = append(errs, errors.New("source must not be empty"))
+	}
+	if !u.Outcome.valid() {
+		errs = append(errs, fmt.Errorf("outcome %q must be SUCCESS, FAILED_BEFORE_FIRST_TOKEN, PARTIAL_STREAM, CANCELLED or UNKNOWN", u.Outcome))
+	}
+	// Negative counts are a broken reporter, and storing one would corrupt a
+	// SUM later. Zero is a legitimate reported value.
+	if u.InputTokens != nil && *u.InputTokens < 0 {
+		errs = append(errs, fmt.Errorf("input_tokens must be >= 0, got %d", *u.InputTokens))
+	}
+	if u.OutputTokens != nil && *u.OutputTokens < 0 {
+		errs = append(errs, fmt.Errorf("output_tokens must be >= 0, got %d", *u.OutputTokens))
+	}
+	if len(u.RequestID) > maxKey || len(u.DecisionID) > maxKey || len(u.Source) > maxKey {
+		errs = append(errs, fmt.Errorf("request_id, decision_id and source must be at most %d bytes", maxKey))
+	}
 	return errors.Join(errs...)
 }
+
+// maxKey bounds the identifier columns. They are written verbatim from an HTTP
+// request, and an unbounded one is a cheap way to fill the database.
+const maxKey = 256
 
 // Validate checks the fields the health schema constrains.
 func (h HealthRecord) Validate() error {

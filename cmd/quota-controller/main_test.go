@@ -347,7 +347,7 @@ func TestPrunerRunsWhileServing(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour)
 	for i := 0; i < 3; i++ {
 		if err := st.SaveUsageRecord(context.Background(), store.UsageRecord{
-			Provider: "p", Provenance: store.Estimated, ObservedAt: old,
+			Source: "test", Provider: "p", Provenance: store.Estimated, ObservedAt: old,
 		}); err != nil {
 			t.Fatalf("SaveUsageRecord: %v", err)
 		}
@@ -371,7 +371,7 @@ func TestPrunerRunsWhileServing(t *testing.T) {
 	}
 	// A fresh row must survive the same ticker.
 	if err := st.SaveUsageRecord(ctx, store.UsageRecord{
-		Provider: "p", Provenance: store.Estimated, ObservedAt: time.Now(),
+		Source: "test", Provider: "p", Provenance: store.Estimated, ObservedAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("SaveUsageRecord: %v", err)
 	}

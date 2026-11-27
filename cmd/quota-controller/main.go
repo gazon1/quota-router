@@ -95,7 +95,12 @@ func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 	stopPolling := startPoller(ctx, cfg, log, st, targets)
 	defer stopPolling()
 
-	return serve(ctx, log, cfg, server.New(log, cfg, st).Handler())
+	return serve(ctx, log, cfg, server.New(log, server.Options{
+		Usage:     st,
+		AuthToken: string(cfg.Auth.Token),
+		Config:    cfg,
+		Store:     st,
+	}).Handler())
 }
 
 // startPoller runs one independently supervised loop per configured provider

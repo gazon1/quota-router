@@ -49,7 +49,7 @@ The schema is versioned SQL migrations under
 |---|---|
 | `quota_snapshots` | provider, quota state, UNKNOWN reason, source, confidence, observed-at, reset-at (via windows), safe error text |
 | `quota_windows` | one row per quota window (`5h`, `weekly`, …) with limit/used/remaining/reset-at, each nullable so "not reported" ≠ `0` |
-| `usage_records` | locally observed usage, `reported` vs `estimated`, deduplicated by `request_id` |
+| `usage_records` | one row per request attempt: provider, model, nullable input/output tokens, `reported` vs `estimated` provenance, reporting source, outcome, optional routing `decision_id`. Deduplicated on `(request_id, attempt)`, so a retry is a new row and a repeated report is ignored |
 | `provider_health` | reachability state, independent of quota |
 | `poll_state` | per-provider `last_attempt_at` and `last_success_at`, kept separately so a failure never erases when quota was last known good |
 | `controller_state` | key/value controller state, upserted |
@@ -57,6 +57,34 @@ The schema is versioned SQL migrations under
 `UNKNOWN` states are constrained by the schema: `unknown_reason` is required
 exactly when `state = 'UNKNOWN'` and must be one of the documented reasons, so a
 missing or stale observation cannot be stored as `AVAILABLE`.
+
+### Request usage is observational (issue #14)
+
+`usage_records` is a record of what this installation was told about requests it
+routed. It is **not** a replica of a provider's quota or dashboard counter.
+
+- `input_tokens`/`output_tokens` are NULL unless the response or usage report
+  supplied them. Nothing is estimated to zero, and there is no local tokenizer.
+- `provenance` says whether the counts are the provider's own (`reported`) or
+  this installation's estimate (`estimated`). An estimate is never promoted.
+- `outcome` is `SUCCESS`, `FAILED_BEFORE_FIRST_TOKEN`, `PARTIAL_STREAM`,
+  `CANCELLED` or `UNKNOWN`. It is never inferred: a reporter that does not say
+  gets `UNKNOWN`.
+- `attempt` numbers the attempts of one request. A retry is a new row, so the
+  failed attempt and the successful one are both visible and the usage is not
+  duplicated.
+- `decision_id` references the routing decision that routed the attempt. Routing
+  history owns that record; an id no decision claims is stored as reported.
+- `(request_id, attempt)` is the ingestion identity. A repeated report of an
+  already-stored attempt writes nothing, so a retry of the HTTP call is safe. A
+  report without a `request_id` cannot be deduplicated and is stored as sent.
+- No prompt, message or conversation field is accepted: the route rejects
+  unknown JSON fields, so such a body fails instead of being silently dropped.
+
+Never compute remaining subscription quota as provider quota minus the sum of
+`usage_records`. The two are different measurements — different tokenization,
+reasoning/cache accounting, and quota dimensions — and this schema keeps them in
+separate tables for that reason.
 
 Migrations run **before the listener starts**; a database this build cannot
 migrate fails startup and names the cause. Each migration runs in its own

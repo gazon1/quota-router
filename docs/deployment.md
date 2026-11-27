@@ -95,7 +95,12 @@ host reboot or a Docker daemon restart until you explicitly stop them.
 | Service | Published | Notes |
 |---|---|---|
 | `litellm` | `127.0.0.1:4000` | Only local API port. `127.0.0.1` prefix keeps it off the LAN; use `"4000:4000"` to serve the LAN, and put a TLS terminator in front before you do. |
-| `quota-controller` | none | Reachable only as `http://quota-controller:8080` from inside the `internal` network. Its `/health` is not an admin or debug surface worth exposing. |
+| `quota-controller` | none | Reachable only as `http://quota-controller:8080` from inside the `internal` network. `/health` needs no auth; `POST /v1/usage` requires `QUOTA_ROUTER_AUTH__TOKEN` ([docs/request-usage.md](./request-usage.md)). |
+
+A usage reporter running on the same compose network posts to
+`http://quota-controller:8080/v1/usage`; nothing outside needs the port. Set
+`QUOTA_ROUTER_AUTH__TOKEN` (or its `_FILE` form) before enabling reports:
+with no token the route refuses every report, which is the intended default.
 
 Publish the controller's port only when its real API exists (issue #18), and
 then bind it to `127.0.0.1` as well.
