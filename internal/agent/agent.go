@@ -205,6 +205,12 @@ func (c *Client) Route(ctx context.Context, req routing.RouteRequest) (Routed, e
 		if d.SelectedAlias == "" {
 			return Routed{}, fmt.Errorf("%w: %s", ErrNoRoute, strings.Join(d.Reasons, "; "))
 		}
+		// A route without a provider is unusable: the usage report requires one
+		// and the agent cannot derive it from an alias. Fail here, where the
+		// cause is visible, rather than at report time.
+		if d.SelectedProvider == "" {
+			return Routed{}, fmt.Errorf("agent: route response selected %q without a provider", d.SelectedAlias)
+		}
 		return Routed{
 			Alias:      d.SelectedAlias,
 			Provider:   d.SelectedProvider,
@@ -234,6 +240,11 @@ func (c *Client) ProxyRequest(ctx context.Context, routed Routed, body []byte) (
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return nil, fmt.Errorf("agent: chat body must be a JSON object: %w", err)
+	}
+	// "null" unmarshals into a nil map with no error, so the check cannot be the
+	// unmarshal alone: indexing it below would panic.
+	if fields == nil {
+		return nil, errors.New("agent: chat body must be a JSON object, got null")
 	}
 	// Rewriting model is the point: the proxy is called with the alias the
 	// controller returned, not with one the caller guessed.
@@ -352,6 +363,12 @@ type usageBody struct {
 }
 
 func (c *Client) unavailable(id string, cause error) (Routed, error) {
+	// A cancelled or expired caller is not an outage. Substituting a manual route
+	// here would let an abandoned request continue down another path, so the
+	// caller's own error is returned unchanged and errors.Is still matches it.
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		return Routed{}, fmt.Errorf("agent: %w", cause)
+	}
 	if c.Manual.Alias == "" {
 		return Routed{}, fmt.Errorf("%w: %w", ErrControllerUnavailable, cause)
 	}

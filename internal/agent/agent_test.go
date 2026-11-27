@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -174,6 +175,119 @@ func TestAgentRejectsInvalidRequest(t *testing.T) {
 	}
 	if len(h.controllerBodies()) != 0 {
 		t.Fatalf("an invalid request reached the controller: %v", h.controllerBodies())
+	}
+}
+
+// TestProxyRequestRejectsNonObjectBodies is a regression test: "null" unmarshals
+// into a nil map with no error, so an unguarded write to it panicked the agent.
+// Every case must return an ordinary error.
+func TestProxyRequestRejectsNonObjectBodies(t *testing.T) {
+	h := newHarness(t)
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode"}
+	for _, body := range []string{"null", "[]", "", "{oops", `"str"`, "123", "   "} {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("body %q panicked: %v", body, r)
+				}
+			}()
+			if _, err := h.client.ProxyRequest(context.Background(), routed, []byte(body)); err == nil {
+				t.Fatalf("body %q was accepted", body)
+			}
+		}()
+	}
+	// The valid empty object still works: nothing about the fix may narrow it.
+	req, err := h.client.ProxyRequest(context.Background(), routed, []byte(`{}`))
+	if err != nil {
+		t.Fatalf("empty object rejected: %v", err)
+	}
+	if got := req.Header.Get("X-Request-Id"); got != "" {
+		t.Fatalf("X-Request-Id = %q on an unrouted request", got)
+	}
+}
+
+// TestManualFallbackIgnoresCancellation is a regression test: a cancelled or
+// timed-out caller must not be turned into a manual route, because the abandoned
+// request would then continue down another path.
+func TestManualFallbackIgnoresCancellation(t *testing.T) {
+	h := newHarness(t)
+	h.client.Manual = agent.ManualRoute{Alias: "cc-coding", Provider: "commandcode"}
+	req := routing.RouteRequest{
+		Version:      routing.RouteRequestVersionV1,
+		SessionID:    "session-1",
+		Capabilities: &routing.RequiredCapabilities{},
+	}
+
+	// A slow controller so the caller's own deadline is what expires.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer slow.Close()
+
+	for _, tc := range []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{name: "cancelled", want: context.Canceled, ctx: func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // cancelled before the call, so no fallback is reachable
+			return ctx, cancel
+		}},
+		{name: "deadline", want: context.DeadlineExceeded, ctx: func() (context.Context, context.CancelFunc) {
+			return context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := *h.client
+			c.ControllerURL = slow.URL
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			got, err := c.Route(ctx, req)
+			if err == nil {
+				t.Fatalf("route succeeded with manual %+v; a %s must not fall back", got, tc.name)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want errors.Is(_, %v)", err, tc.want)
+			}
+			if errors.Is(err, agent.ErrControllerUnavailable) {
+				t.Fatalf("err = %v also claims the controller was unavailable", err)
+			}
+		})
+	}
+
+	// A real connection failure still falls back, so the fix did not disable it.
+	down := *h.client
+	down.ControllerURL = "http://127.0.0.1:1"
+	got, err := down.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("connection failure did not fall back: %v", err)
+	}
+	if !got.Manual || got.Alias != "cc-coding" {
+		t.Fatalf("route = %+v, want the manual route", got)
+	}
+}
+
+// TestRouteRejectsDecisionWithoutProvider: an alias with no provider cannot be
+// reported, so it must fail at route time rather than at report time.
+func TestRouteRejectsDecisionWithoutProvider(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"decision":{"decision_id":"dec-1","selected_alias":"cc-coding","policy_version":"routing.v1"}}`)
+	}))
+	defer srv.Close()
+
+	c := &agent.Client{ControllerURL: srv.URL, Token: contractToken}
+	_, err := c.Route(context.Background(), routing.RouteRequest{
+		Version:      routing.RouteRequestVersionV1,
+		SessionID:    "session-1",
+		Capabilities: &routing.RequiredCapabilities{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "without a provider") {
+		t.Fatalf("err = %v, want a missing-provider error", err)
 	}
 }
 

@@ -62,6 +62,16 @@ The alias must be the alias the controller returned, not one the caller decided
 on: `ProxyRequest` overwrites `model` with it so a caller cannot drift. The
 stream is read by the agent — the controller is not a hop in it.
 
+The body must be a JSON **object**. Anything else — `null`, `[]`, a bare string
+or number, an empty body, malformed JSON — is an ordinary error; `null` in
+particular unmarshals into a nil map without complaint, so the check is explicit
+rather than relying on the decoder.
+
+A decision whose `selected_alias` arrives with no `selected_provider` is rejected
+at `Route`: the provider is required by the usage report and cannot be derived
+from an alias, so failing there says what is wrong instead of deferring it to a
+report that cannot be sent.
+
 Non-streaming callers can use `Client.Chat`, which performs the call and maps the
 response to an outcome: `SUCCESS` for a 2xx, `FAILED_BEFORE_FIRST_TOKEN`
 otherwise. A complete response cannot be a partial stream, so those are the only
@@ -87,9 +97,18 @@ The rule is **fail closed, with one explicit and auditable exception**:
 
 | Condition | Result |
 |---|---|
-| Connection refused, timeout, `5xx` | `ErrControllerUnavailable` — **no route, no call**, unless `Manual` is configured |
+| Connection refused, DNS/TLS failure, `5xx` | `ErrControllerUnavailable` — **no route, no call**, unless `Manual` is configured |
+| Caller's context cancelled or deadline exceeded | the caller's own error, unchanged — **never** a manual route |
 | `409` no eligible model | `ErrNoRoute` — never replaced by the manual route |
 | `400` invalid request, `401` bad token | surfaced as an error — a bug or a misconfiguration, not an outage |
+
+Cancellation is deliberately not an outage. The route exists to serve *this*
+request; if the caller abandoned it, substituting a manual route would let the
+abandoned work continue down another path. The returned error satisfies
+`errors.Is(err, context.Canceled)` / `errors.Is(err, context.DeadlineExceeded)`,
+and it does **not** also match `ErrControllerUnavailable`. Note that an
+`http.Client` timeout expires the same way, so a client-level `Timeout` below the
+controller's own response time surfaces as a deadline, not as a fallback.
 
 The manual route is set by the operator in the agent's configuration, never
 invented by the agent at call time:
@@ -171,10 +190,23 @@ curl -fsS -X POST http://127.0.0.1:8080/v1/usage \
 knows and what the decision names, so the row joins the decision without the
 agent having to resolve the alias to `commandcode/stealth/glyph-cluster:free`.
 
+## Timeouts and reporting after a transport failure
+
+`Client.HTTP` is the caller's transport; when nil, one shared client with a 60s
+timeout is used. A streaming agent should set its own `HTTP` and budget beyond the
+longest stream it expects, since a non-streaming completion on a large model can
+easily outlive a short cap — and that cap expiring reads as a deadline (no
+fallback), not as an outage.
+
+A `Report` that fails on transport is ambiguous: the row may or may not have been
+stored. Redelivery is safe because `(request_id, attempt)` deduplicates, so retry
+with the same ids rather than minting new ones — a fresh `request_id` would store
+a second row for the same attempt.
+
 ## Testing your integration
 
 [agent_test.go](../internal/agent/agent_test.go) is the contract test: a real
-controller with a real SQLite store, a stub proxy, and the four properties this
+controller with a real SQLite store, a stub proxy, and the properties this
 document relies on —
 
 1. the decision the agent used is the decision the controller persisted;
@@ -183,7 +215,9 @@ document relies on —
 3. the usage row joins both ids, keeps the reported counts and provenance, and a
    repeated report does not double-count;
 4. a controller outage fails closed, or uses the manual route visibly — while a
-   `409` does not fall back at all.
+   `409` does not fall back at all;
+5. a cancelled or expired caller never falls back, and a non-object chat body is
+   an error rather than a panic.
 
 It is worth copying this shape for any non-Go agent: a fake proxy, a real
 controller, and an assertion that the bytes reaching the controller contain no
