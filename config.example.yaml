@@ -104,7 +104,8 @@ sqlite:
     usage_records: 2160h    # 90 days
 
 auth:
-  # Bearer token for the controller's own HTTP API (issues #18, #36).
+  # Bearer token for the controller's own HTTP API: POST /v1/usage requires it,
+  # and an unset token refuses every report (docs/request-usage.md).
   # token: set QUOTA_ROUTER_AUTH__TOKEN instead
 
 observability:

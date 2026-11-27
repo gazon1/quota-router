@@ -8,7 +8,7 @@ import (
 )
 
 func TestHealth(t *testing.T) {
-	srv := New(nil)
+	srv := New(nil, Options{})
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 
@@ -26,7 +26,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestHealthMethodNotAllowed(t *testing.T) {
-	srv := New(nil)
+	srv := New(nil, Options{})
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
 	w := httptest.NewRecorder()
 
