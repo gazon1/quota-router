@@ -68,6 +68,24 @@ Unknown values are rejected so routing policy cannot silently ignore a class it
 does not understand. Adding a new class is a contract change that requires
 coordinated agent/controller deployment and an explicit policy decision in #17.
 
+## HTTP endpoints
+
+`POST /v1/routing/select` evaluates a `RouteRequest` and returns a routing
+decision. `GET /v1/routing/decisions` returns recent decision audit records.
+Both endpoints require the configured bearer token (`QUOTA_ROUTER_AUTH__TOKEN` /
+`auth.token`), same as `POST /v1/usage`; when no token is configured, requests
+are refused.
+
+`/v1/routing/select` returns `400` for malformed or invalid requests, `409`
+when the request is valid but no eligible model can be selected, `503` when
+routing state or decision audit persistence is unavailable, and `200` with the
+decision otherwise. Decision audit persistence is mandatory: a computed decision
+is not returned as success if it cannot be persisted.
+
+The HTTP integration currently loads quota and health state only. Session
+affinity and performance tie-breaks are implemented in the selector but not yet
+wired into this endpoint.
+
 ## Boundaries
 
 - **Not this issue:** eligibility, quota/health evaluation, preference ordering,

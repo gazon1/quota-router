@@ -45,7 +45,7 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Polling != want.Polling {
 		t.Fatalf("Polling = %+v, want %+v", cfg.Polling, want.Polling)
 	}
-	if cfg.Routing.LowQuotaThreshold != want.Routing.LowQuotaThreshold || !reflect.DeepEqual(cfg.Routing.Providers, want.Routing.Providers) {
+	if cfg.Routing.LowQuotaThreshold != want.Routing.LowQuotaThreshold || cfg.Routing.ReserveFraction != want.Routing.ReserveFraction || !reflect.DeepEqual(cfg.Routing.Providers, want.Routing.Providers) {
 		t.Fatalf("Routing = %+v, want %+v", cfg.Routing, want.Routing)
 	}
 	if cfg.SQLite != want.SQLite {

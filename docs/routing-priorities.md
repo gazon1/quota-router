@@ -7,6 +7,9 @@ Config: [config.example.yaml](../config.example.yaml)
 `routing.providers` defines the static operator preference order. It is
 configuration only: #17 applies it after hard constraints and viable session
 affinity, and it never bypasses capability, health, quota, or safety checks.
+The HTTP `POST /v1/routing/select` endpoint currently wires quota and health
+state only; selector support for session affinity and performance tie-breaks is
+implemented but not yet loaded by that endpoint.
 
 ## Semantics
 

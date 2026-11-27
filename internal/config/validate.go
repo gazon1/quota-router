@@ -88,6 +88,10 @@ func (c Config) validate() error {
 
 	check(c.Routing.LowQuotaThreshold > 0 && c.Routing.LowQuotaThreshold <= 1,
 		"routing.low_quota_threshold must be in (0, 1], got %v", c.Routing.LowQuotaThreshold)
+	check(c.Routing.ReserveFraction >= 0 && c.Routing.ReserveFraction <= 1,
+		"routing.reserve_fraction must be in [0, 1], got %v", c.Routing.ReserveFraction)
+	check(c.Routing.ReserveFraction == 0 || c.Routing.ReserveFraction >= c.Routing.LowQuotaThreshold,
+		"routing.reserve_fraction (%v) must be 0 or >= routing.low_quota_threshold (%v)", c.Routing.ReserveFraction, c.Routing.LowQuotaThreshold)
 	errs = append(errs, c.validateRouting()...)
 
 	check(c.SQLite.Path != "", "sqlite.path must not be empty")
@@ -109,6 +113,7 @@ func (c Config) validate() error {
 		{"quota_snapshots", c.SQLite.Retention.QuotaSnapshots},
 		{"provider_health", c.SQLite.Retention.ProviderHealth},
 		{"usage_records", c.SQLite.Retention.UsageRecords},
+		{"routing_decisions", c.SQLite.Retention.RoutingDecisions},
 	} {
 		check(d.v >= 0, "sqlite.retention.%s must be >= 0 (0 keeps everything), got %s", d.name, d.v)
 	}

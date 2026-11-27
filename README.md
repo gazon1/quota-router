@@ -89,17 +89,24 @@ request contract: required capabilities, session ID, optional task class,
 optional request-level preference, and optional explicit manual override with
 bounded semantics. A routing request is an explicit decision boundary, not an
 instruction to switch models after every agent message. Selection/eligibility
-lives in #17; operator-configured priority lives in #53. See
-[docs/routing-request.md](./docs/routing-request.md).
+lives in #17; operator-configured priority lives in #53.
+
+HTTP endpoints: `POST /v1/routing/select` and `GET /v1/routing/decisions`
+require the configured bearer token. Invalid requests return `400`; valid requests
+with no eligible model return `409`; audit persistence or state failures return
+`503`. See [docs/routing-request.md](./docs/routing-request.md).
 
 ## Routing priorities
 
 `routing.providers` configures static provider and per-provider model preference
 order (issue #53). Lower positive integer means higher preference; model priority
 is scoped to its provider. When configured, every enabled catalogue alias must be
-listed. Hard constraints, session affinity, request-level overrides, and decision
-explanations are owned by #16/#17/#29; this config only supplies the static
-default order. See [docs/routing-priorities.md](./docs/routing-priorities.md).
+listed. Hard constraints, request-level overrides, and decision explanations are
+owned by #16/#17/#29; this config supplies the static default order. Session
+affinity and performance tie-breaks are implemented in the selector, but the HTTP
+`/v1/routing/select` integration currently loads quota/health only and does not yet
+persist/load affinity or performance observations. See
+[docs/routing-priorities.md](./docs/routing-priorities.md).
 
 ## Turn boundaries
 
@@ -183,6 +190,7 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_POLLING__INTERVAL` | `30s` | Quota polling interval |
 | `QUOTA_ROUTER_POLLING__REQUEST_TIMEOUT` | `10s` | Per-poll request timeout |
 | `QUOTA_ROUTER_ROUTING__LOW_QUOTA_THRESHOLD` | `0.1` | Scarce-quota fraction, in `(0, 1]` |
+| `QUOTA_ROUTER_ROUTING__RESERVE_FRACTION` | `0` | Remaining-quota fraction reserved for reasoning/coding workloads, in `[0, 1]`; `0` disables it. Must be `0` or `>= low_quota_threshold`. |
 | `QUOTA_ROUTER_ROUTING__PROVIDERS__<PROVIDER>__PRIORITY` | unset | Static provider preference rank; lower positive integer means higher preference |
 | `QUOTA_ROUTER_ROUTING__PROVIDERS__<PROVIDER>__MODELS__<ALIAS>` | unset | Per-provider model alias preference rank; lower positive integer means higher preference, scoped to that provider. Hyphenated aliases can be written with literal hyphens in env var names; in shells that disallow hyphens, use underscores and the loader maps it to the hyphenated catalogue alias only when unambiguous. |
 | `QUOTA_ROUTER_SQLITE__PATH` | `quota-router.db` | SQLite file path |

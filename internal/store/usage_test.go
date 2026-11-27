@@ -251,7 +251,13 @@ func TestUsageMigrationDownKeepsFirstAttempts(t *testing.T) {
 		}
 	}
 	dir := t.TempDir()
-	for _, f := range []string{"0001_persistence.sql", "0002_poll_state.sql", "0003_usage_attempts.sql"} {
+	for _, f := range []string{
+		"0001_persistence.sql",
+		"0002_poll_state.sql",
+		"0003_usage_attempts.sql",
+		"0004_routing_decisions.sql",
+		"0005_provider_cooldown.sql",
+	} {
 		apply(t, dir, f, readMigration(t, f))
 	}
 	provider, err := goose.NewProvider(goose.DialectSQLite3, s.db, os.DirFS(dir),

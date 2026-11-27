@@ -313,10 +313,15 @@ func unknownReason(r quota.UnknownReason) store.UnknownReason {
 // health maps an observation to what is persisted. The reason code is the stored
 // error, so a health row explains itself without carrying provider text.
 func health(provider string, s quota.ProviderState) store.HealthRecord {
-	return store.HealthRecord{
+	r := store.HealthRecord{
 		Provider:   provider,
 		State:      store.HealthState(s.Health),
 		ObservedAt: s.ObservedAt,
 		Error:      string(s.Reason()),
 	}
+	if !s.CooldownUntil.IsZero() {
+		cu := s.CooldownUntil
+		r.CooldownUntil = &cu
+	}
+	return r
 }

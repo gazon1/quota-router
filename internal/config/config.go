@@ -146,6 +146,10 @@ type Routing struct {
 	// LowQuotaThreshold is the remaining-quota fraction at or below which a
 	// provider counts as scarce and loses to a healthier candidate.
 	LowQuotaThreshold float64 `koanf:"low_quota_threshold"`
+	// ReserveFraction is the remaining-quota fraction reserved for reasoning and
+	// coding workloads. A provider at or below this fraction is ineligible for
+	// those task classes while quota is not exhausted. Zero disables the reserve.
+	ReserveFraction float64 `koanf:"reserve_fraction"`
 	// Providers is the static preference order. Keys are provider names as they
 	// appear in model ids (<provider>/<model>). When empty, no static preference
 	// is configured. When set, every enabled catalogue alias must be listed under
@@ -176,9 +180,10 @@ type SQLite struct {
 // Retention bounds how long persisted history is kept. The newest state per
 // provider always survives, so cleanup never removes what routing reads.
 type Retention struct {
-	QuotaSnapshots time.Duration `koanf:"quota_snapshots"`
-	ProviderHealth time.Duration `koanf:"provider_health"`
-	UsageRecords   time.Duration `koanf:"usage_records"`
+	QuotaSnapshots  time.Duration `koanf:"quota_snapshots"`
+	ProviderHealth  time.Duration `koanf:"provider_health"`
+	UsageRecords    time.Duration `koanf:"usage_records"`
+	RoutingDecisions time.Duration `koanf:"routing_decisions"`
 }
 
 // Auth holds the bearer token for the controller's own HTTP API.
@@ -223,6 +228,7 @@ func Default() Config {
 		Polling:   Polling{Interval: 30 * time.Second, RequestTimeout: 10 * time.Second},
 		Routing: Routing{
 			LowQuotaThreshold: 0.1,
+			ReserveFraction:   0,
 			Providers:         map[string]ProviderRouting{},
 		},
 		SQLite: SQLite{
@@ -231,9 +237,10 @@ func Default() Config {
 			// A poll every 30s is ~2.9k snapshots a provider a day; a month of
 			// history is a few MB. Set a field to 0 to keep that table forever.
 			Retention: Retention{
-				QuotaSnapshots: 30 * 24 * time.Hour,
-				ProviderHealth: 30 * 24 * time.Hour,
-				UsageRecords:   90 * 24 * time.Hour,
+				QuotaSnapshots:   30 * 24 * time.Hour,
+				ProviderHealth:   30 * 24 * time.Hour,
+				UsageRecords:     90 * 24 * time.Hour,
+				RoutingDecisions: 30 * 24 * time.Hour,
 			},
 		},
 		Observability: Observability{Level: "info"},

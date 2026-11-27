@@ -97,10 +97,15 @@ func (s *Store) SaveProviderHealth(ctx context.Context, h HealthRecord) error {
 	if err := h.Validate(); err != nil {
 		return fmt.Errorf("provider health: %w", err)
 	}
+	var cooldownUntil *string
+	if h.CooldownUntil != nil && !h.CooldownUntil.IsZero() {
+		v := ts(*h.CooldownUntil)
+		cooldownUntil = &v
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO provider_health (provider, state, observed_at, error) VALUES (?, ?, ?, ?)`,
-			h.Provider, h.State, ts(h.ObservedAt), nullString(h.Error))
+			`INSERT INTO provider_health (provider, state, observed_at, error, cooldown_until) VALUES (?, ?, ?, ?, ?)`,
+			h.Provider, h.State, ts(h.ObservedAt), nullString(h.Error), cooldownUntil)
 		return classify(err)
 	})
 }
@@ -277,7 +282,7 @@ func windows(ctx context.Context, tx *sql.Tx, snapshotID int64) ([]QuotaWindow, 
 // LatestProviderHealth returns the newest health observation per provider.
 func (s *Store) LatestProviderHealth(ctx context.Context) ([]HealthRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT provider, state, observed_at, error
+		`SELECT provider, state, observed_at, error, cooldown_until
 		 FROM provider_health WHERE `+newestPerProvider("provider_health", true))
 	if err != nil {
 		return nil, classify(err)
@@ -287,17 +292,25 @@ func (s *Store) LatestProviderHealth(ctx context.Context) ([]HealthRecord, error
 	var out []HealthRecord
 	for rows.Next() {
 		var (
-			h        HealthRecord
-			observed string
-			errText  sql.NullString
+			h             HealthRecord
+			observed      string
+			errText       sql.NullString
+			cooldownUntil sql.NullString
 		)
-		if err := rows.Scan(&h.Provider, &h.State, &observed, &errText); err != nil {
+		if err := rows.Scan(&h.Provider, &h.State, &observed, &errText, &cooldownUntil); err != nil {
 			return nil, classify(err)
 		}
 		if h.ObservedAt, err = parseTS(observed); err != nil {
 			return nil, err
 		}
 		h.Error = errText.String
+		if cooldownUntil.Valid {
+			t, err := parseTS(cooldownUntil.String)
+			if err != nil {
+				return nil, err
+			}
+			h.CooldownUntil = &t
+		}
 		out = append(out, h)
 	}
 	return out, classify(rows.Err())
@@ -307,9 +320,10 @@ func (s *Store) LatestProviderHealth(ctx context.Context) ([]HealthRecord, error
 // per provider (or overall, for usage) is always kept, so cleanup can never
 // remove the state routing depends on.
 type Retention struct {
-	QuotaSnapshots time.Duration
-	ProviderHealth time.Duration
-	UsageRecords   time.Duration
+	QuotaSnapshots   time.Duration
+	ProviderHealth   time.Duration
+	UsageRecords     time.Duration
+	RoutingDecisions time.Duration
 }
 
 // Prune deletes rows older than the retention bounds, keeping the newest row per
@@ -338,6 +352,8 @@ func (s *Store) Prune(ctx context.Context, r Retention, now time.Time) (deleted 
 					"DELETE FROM provider_health WHERE observed_at < ? AND id NOT IN (SELECT id FROM spared)"},
 			{"usage_records", r.UsageRecords,
 				"DELETE FROM usage_records WHERE observed_at < ?"},
+			{"routing_decisions", r.RoutingDecisions,
+				"DELETE FROM routing_decisions WHERE created_at < ?"},
 		} {
 			if p.age <= 0 {
 				continue
@@ -402,4 +418,51 @@ func nullString(v string) *string {
 		return nil
 	}
 	return &v
+}
+
+// SaveRoutingDecision appends a routing decision audit record.
+func (s *Store) SaveRoutingDecision(ctx context.Context, r RoutingDecisionRecord) error {
+	if err := r.Validate(); err != nil {
+		return fmt.Errorf("routing decision: %w", err)
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			`INSERT INTO routing_decisions (decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			r.DecisionID, r.PolicyVersion, r.SessionID, nullString(r.SelectedAlias), nullString(r.SelectedProvider), r.Payload, ts(r.CreatedAt))
+		return classify(err)
+	})
+}
+
+// LatestRoutingDecisions returns the newest routing decisions, newest first.
+func (s *Store) LatestRoutingDecisions(ctx context.Context, limit int) ([]RoutingDecisionRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at
+		 FROM routing_decisions ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+	var out []RoutingDecisionRecord
+	for rows.Next() {
+		var (
+			r                RoutingDecisionRecord
+			selectedAlias    sql.NullString
+			selectedProvider sql.NullString
+			createdAt        string
+		)
+		if err := rows.Scan(&r.DecisionID, &r.PolicyVersion, &r.SessionID, &selectedAlias, &selectedProvider, &r.Payload, &createdAt); err != nil {
+			return nil, classify(err)
+		}
+		r.SelectedAlias = selectedAlias.String
+		r.SelectedProvider = selectedProvider.String
+		if r.CreatedAt, err = parseTS(createdAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, classify(rows.Err())
 }
