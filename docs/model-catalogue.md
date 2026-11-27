@@ -122,8 +122,11 @@ it does.
   "unavailable".
 - **No period re-check.** Verification runs at startup only; a health-check
   re-check is a later change.
-- **`tasks` are a free vocabulary.** Validation rejects an empty class but not an
-  unknown one, because the task vocabulary is defined in issue #16.
+- **`tasks` are a free vocabulary at the catalogue layer.** Validation rejects an
+  empty class but not an unknown one. Agent-supplied routing request task
+  classes are defined and validated in
+  [docs/routing-request.md](./routing-request.md) (#16); selection policy
+  decides whether a class has effect (#17).
 - **No priority here.** Static provider and per-provider model ordering is #53,
   selection is #17. This package only answers "which aliases may serve this
   request".
