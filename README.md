@@ -77,6 +77,16 @@ request**, so a model nobody measured is never selected for a job it cannot prov
 it does. Full field table, conservative matching rule and the fatal-versus-warn
 split of the startup check: [docs/model-catalogue.md](./docs/model-catalogue.md).
 
+## Routing request contract
+
+[internal/routing](./internal/routing) defines the versioned agent-to-router
+request contract: required capabilities, session ID, optional task class,
+optional request-level preference, and optional explicit manual override with
+bounded semantics. A routing request is an explicit decision boundary, not an
+instruction to switch models after every agent message. Selection/eligibility
+lives in #17; operator-configured priority lives in #53. See
+[docs/routing-request.md](./docs/routing-request.md).
+
 ## Turn boundaries
 
 [internal/turn](./internal/turn) is where one model's turn ends and another may
