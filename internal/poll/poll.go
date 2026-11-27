@@ -1,0 +1,322 @@
+// Package poll schedules quota polling: one independently supervised loop per
+// configured provider, at a fixed interval, with bounded retries for transient
+// failures only and every outcome persisted.
+//
+// Polling is not usage accounting: local usage is event or report driven and is
+// never derived from a poll. A poll that succeeds also does not make quota
+// AVAILABLE — the state written here comes from the provider's own reported
+// windows through quota.Snapshot.StateAt, so an observation that is old, stale
+// or unusable is persisted as UNKNOWN rather than as current quota.
+package poll
+
+import (
+	"context"
+	"log/slog"
+	"math/rand/v2"
+	"sync"
+	"time"
+
+	"github.com/gazon1/quota-router/internal/quota"
+	"github.com/gazon1/quota-router/internal/store"
+)
+
+// Source is one provider adapter: a single bounded fetch that reports what it
+// could establish. minimax.Adapter is the production implementation, and its
+// Fetch is the whole retry policy input — classification stays provider policy.
+type Source interface {
+	Fetch(ctx context.Context) (quota.Snapshot, quota.ProviderState)
+}
+
+// Sink persists what a poll observed. store.Store implements it.
+type Sink interface {
+	SaveQuotaSnapshot(ctx context.Context, snap store.QuotaSnapshot) error
+	SaveProviderHealth(ctx context.Context, h store.HealthRecord) error
+	// SavePollState records the attempt time and, when the attempt established
+	// quota, the success time. A zero success time must leave the recorded
+	// success untouched: the two timestamps are independent, and a failure does
+	// not erase when quota was last known good.
+	SavePollState(ctx context.Context, provider string, attemptAt, successAt time.Time) error
+}
+
+// Target is one configured provider and the adapter that polls it. The name is
+// what every persisted row is written under.
+type Target struct {
+	Name   string
+	Source Source
+}
+
+// Retry bounds. A poll is one attempt plus at most Attempts-1 retries, so a
+// provider cannot stretch a single poll beyond its interval, and a provider that
+// stays down is retried at the normal cadence instead of in a tight loop.
+const (
+	defaultAttempts  = 3
+	defaultBaseDelay = 500 * time.Millisecond
+	defaultMaxDelay  = 5 * time.Second
+)
+
+// Poller polls every target until its context is cancelled.
+type Poller struct {
+	// Interval is the normal cadence between polls of one provider.
+	Interval time.Duration
+	// StaleAfter is the freshness bound: an observation older than this is
+	// persisted as UNKNOWN/STALE_OBSERVATION, never as current quota.
+	StaleAfter time.Duration
+	// Attempts bounds one poll, the first attempt included. Values below one
+	// mean a single attempt.
+	Attempts int
+	// BaseDelay and MaxDelay bound the exponential backoff between retries.
+	BaseDelay time.Duration
+	MaxDelay  time.Duration
+
+	Sink    Sink
+	Log     *slog.Logger
+	Targets []Target
+
+	// wait and jitter are the clock and the randomness, replaceable in tests so
+	// scheduling is deterministic instead of sleep-driven.
+	wait   func(ctx context.Context, d time.Duration) bool
+	jitter func(time.Duration) time.Duration
+}
+
+// New builds a poller with the production defaults for retry.
+func New(interval, staleAfter time.Duration, log *slog.Logger, sink Sink, targets ...Target) *Poller {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Poller{
+		Interval:   interval,
+		StaleAfter: staleAfter,
+		Attempts:   defaultAttempts,
+		BaseDelay:  defaultBaseDelay,
+		MaxDelay:   defaultMaxDelay,
+		Sink:       sink,
+		Log:        log,
+		Targets:    targets,
+		wait:       sleep,
+		jitter:     spread,
+	}
+}
+
+// Run polls every target until ctx is cancelled, then waits for the polls in
+// flight and returns: no goroutine outlives it, so the caller may close the
+// store afterwards.
+//
+// Each provider gets its own goroutine, so a provider that hangs, fails or backs
+// off never delays another provider's polls or state updates.
+func (p *Poller) Run(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, t := range p.Targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.loop(ctx, t)
+		}()
+	}
+	wg.Wait()
+}
+
+// loop polls one provider forever: one poll at a time, then the normal interval.
+//
+// The interval is a wait between polls, not a ticker, so an outage — or a poll
+// that took longer than expected — resumes with exactly one poll and no burst of
+// catch-up polls for the ticks that passed.
+func (p *Poller) loop(ctx context.Context, t Target) {
+	for {
+		p.poll(ctx, t)
+		if !p.wait(ctx, p.Interval) {
+			return
+		}
+	}
+}
+
+// poll performs one poll: an attempt, and retries while the adapter classified
+// the failure as transient. Every attempt is persisted, so last-attempt moves
+// even when the poll never succeeds, while last-success keeps its own value.
+func (p *Poller) poll(ctx context.Context, t Target) {
+	for attempt := 1; ; attempt++ {
+		snap, state := t.Source.Fetch(ctx)
+		p.record(ctx, t.Name, snap, state)
+
+		if attempt >= p.attempts() || !retryable(snap, state) {
+			return
+		}
+		if !p.wait(ctx, p.jitter(p.delay(attempt))) {
+			return
+		}
+	}
+}
+
+// record persists one attempt. A cancelled context is not an observation: the
+// attempt was cut short by shutdown, so it must not be stored as a failure.
+func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapshot, state quota.ProviderState) {
+	if ctx.Err() != nil {
+		return
+	}
+	at := time.Now().UTC()
+	// Success means the attempt produced an observation the provider stands
+	// behind, not that quota is AVAILABLE: an unusable or retained copy is not a
+	// success, and its state is still derived from the windows below.
+	success := snap.Confidence != quota.ConfidenceNone && !snap.Stale
+	var successAt time.Time
+	if success {
+		successAt = snap.ObservedAt
+	}
+
+	if err := p.Sink.SaveQuotaSnapshot(ctx, observation(provider, snap, p.StaleAfter, at)); err != nil {
+		p.Log.Error("persist quota snapshot", "provider", provider, "error", err)
+	}
+	if err := p.Sink.SaveProviderHealth(ctx, health(provider, state)); err != nil {
+		p.Log.Error("persist provider health", "provider", provider, "error", err)
+	}
+	if err := p.Sink.SavePollState(ctx, provider, at, successAt); err != nil {
+		p.Log.Error("persist poll state", "provider", provider, "error", err)
+	}
+
+	p.Log.Debug("polled provider", "provider", provider,
+		"health", state.Health, "reason", state.Reason(), "fresh", success)
+}
+
+// attempts is the retry bound in the form the loop needs: at least one attempt.
+func (p *Poller) attempts() int {
+	if p.Attempts < 1 {
+		return 1
+	}
+	return p.Attempts
+}
+
+// delay is the wait before retry n (n counts from one): exponential and capped,
+// so the bound is reached quickly and stays there.
+func (p *Poller) delay(n int) time.Duration {
+	d := p.BaseDelay
+	for i := 1; i < n && d < p.MaxDelay; i++ {
+		d *= 2
+	}
+	if d > p.MaxDelay {
+		d = p.MaxDelay
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// spread jitters a delay: the upper half stays, the lower half is random, so
+// controllers that lost a provider together do not retry in lockstep.
+func spread(d time.Duration) time.Duration {
+	if d <= 1 {
+		return d
+	}
+	half := int64(d / 2)
+	return time.Duration(half + rand.Int64N(half+1))
+}
+
+// sleep waits for d unless ctx ends first; false means cancelled.
+func sleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// retryable reports whether another attempt within this poll may establish
+// quota. Classification is the adapter's: a rejected credential, an unusable
+// body or a provider with no quota API answers the same way on a second try, so
+// those are not retried; timeouts, unreachable hosts, rate limits and 5xx are.
+func retryable(snap quota.Snapshot, state quota.ProviderState) bool {
+	switch state.Health {
+	case quota.Degraded, quota.Unavailable:
+	default:
+		// HEALTHY established something; UNKNOWN says nothing went wrong that a
+		// retry could fix.
+		return false
+	}
+	if st, reason := snap.State(); st == quota.QuotaUnknown {
+		switch reason {
+		case quota.AuthFailure, quota.MalformedResponse, quota.UnsupportedNoQuotaAPI:
+			return false
+		}
+	}
+	return true
+}
+
+// observation maps an observation to what is persisted. Its state comes from StateAt, so
+// a last-known-good copy retained after a failed refresh is stored as UNKNOWN /
+// stale — its windows stay for diagnostics, and no reader can mistake them for
+// current quota.
+//
+// shortcut: staleness is decided here, when the row is written, so a row written
+// just before the process died still reads as its old state. A reader must
+// compare poll_state.last_attempt_at (already persisted) against the freshness
+// bound; do that in the read path when routing or the status API lands.
+func observation(provider string, s quota.Snapshot, staleAfter time.Duration, now time.Time) store.QuotaSnapshot {
+	state, reason := s.StateAt(now, staleAfter)
+	out := store.QuotaSnapshot{
+		Provider: provider,
+		State:    store.QuotaState(state),
+		Source:   s.Source,
+		// Subscription quota is never a local estimate, so every row is reported;
+		// confidence in the observation is carried by State and Source instead.
+		Confidence: store.Reported,
+		ObservedAt: s.ObservedAt,
+	}
+	if state == quota.QuotaUnknown {
+		r := unknownReason(reason)
+		out.UnknownReason = &r
+	}
+	// The quota model carries no unit, so windows are stored without one rather
+	// than guessed from the provider that produced them.
+	for _, w := range s.Windows {
+		out.Windows = append(out.Windows, store.QuotaWindow{
+			Window:    w.Name,
+			Limit:     w.Limit,
+			Used:      w.Used,
+			Remaining: w.Remaining,
+			ResetAt:   resetAt(w.ResetsAt),
+		})
+	}
+	return out
+}
+
+func resetAt(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+// unknownReason maps the model's reason onto the persisted enum, which is a
+// smaller closed set. An unmapped reason becomes "malformed": something about
+// the observation could not be used.
+func unknownReason(r quota.UnknownReason) store.UnknownReason {
+	switch r {
+	case quota.UnsupportedNoQuotaAPI:
+		return store.ReasonUnsupported
+	case quota.TransientFetchFailure:
+		return store.ReasonFetchFailed
+	case quota.StaleObservation:
+		return store.ReasonStale
+	case quota.AuthFailure:
+		return store.ReasonAuth
+	case quota.NotYetObserved:
+		return store.ReasonNotObserved
+	}
+	return store.ReasonMalformed
+}
+
+// health maps an observation to what is persisted. The reason code is the stored
+// error, so a health row explains itself without carrying provider text.
+func health(provider string, s quota.ProviderState) store.HealthRecord {
+	return store.HealthRecord{
+		Provider:   provider,
+		State:      store.HealthState(s.Health),
+		ObservedAt: s.ObservedAt,
+		Error:      string(s.Reason()),
+	}
+}

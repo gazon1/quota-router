@@ -77,6 +77,16 @@ request**, so a model nobody measured is never selected for a job it cannot prov
 it does. Full field table, conservative matching rule and the fatal-versus-warn
 split of the startup check: [docs/model-catalogue.md](./docs/model-catalogue.md).
 
+## Routing request contract
+
+[internal/routing](./internal/routing) defines the versioned agent-to-router
+request contract: required capabilities, session ID, optional task class,
+optional request-level preference, and optional explicit manual override with
+bounded semantics. A routing request is an explicit decision boundary, not an
+instruction to switch models after every agent message. Selection/eligibility
+lives in #17; operator-configured priority lives in #53. See
+[docs/routing-request.md](./docs/routing-request.md).
+
 ## Routing priorities
 
 `routing.providers` configures static provider and per-provider model preference
@@ -98,6 +108,31 @@ budget, and a full-transcript replay without a named decision. See
 [docs/turn-boundary-migration.md](./docs/turn-boundary-migration.md)
 for the stage table and why a model switch is a context rebuild, not a
 continuation.
+
+## Polling
+
+[internal/poll](./internal/poll) polls every configured provider on its own
+supervised loop: one goroutine per provider, `polling.interval` between polls of
+the same provider, and `polling.request_timeout` bounding each attempt inside the
+adapter.
+
+- A failing or hung provider never delays another provider's polls or writes.
+- One poll at a time per provider: the interval is a wait *after* a poll, not a
+  ticker, so a slow poll cannot overlap the next one and an outage resumes with
+  one poll rather than a burst of catch-up polls.
+- Transient failures (timeout, unreachable, 5xx, 429) are retried up to three
+  attempts with exponential, jittered, capped backoff. Permanent failures — a
+  rejected credential or an unusable body — are persisted and not retried.
+- Each attempt persists the observation, its health and `poll_state`: last
+  attempt always moves, last success only on an attempt that established quota.
+- The persisted state comes from `Snapshot.StateAt`, so a success is not
+  `AVAILABLE` by default: an exhausted provider stays `EXHAUSTED`, and an
+  observation older than three intervals becomes `UNKNOWN` / `stale` with its
+  windows kept for diagnostics.
+
+A configured provider this build has no adapter for, or one with no `api_key`,
+is a startup error rather than a silently unmonitored provider. Polling is
+unrelated to local usage accounting, which is event or report driven.
 
 ## Configuration
 

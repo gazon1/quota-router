@@ -3,16 +3,20 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gazon1/quota-router/internal/config"
+	"github.com/gazon1/quota-router/internal/poll"
+	"github.com/gazon1/quota-router/internal/provider/minimax"
 	"github.com/gazon1/quota-router/internal/server"
 	"github.com/gazon1/quota-router/internal/store"
 )
@@ -40,7 +44,10 @@ func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 		return 1
 	}
 	level.Set(cfg.Observability.SlogLevel())
-
+	// One signal-aware context covers the poller and the listener, so a
+	// shutdown stops polling and serving together.
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	// A configured alias the proxy does not serve cannot work at request time, so
 	// that is fatal. A proxy that is merely not answering is not: the two
 	// containers have no dependency edge and either may start first.
@@ -78,7 +85,70 @@ func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 	}
 	defer startPruner(ctx, log, st, cfg.SQLite.Retention, pruneInterval)()
 
+	targets, err := pollingTargets(cfg)
+	if err != nil {
+		log.Error("polling configuration error", "error", err)
+		return 1
+	}
+	// The poller is stopped before the store closes: Run waits for the polls in
+	// flight, so no write lands on a closed database.
+	stopPolling := startPoller(ctx, cfg, log, st, targets)
+	defer stopPolling()
+
 	return serve(ctx, log, cfg, server.New(log).Handler())
+}
+
+// startPoller runs one independently supervised loop per configured provider
+// until ctx is cancelled, and returns a function that waits for it to stop.
+func startPoller(ctx context.Context, cfg config.Config, log *slog.Logger, st *store.Store, targets []poll.Target) func() {
+	if len(targets) == 0 {
+		log.Info("no quota providers configured, polling is idle")
+		return func() {}
+	}
+	p := poll.New(cfg.Polling.Interval, staleAfter(cfg.Polling.Interval), log, st, targets...)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.Run(ctx)
+	}()
+	log.Info("quota polling started", "providers", len(targets), "interval", cfg.Polling.Interval,
+		"stale_after", staleAfter(cfg.Polling.Interval))
+	return func() { <-done }
+}
+
+// staleAfter is the freshness bound of a persisted observation. Three intervals
+// give a provider two failed polls of grace before its last good reading stops
+// counting as current, which is the retry window this poller actually has.
+func staleAfter(interval time.Duration) time.Duration { return 3 * interval }
+
+// pollingTargets builds one adapter per configured provider. A provider this
+// build has no adapter for is a configuration error rather than a silently
+// unmonitored provider.
+func pollingTargets(cfg config.Config) ([]poll.Target, error) {
+	names := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		names = append(names, name)
+	}
+	sort.Strings(names) // deterministic startup order and log output
+
+	var targets []poll.Target
+	for _, name := range names {
+		p := cfg.Providers[name]
+		if p.APIKey == "" {
+			return nil, fmt.Errorf("providers.%s.api_key is not set", name)
+		}
+		switch name {
+		case minimax.Provider:
+			a, err := minimax.New(p, cfg.Routing.LowQuotaThreshold, cfg.Polling.RequestTimeout)
+			if err != nil {
+				return nil, err
+			}
+			targets = append(targets, poll.Target{Name: name, Source: a})
+		default:
+			return nil, fmt.Errorf("providers.%s: no quota adapter for this provider", name)
+		}
+	}
+	return targets, nil
 }
 
 // retentionBlocksStartup reports whether a failed cleanup must stop startup.
@@ -135,7 +205,9 @@ func prune(ctx context.Context, log *slog.Logger, st *store.Store, r config.Rete
 	return nil
 }
 
-// serve runs the HTTP server until ctx is cancelled or the listener fails.
+// serve runs the HTTP server until ctx is cancelled or the listener fails. The
+// caller owns signal handling (run does), so a shutdown cancels polling and
+// serving through the same context.
 func serve(ctx context.Context, log *slog.Logger, cfg config.Config, handler http.Handler) int {
 	httpServer := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -145,9 +217,6 @@ func serve(ctx context.Context, log *slog.Logger, cfg config.Config, handler htt
 		WriteTimeout:      cfg.Server.WriteTimeout,
 		IdleTimeout:       cfg.Server.IdleTimeout,
 	}
-
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {
