@@ -406,25 +406,64 @@ func TestNoOverlappingPolls(t *testing.T) {
 // catch-up polls for the ticks that passed.
 func TestRecoveryDoesNotBurst(t *testing.T) {
 	rec := newRecorder()
-	src := &scripted{}
-	src.answers = []answer{transient()} // the outage, then successes
-	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
-	p.Attempts = 1
+	release := make(chan struct{})
+	p := newTestPoller(rec, Target{Name: "minimax", Source: SourceFunc(func(context.Context) (quota.Snapshot, quota.ProviderState) {
+		<-release // the outage: the attempt outlasts the interval before answering
+		return transient().snap, transient().state
+	})})
+	p.Attempts = 1 // a failed attempt is not retried within the poll
+	p.Interval = 5 * time.Millisecond
+	p.wait = sleep // the real wait, so the cadence is observable
 
-	var mu sync.Mutex
-	waits := 0
-	p.wait = func(_ context.Context, _ time.Duration) bool {
-		mu.Lock()
-		defer mu.Unlock()
-		waits++
-		return waits < 3 // three cadence waits is enough to see a burst
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); p.Run(ctx) }()
+	defer cancel()
+
+	// The outage lasts past the interval, then ends in the failed attempt above.
+	time.Sleep(10 * time.Millisecond)
+	failedAt := time.Now().UTC()
+	close(release)
+
+	// The failed attempt is persisted, then the loop waits the interval before
+	// the single recovery poll.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(rec.snapshots()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("outage attempt was not persisted")
+		}
+		time.Sleep(time.Millisecond)
 	}
-	p.Run(context.Background())
 
-	// Exactly one poll per cadence: the failed poll scheduled no extra attempt,
-	// and the recovery did not replay the ticks the outage used up.
-	if got := src.callCount(); got != 3 {
-		t.Fatalf("polls = %d for 3 cadences, want exactly 3", got)
+	// Recovery starts one poll after the full interval: no burst of catch-up
+	// polls for the ticks the outage used up.
+	deadline = time.Now().Add(2 * time.Second)
+	for len(rec.snapshots()) < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("recovery did not resume with a single poll after the interval")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if elapsed := time.Now().UTC().Sub(failedAt); elapsed < p.Interval {
+		t.Fatalf("recovery started %s after the failed attempt, want >= the interval of %s", elapsed, p.Interval)
+	}
+
+	// The normal cadence continues after the recovery.
+	deadline = time.Now().Add(2 * time.Second)
+	for len(rec.snapshots()) < 3 {
+		if time.Now().After(deadline) {
+			t.Fatal("polling did not resume its normal cadence after the recovery")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	cancel()
+	<-done
+
+	// Outage, one recovery poll, then the next normal cadence: exactly one poll
+	// per interval, and the missed ticks were not replayed.
+	if got := len(rec.snapshots()); got != 3 {
+		t.Fatalf("persisted %d polls, want 3: one per cadence, no catch-up burst", got)
 	}
 }
 
