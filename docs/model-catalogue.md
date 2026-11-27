@@ -32,9 +32,71 @@ litellm:
 | `context_limit` | Verified input window in tokens. `0` = unverified; a request constraint never relies on it then. |
 | `capabilities.streaming`, `.tool_calling`, `.structured_output` | `supported`, `unsupported`, or absent = unverified. |
 | `tasks` | Task classes this model suits, for example `coding`. |
+| `unavailable` | Optional recurring weekly windows during which routing must not select the model. Absent or empty = no time-based restriction. |
 
 Environments cannot hold a YAML sequence, so `...TASKS=coding,reasoning` is split
 on commas. The variable names are in [README.md](../README.md#environment-variables).
+`unavailable` is **file-configured only**: it nests a list inside a list, and
+inventing an environment encoding for that would be lossy, so no variable sets it.
+
+## Recurring unavailability windows
+
+An alias may declare recurring local-time windows during which routing must not
+select it (issue #72). This is a hard constraint, not a preference:
+
+```yaml
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: Asia/Yerevan
+        windows:
+          - days: [saturday, sunday]
+            start: "02:00"
+            end: "06:00"
+          - days: [monday]
+            start: "12:00"
+            end: "14:30"
+```
+
+- `timezone` is an IANA name and is required when `windows` is set. Without it
+  the schedule would silently depend on the host's zone, so it is a startup
+  error. The zone database is embedded ([`time/tzdata`](https://pkg.go.dev/time/tzdata)),
+  so a container image without `/usr/share/zoneinfo` still resolves it.
+- `days` are weekdays the window starts on. `start` is inclusive, `end` is
+  exclusive, both `HH:MM` wall clock.
+- `start` after `end` is an overnight window that runs into the next day: the
+  example above covers Friday 23:00 through Saturday 02:00. Equal values are
+  rejected — they name an empty (or endless) window, never a useful one.
+- `time.LoadLocation`, `time.Parse("15:04")` and the weekday parser do the
+  parsing; nothing here adds a cron expression, a scheduler, a background
+  goroutine or persisted schedule state.
+
+`Unavailable.WindowAt(now)` is the whole evaluator: a pure function of the config
+and an explicit instant. Routing passes the decision's own `SelectState.Now`, so
+a decision is replayable and policy code never reads the wall clock.
+
+The selector applies it in a `model_availability` stage right after
+`capabilities` and before the pin is resolved, so it is a hard constraint for
+every entry point at once: session affinity cannot hold a session on a model that
+entered its window, and `override.model_alias` is rejected as ineligible rather
+than silently honored. The rejection is durable (it says something about the
+route, not about a missing observation), and the reason names the schedule so an
+operator can read why a candidate was skipped:
+
+```
+model unavailable by configured schedule (Asia/Yerevan saturday,sunday 02:00-06:00): 2026-11-28T00:30:00Z
+```
+
+Nothing schedules the return: the next decision evaluates the clock again, so a
+model participates normally as soon as its window ends. If every candidate is
+inside a window the decision has no route, which `POST /v1/routing/select`
+reports as the existing `409`.
+
+Validation runs at startup and reports every broken window at once, naming the
+setting path (`litellm.model_aliases.<alias>.unavailable.windows[<n>].start`) and
+never echoing the configured value.
 
 ## Unknown capabilities are conservative
 

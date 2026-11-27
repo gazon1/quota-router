@@ -52,6 +52,24 @@ litellm:
         tool_calling: supported
         structured_output: unsupported
       tasks: [coding]
+      # Optional recurring local-time windows during which routing must not
+      # select this model: a hard constraint, enforced before affinity and
+      # override, so neither can reach it. `timezone` is a required IANA name
+      # when windows are configured; days are recurring weekdays, start is
+      # inclusive, end is exclusive, and start > end means an overnight window
+      # (here Friday 23:00 through Saturday 02:00). Wall-clock hours are
+      # evaluated in `timezone`, so DST does not shift what the window covers.
+      # Absent or empty means no time-based restriction. File-configured only:
+      # a list has no honest environment-variable encoding.
+      # unavailable:
+      #   timezone: Asia/Yerevan
+      #   windows:
+      #     - days: [friday]
+      #       start: "23:00"
+      #       end: "02:00"
+      #     - days: [monday]
+      #       start: "12:00"
+      #       end: "14:30"
     # `enabled: false` keeps an entry configured but out of routing, for a model
     # that is being retired or is currently out of quota. Nothing is claimed here,
     # because only the OpenAI-shaped route was measured and this one is

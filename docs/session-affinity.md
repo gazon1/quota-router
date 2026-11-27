@@ -36,9 +36,9 @@ abandoned one stops being pinned without anyone releasing it.
 
 ## How a decision uses it
 
-Affinity is applied after the durable stages (configuration, capabilities) and
-before the transient ones. Only a pin for **this** session, naming an alias, with
-an expiry still in the future, applies.
+Affinity is applied after the durable stages (configuration, capabilities, the
+configured `unavailable` schedule) and before the transient ones. Only a pin for
+**this** session, naming an alias, with an expiry still in the future, applies.
 
 | Pin state | Effect |
 |---|---|
@@ -60,6 +60,7 @@ route itself:
 | provider health stale, not observed, unknown | provider health `UNAVAILABLE` |
 | quota not observed, or `QUOTA_UNKNOWN` with any reason | quota `EXHAUSTED` |
 | | provider in a routing cooldown |
+| | model inside a configured `unavailable` window ([schedule](./model-catalogue.md#recurring-unavailability-windows)) |
 | | capability no longer satisfied |
 | | alias disabled or absent from the catalogue |
 

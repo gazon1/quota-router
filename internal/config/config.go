@@ -84,6 +84,10 @@ type Model struct {
 	// Tasks are the task classes this model is suitable for, for example
 	// "coding" or "reasoning".
 	Tasks []string `koanf:"tasks"`
+	// Unavailable is an optional recurring weekly schedule during which routing
+	// must not select this model, in the model's own local time. Absent or empty
+	// means no time-based restriction.
+	Unavailable *Unavailable `koanf:"unavailable"`
 }
 
 // Capabilities are what a model was verified to support. Each field is

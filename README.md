@@ -97,6 +97,14 @@ request**, so a model nobody measured is never selected for a job it cannot prov
 it does. Full field table, conservative matching rule and the fatal-versus-warn
 split of the startup check: [docs/model-catalogue.md](./docs/model-catalogue.md).
 
+An entry may also declare `unavailable`: recurring weekly local-time windows in a
+configured IANA zone during which routing must not select it. The window is a hard
+constraint applied before affinity and override, evaluated at each decision's own
+instant, so a model returns to normal selection as soon as its window ends with no
+scheduler or restart. It is file-configured only.
+[docs/model-catalogue.md](./docs/model-catalogue.md#recurring-unavailability-windows)
+has the fields, the overnight and DST rules, and the decision explanation.
+
 ## Routing request contract
 
 [internal/routing](./internal/routing) defines the versioned agent-to-router
@@ -211,6 +219,7 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CAPABILITIES__TOOL_CALLING` | unverified | `supported` or `unsupported` |
 | `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CAPABILITIES__STRUCTURED_OUTPUT` | unverified | `supported` or `unsupported` |
 | `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__TASKS` | unset | Comma-separated task classes the model suits |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__UNAVAILABLE` | — | **File only.** Recurring unavailability windows nest a list inside a list, so no variable sets it; see [model-catalogue.md](./docs/model-catalogue.md#recurring-unavailability-windows). |
 | `QUOTA_ROUTER_PROVIDERS__<NAME>__BASE_URL` | unset | Provider API URL |
 | `QUOTA_ROUTER_PROVIDERS__<NAME>__API_KEY` | unset | Provider credential (secret) |
 | `QUOTA_ROUTER_POLLING__INTERVAL` | `30s` | Quota polling interval |

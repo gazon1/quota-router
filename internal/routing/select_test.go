@@ -719,7 +719,7 @@ func TestSelectStageCoverage(t *testing.T) {
 	req.TaskClass = TaskCoding
 	req.Capabilities = &RequiredCapabilities{ToolCalling: true}
 	d := sel.Select(req, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	stages := []string{"configuration", "capabilities", "provider_health", "subscription_quota", "temporary_exclusions", "session_affinity", "configured_preference", "performance_preference", "tie_break"}
+	stages := []string{"configuration", "capabilities", "model_availability", "provider_health", "subscription_quota", "temporary_exclusions", "session_affinity", "configured_preference", "performance_preference", "tie_break"}
 	for _, s := range stages {
 		if !hasStage(d, s) {
 			t.Fatalf("missing stage %q in %+v", s, d.Stages)
