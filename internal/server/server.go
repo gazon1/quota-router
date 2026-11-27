@@ -289,7 +289,7 @@ func providerStateFromStore(h store.HealthRecord) quota.ProviderState {
 
 func (s *Server) persistDecision(ctx context.Context, d routing.Decision) error {
 	if s.decisions == nil {
-		return nil
+		return fmt.Errorf("decision store unavailable")
 	}
 	payload, err := json.Marshal(d)
 	if err != nil {
