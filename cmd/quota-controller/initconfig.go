@@ -40,6 +40,13 @@ func initConfig(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, fmt.Sprintf(initConfigUsage, defaultConfigPathHint()))
 		return 2
 	}
+	// -h is help, not a path: treating it as one would create a file named "-h"
+	// in the working directory, which is never what a caller asking for help
+	// meant.
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprint(stdout, fmt.Sprintf(initConfigUsage, defaultConfigPathHint()))
+		return 0
+	}
 	path := ""
 	if len(args) == 1 {
 		path = args[0]
@@ -68,7 +75,9 @@ func initConfig(args []string, stdout, stderr io.Writer) int {
 }
 
 // writeNewFile creates path exclusively, so a file that appeared between the
-// existence check and the write is not silently replaced.
+// existence check and the write is not silently replaced. A write or close that
+// fails removes the partial file: leaving it behind would make every later run
+// refuse with "already exists" because of a file that was never valid.
 func writeNewFile(path string, body []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -79,9 +88,14 @@ func writeNewFile(path string, body []byte) error {
 	}
 	if _, err := f.Write(body); err != nil {
 		f.Close()
+		os.Remove(path)
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // defaultConfigPathHint names the default path in the usage text, falling back to

@@ -145,3 +145,71 @@ func TestInitConfigRejectsExtraArguments(t *testing.T) {
 		t.Fatalf("stderr = %q, want usage", errOut.String())
 	}
 }
+
+// -h is help, never a path. Treating it as one wrote a file literally named "-h"
+// into the working directory.
+func TestInitConfigHelpDoesNotCreateFiles(t *testing.T) {
+	for _, flag := range []string{"-h", "--help"} {
+		t.Run(flag, func(t *testing.T) {
+			home := isolatedHome(t)
+			w := t.TempDir()
+			wd, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(w); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(wd) })
+
+			var out, errOut bytes.Buffer
+			if code := initConfig([]string{flag}, &out, &errOut); code != 0 {
+				t.Fatalf("initConfig(%q) = %d, want 0", flag, code)
+			}
+			if !strings.Contains(out.String(), "usage:") {
+				t.Fatalf("stdout = %q, want the usage text", out.String())
+			}
+			// Nothing may be created: not in the working directory, not at home.
+			entries, err := os.ReadDir(w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				names := make([]string, 0, len(entries))
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				t.Fatalf("working directory gained %v, want nothing", names)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".config", "quota-router", "config.yaml")); !os.IsNotExist(err) {
+				t.Fatal("help wrote the user config, want nothing created")
+			}
+		})
+	}
+}
+
+// writeNewFile creates the file once and refuses afterwards, leaving the first
+// contents intact. The partial-file removal on a failed write is not exercised
+// here: forcing a mid-write failure portably needs an injectable writer, which
+// would be more machinery than the four cleanup lines it would cover.
+func TestWriteNewFileCreatesOnceAndRefusesAfter(t *testing.T) {
+	dir := t.TempDir()
+	// A path whose parent is a file cannot be created; force the write itself to
+	// fail by making the target a directory-less path on a read-only dir is
+	// platform-specific, so use /dev/full via a path we can actually open.
+	path := filepath.Join(dir, "cfg.yaml")
+	if err := writeNewFile(path, []byte("ok\n")); err != nil {
+		t.Fatalf("writeNewFile: %v", err)
+	}
+	// A second call must refuse and leave the first file intact.
+	if err := writeNewFile(path, []byte("second\n")); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("error = %v, want an already-exists refusal", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "ok\n" {
+		t.Fatalf("content = %q, want the first write intact", body)
+	}
+}
