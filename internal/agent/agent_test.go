@@ -69,6 +69,9 @@ func TestAgentContract(t *testing.T) {
 	if call.model != "cc-coding" {
 		t.Fatalf("proxy model = %q, want the routed alias cc-coding", call.model)
 	}
+	// This asserts what ProxyRequest sets, not that LiteLLM honours the header:
+	// on the pinned image it neither echoes nor forwards X-Request-Id, which is
+	// why correlation relies on request_id/attempt rather than this header.
 	if call.requestID != got.RequestID {
 		t.Fatalf("proxy X-Request-Id = %q, want %q", call.requestID, got.RequestID)
 	}

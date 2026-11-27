@@ -37,9 +37,18 @@ line even before a decision id exists.
 
 | Id | Minted by | Travels as |
 |---|---|---|
-| `request_id` | agent, once per request | `X-Request-Id` on `/v1/route` and on the proxy call, then `request_id` in the usage report |
+| `request_id` | agent, once per request | `X-Request-Id` on `/v1/route`, then `request_id` in the usage report |
 | `decision_id` | controller, in the route response | `decision_id` in the usage report |
 | `attempt` | agent, 1-based per request | `attempt` in the usage report |
+
+The proxy hop is **not** correlated by `X-Request-Id`. Measured on the pinned
+`v1.110.0` image: a client-supplied `X-Request-Id` is neither echoed in the
+response nor forwarded upstream, and LiteLLM mints its own
+`x-litellm-call-id` per call. `ProxyRequest` still sets the header (it is
+harmless and some gateways honour it), but do not rely on it to join a proxy
+call to a report. Join on `request_id` + `attempt`, which the agent controls on
+both ends, and read `x-litellm-call-id` from the proxy response if a call id is
+needed in the agent's own logs.
 
 `request_id` is what makes a usage report idempotent: `(request_id, attempt)` is
 unique in the usage store, so a redelivery writes nothing and a retry is a new
@@ -210,8 +219,8 @@ controller with a real SQLite store, a stub proxy, and the properties this
 document relies on —
 
 1. the decision the agent used is the decision the controller persisted;
-2. the proxy is called with the returned alias and the same `X-Request-Id`, and
-   no prompt content ever reaches the controller;
+2. the proxy is called with the returned alias, and no prompt content ever
+   reaches the controller;
 3. the usage row joins both ids, keeps the reported counts and provenance, and a
    repeated report does not double-count;
 4. a controller outage fails closed, or uses the manual route visibly — while a
@@ -222,6 +231,27 @@ document relies on —
 It is worth copying this shape for any non-Go agent: a fake proxy, a real
 controller, and an assertion that the bytes reaching the controller contain no
 prompt.
+
+### Verified against the pinned image
+
+The usage field names above are not taken from the OpenAI spec. They were
+measured on `ghcr.io/berriai/litellm:v1.110.0` (digest `4295b06…`) with an
+OpenAI-shaped upstream behind it, and the captured response bodies live in
+[internal/agent/testdata](../internal/agent/testdata) where the Go tests parse
+them. `deploy/interop/run-interop.sh` reproduces the capture: it starts the
+pinned image, asserts it reports version `1.110.0`, drives a non-streaming call
+and an SSE call with `stream_options.include_usage`, and fails if
+`usage.prompt_tokens` / `usage.completion_tokens` are absent or renamed.
+
+Two measured behaviours worth knowing:
+
+- Usage arrives in a non-streaming response as `usage.prompt_tokens` /
+  `usage.completion_tokens`, and in a stream on a **final chunk with an empty
+  `choices` array** — so a stream reader must keep reading after `finish_reason`
+  to find it. Without `include_usage` there is no usage chunk at all.
+- What this proves is LiteLLM's serialization, since the upstream is local. A
+  real provider's *numbers* are its own; this check says nothing about them.
+
 
 ## What is deliberately not here
 

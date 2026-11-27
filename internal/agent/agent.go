@@ -395,6 +395,12 @@ func (c *Client) url(base, path string) string {
 	return strings.TrimRight(base, "/") + path
 }
 
+// ParseUsage reads the token counts from a proxy response body, for a streaming
+// caller that reassembles the final chunk itself. Nil means the response carried
+// no usage object; a count inside it may still be nil, and a reported zero is a
+// value.
+func ParseUsage(payload []byte) *Usage { return parseUsage(payload) }
+
 func parseUsage(payload []byte) *Usage {
 	var out struct {
 		Usage *struct {
