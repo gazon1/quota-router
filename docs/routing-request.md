@@ -16,7 +16,7 @@ not a per-message reclassification, and not a session migration.
 |---|---|---|
 | `version` | yes | Schema version. Current version is `1`. |
 | `session_id` | yes | Agent session identifier. The router may use it to preserve session affinity where applicable. |
-| `capabilities` | yes (object, fields optional) | Hard requirements the selected model/provider must satisfy: `streaming`, `tool_calling`, `structured_output`. A model that cannot satisfy a required capability is ineligible regardless of preference or override. |
+| `capabilities` | yes (object, fields optional) | Hard requirements the selected model/provider must satisfy: `streaming`, `tool_calling`, `structured_output`. The field must be present; an empty object `{}` means no capability requirements. A model that cannot satisfy a required capability is ineligible regardless of preference or override. |
 | `task_class` | no | Agent-supplied task class: `routine`, `coding`, or `reasoning`. Include it only when routing policy has a concrete effect for it. The controller must not make an extra LLM call to infer it. |
 | `preference` | no | Request-level preference, separate from operator-configured provider/model ordering (#53). It is not a hard constraint. |
 | `override` | no | Explicit manual route selection. Visible, auditable, and bounded by hard constraints. |
@@ -52,6 +52,7 @@ values at the contract boundary:
 
 - unsupported `version`;
 - missing/blank `session_id`;
+- missing `capabilities` (the field must be present; `{}` is valid);
 - unsupported `task_class`;
 - empty or blank preference/override fields;
 - preference `model_alias` contradicting `override.model_alias`.
@@ -59,6 +60,13 @@ values at the contract boundary:
 Contract validation checks shape, not catalogue membership or runtime
 eligibility. Whether an alias exists, is enabled, has quota, is healthy, or
 satisfies capabilities is decided by #17.
+
+## Compatibility
+
+`task_class` is a closed v1 vocabulary (`routine`, `coding`, `reasoning`).
+Unknown values are rejected so routing policy cannot silently ignore a class it
+does not understand. Adding a new class is a contract change that requires
+coordinated agent/controller deployment and an explicit policy decision in #17.
 
 ## Boundaries
 

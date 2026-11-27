@@ -43,8 +43,9 @@ type RouteRequest struct {
 	SessionID string `json:"session_id"`
 	// Capabilities are hard requirements the selected model/provider must
 	// satisfy. A model that cannot satisfy them is ineligible regardless of
-	// preferences or overrides.
-	Capabilities RequiredCapabilities `json:"capabilities"`
+	// preferences or overrides. The field is required; an empty object means no
+	// capability requirements.
+	Capabilities *RequiredCapabilities `json:"capabilities"`
 	// TaskClass is an optional agent-supplied task class. The controller must
 	// not make an extra LLM call to infer it.
 	TaskClass TaskClass `json:"task_class,omitempty"`
@@ -95,6 +96,9 @@ func (r RouteRequest) Validate() error {
 	}
 	if strings.TrimSpace(r.SessionID) == "" {
 		errs = append(errs, errors.New("session_id must not be empty"))
+	}
+	if r.Capabilities == nil {
+		errs = append(errs, errors.New("capabilities must be present"))
 	}
 
 	if r.TaskClass != "" && !r.TaskClass.known() {
