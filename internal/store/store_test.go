@@ -42,8 +42,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 2 {
-		t.Fatalf("version = %d, want 2", v)
+	if v != 4 {
+		t.Fatalf("version = %d, want 4", v)
 	}
 
 	// A restart must not re-apply or fail: this is the existing-database path.
@@ -60,7 +60,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err := again.Migrate(context.Background()); err != nil {
 		t.Fatalf("Migrate after restart: %v", err)
 	}
-	for _, table := range []string{"quota_snapshots", "quota_windows", "usage_records", "provider_health", "controller_state"} {
+	for _, table := range []string{"quota_snapshots", "quota_windows", "usage_records", "provider_health", "controller_state", "poll_state", "routing_decisions"} {
 		var name string
 		if err := again.db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
 			t.Errorf("table %s missing after restart: %v", table, err)
@@ -1215,8 +1215,8 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 2 {
-		t.Fatalf("version = %d, want 2", v)
+	if v != 4 {
+		t.Fatalf("version = %d, want 4", v)
 	}
 	var applied int
 	if err := first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied); err != nil {

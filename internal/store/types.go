@@ -112,10 +112,11 @@ type UsageRecord struct {
 
 // HealthRecord is one observation of provider reachability.
 type HealthRecord struct {
-	Provider   string
-	State      HealthState
-	ObservedAt time.Time
-	Error      string
+	Provider      string
+	State         HealthState
+	ObservedAt    time.Time
+	Error         string
+	CooldownUntil *time.Time
 }
 
 // Validate checks the values the schema constrains, so a bad enum reports the
@@ -226,6 +227,38 @@ func (h HealthRecord) Validate() error {
 	}
 	if err := checkSafeError(h.Error); err != nil {
 		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// RoutingDecisionRecord is one persisted routing decision.
+type RoutingDecisionRecord struct {
+	DecisionID       string
+	PolicyVersion    string
+	SessionID        string
+	SelectedAlias    string
+	SelectedProvider string
+	Payload          string
+	CreatedAt        time.Time
+}
+
+// Validate checks the routing decision record fields.
+func (r RoutingDecisionRecord) Validate() error {
+	var errs []error
+	if r.DecisionID == "" {
+		errs = append(errs, errors.New("decision_id must not be empty"))
+	}
+	if r.PolicyVersion == "" {
+		errs = append(errs, errors.New("policy_version must not be empty"))
+	}
+	if r.SessionID == "" {
+		errs = append(errs, errors.New("session_id must not be empty"))
+	}
+	if r.Payload == "" {
+		errs = append(errs, errors.New("payload must not be empty"))
+	}
+	if r.CreatedAt.IsZero() {
+		errs = append(errs, errors.New("created_at must be set"))
 	}
 	return errors.Join(errs...)
 }

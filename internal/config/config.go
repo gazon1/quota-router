@@ -180,9 +180,10 @@ type SQLite struct {
 // Retention bounds how long persisted history is kept. The newest state per
 // provider always survives, so cleanup never removes what routing reads.
 type Retention struct {
-	QuotaSnapshots time.Duration `koanf:"quota_snapshots"`
-	ProviderHealth time.Duration `koanf:"provider_health"`
-	UsageRecords   time.Duration `koanf:"usage_records"`
+	QuotaSnapshots  time.Duration `koanf:"quota_snapshots"`
+	ProviderHealth  time.Duration `koanf:"provider_health"`
+	UsageRecords    time.Duration `koanf:"usage_records"`
+	RoutingDecisions time.Duration `koanf:"routing_decisions"`
 }
 
 // Auth holds the bearer token for the controller's own HTTP API.
@@ -236,9 +237,10 @@ func Default() Config {
 			// A poll every 30s is ~2.9k snapshots a provider a day; a month of
 			// history is a few MB. Set a field to 0 to keep that table forever.
 			Retention: Retention{
-				QuotaSnapshots: 30 * 24 * time.Hour,
-				ProviderHealth: 30 * 24 * time.Hour,
-				UsageRecords:   90 * 24 * time.Hour,
+				QuotaSnapshots:   30 * 24 * time.Hour,
+				ProviderHealth:   30 * 24 * time.Hour,
+				UsageRecords:     90 * 24 * time.Hour,
+				RoutingDecisions: 30 * 24 * time.Hour,
 			},
 		},
 		Observability: Observability{Level: "info"},

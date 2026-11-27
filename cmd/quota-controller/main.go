@@ -95,7 +95,7 @@ func run(ctx context.Context, log *slog.Logger, level *slog.LevelVar) int {
 	stopPolling := startPoller(ctx, cfg, log, st, targets)
 	defer stopPolling()
 
-	return serve(ctx, log, cfg, server.New(log).Handler())
+	return serve(ctx, log, cfg, server.New(log, cfg, st).Handler())
 }
 
 // startPoller runs one independently supervised loop per configured provider
@@ -190,9 +190,10 @@ func startPruner(ctx context.Context, log *slog.Logger, st *store.Store, r confi
 // prune applies the configured retention bounds and logs what it removed.
 func prune(ctx context.Context, log *slog.Logger, st *store.Store, r config.Retention) error {
 	deleted, err := st.Prune(ctx, store.Retention{
-		QuotaSnapshots: r.QuotaSnapshots,
-		ProviderHealth: r.ProviderHealth,
-		UsageRecords:   r.UsageRecords,
+		QuotaSnapshots:   r.QuotaSnapshots,
+		ProviderHealth:   r.ProviderHealth,
+		UsageRecords:     r.UsageRecords,
+		RoutingDecisions: r.RoutingDecisions,
 	}, time.Now())
 	if err != nil {
 		return err

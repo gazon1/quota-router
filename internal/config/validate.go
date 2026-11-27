@@ -113,6 +113,7 @@ func (c Config) validate() error {
 		{"quota_snapshots", c.SQLite.Retention.QuotaSnapshots},
 		{"provider_health", c.SQLite.Retention.ProviderHealth},
 		{"usage_records", c.SQLite.Retention.UsageRecords},
+		{"routing_decisions", c.SQLite.Retention.RoutingDecisions},
 	} {
 		check(d.v >= 0, "sqlite.retention.%s must be >= 0 (0 keeps everything), got %s", d.name, d.v)
 	}
