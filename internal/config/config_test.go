@@ -550,6 +550,11 @@ func writeConfig(t *testing.T, body string) string {
 
 // cleanEnv unsets every variable the loader reads for the duration of the test.
 // t.Setenv("") unsets the variable and restores it afterwards.
+//
+// HOME is redirected too: with QUOTA_ROUTER_CONFIG_FILE unset, Load reads the
+// user-level file, so a test must not pick up the developer's real
+// ~/.config/quota-router/config.yaml — it would change what every default test
+// asserts, and pass or fail depending on the machine.
 func cleanEnv(t *testing.T) {
 	t.Helper()
 	for _, kv := range os.Environ() {
@@ -557,4 +562,6 @@ func cleanEnv(t *testing.T) {
 			t.Setenv(name, "")
 		}
 	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
 }

@@ -1,0 +1,141 @@
+# Example quota controller configuration.
+#
+# The file the controller reads by default is the user-level one:
+#
+#   quota-controller init-config    # writes ~/.config/quota-router/config.yaml
+#
+# It is created 0600 in a 0700 directory and is never overwritten, so it survives
+# a reinstall of the binary. Writing it by hand works too:
+#
+#   mkdir -p ~/.config/quota-router
+#   install -m 600 config.example.yaml ~/.config/quota-router/config.yaml
+#
+# Every setting below is optional: the service starts from its built-in defaults.
+# Precedence is defaults < this file < environment variables. QUOTA_ROUTER_CONFIG_FILE
+# selects a different file instead of the user-level default.
+#
+# Real credentials do not belong in this file, and the service rejects any
+# Secret field here as a startup error. Set them through the environment
+# (QUOTA_ROUTER_AUTH__TOKEN, QUOTA_ROUTER_PROVIDERS__<NAME>__API_KEY) or a
+# mounted secret file. See README.md.
+
+server:
+  addr: ":8080"
+  shutdown_timeout: 10s
+  read_header_timeout: 5s
+  read_timeout: 5s
+  write_timeout: 10s
+  idle_timeout: 60s
+
+litellm:
+  base_url: http://127.0.0.1:4000
+  # model_aliases is the model catalogue: a routing alias to the entry LiteLLM
+  # serves under that name. The model id is LiteLLM's model_name, exactly
+  # "<provider>/<model>"; the provider is its prefix and the alias is the key, so
+  # neither is repeated. Nothing is discovered at runtime, so set
+  # QUOTA_ROUTER_LITELLM__API_KEY and startup checks every id against GET
+  # /v1/models; an alias LiteLLM does not serve is then a startup error.
+  #
+  # Every field except model is optional, and an absent one claims nothing. A
+  # capability is `supported`, `unsupported`, or absent = unverified, and only
+  # an explicit `supported` satisfies a request that needs it. The values below
+  # are what docs/litellm-provider-compatibility.md actually measured, not what a
+  # provider documents: claim no more than that.
+  model_aliases:
+    # Short form: the model id and nothing verified about it. Inference on this
+    # account was blocked by plan exhaustion (429/2056), so no capability and no
+    # context limit was measured for M2.7; it is therefore unusable for any
+    # request with capability requirements, and usable only as a fallback.
+    fast: minimax/MiniMax-M2.7
+    # Full form: measured through LiteLLM. Chat completions, SSE streaming and
+    # tool calls returned 200; structured output was never verified, so it is
+    # unsupported rather than assumed. 256000 is the max_input_tokens value
+    # GET /v1/models reports for it.
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      context_limit: 256000
+      capabilities:
+        streaming: supported
+        tool_calling: supported
+        structured_output: unsupported
+      tasks: [coding]
+      # Optional recurring local-time windows during which routing must not
+      # select this model: a hard constraint, enforced before affinity and
+      # override, so neither can reach it. `timezone` is a required IANA name
+      # when windows are configured; days are recurring weekdays, start is
+      # inclusive, end is exclusive, and start > end means an overnight window
+      # (here Friday 23:00 through Saturday 02:00). Wall-clock hours are
+      # evaluated in `timezone`, so DST does not shift what the window covers.
+      # Absent or empty means no time-based restriction. File-configured only:
+      # a list has no honest environment-variable encoding.
+      # unavailable:
+      #   timezone: Asia/Yerevan
+      #   windows:
+      #     - days: [friday]
+      #       start: "23:00"
+      #       end: "02:00"
+      #     - days: [monday]
+      #       start: "12:00"
+      #       end: "14:30"
+    # `enabled: false` keeps an entry configured but out of routing, for a model
+    # that is being retired or is currently out of quota. Nothing is claimed here,
+    # because only the OpenAI-shaped route was measured and this one is
+    # Anthropic-shaped (/messages).
+    retired:
+      model: commandcode/deepseek-v4.1-flash
+      enabled: false
+
+providers:
+  # Provider base URLs are quota surfaces read by the Controller, never inference
+  # endpoints: LiteLLM owns inference. MiniMax serves quota from www.minimax.io
+  # while inference lives on api.minimax.io, so pointing this at the inference
+  # host silently polls nothing.
+  minimax:
+    base_url: https://www.minimax.io/v1
+    # api_key: set QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY to the Token Plan
+    # subscription key (sk-cp-...), the same credential litellm uses.
+
+polling:
+  interval: 30s
+  request_timeout: 10s
+
+routing:
+  # Remaining-quota fraction at or below which a provider counts as scarce.
+  low_quota_threshold: 0.1
+  # Remaining-quota fraction reserved for reasoning/coding workloads (#17).
+  # A provider at or below this fraction is ineligible for those task classes
+  # while quota is not exhausted. 0 disables the reserve.
+  reserve_fraction: 0 # set > 0 to reserve quota for reasoning/coding
+  # Static preference order, applied after hard constraints and viable session
+  # affinity (#53/#17). Lower numeric priority means higher preference.
+  # Provider priority ranks providers; model priority ranks aliases within one
+  # provider and is never compared across providers. When this section is set,
+  # every enabled catalogue alias must be listed under its provider.
+  providers:
+    commandcode:
+      priority: 1
+      models:
+        free-coding: 1
+    minimax:
+      priority: 2
+      models:
+        fast: 1
+
+sqlite:
+  path: quota-router.db
+  # How long to wait for another writer before reporting a busy database.
+  busy_timeout: 5s
+  # History kept locally. 0 keeps a table forever. The newest snapshot and
+  # health row per provider always survive, because routing reads them.
+  retention:
+    quota_snapshots: 720h   # 30 days
+    provider_health: 720h   # 30 days
+    usage_records: 2160h    # 90 days
+
+auth:
+  # Bearer token for the controller's own HTTP API: POST /v1/usage requires it,
+  # and an unset token refuses every report (docs/request-usage.md).
+  # token: set QUOTA_ROUTER_AUTH__TOKEN instead
+
+observability:
+  level: info

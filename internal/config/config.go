@@ -9,8 +9,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -251,14 +253,53 @@ func Default() Config {
 	}
 }
 
+// UserConfigPath returns the user-level configuration path,
+// ~/.config/quota-router/config.yaml on Linux (XDG_CONFIG_HOME honored,
+// $HOME/Library/Application Support on Darwin). It is outside the install
+// directory on purpose: a reinstall replaces the binary and leaves this file
+// alone, so operator settings and secrets survive an upgrade.
+//
+// An error means no home directory could be resolved — for example in a
+// container running without HOME — and the caller then has no default file to
+// fall back to.
+func UserConfigPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("user config directory: %w", err)
+	}
+	return filepath.Join(dir, "quota-router", "config.yaml"), nil
+}
+
+// resolveConfigPath applies the documented rule for which file is read: an
+// explicit QUOTA_ROUTER_CONFIG_FILE wins; otherwise the user-level file is used
+// when it exists. A missing default is not an error — the service starts on
+// defaults — while an explicit path must exist, so a typo stays visible instead
+// of silently running on the default file. A default that exists but cannot be
+// read is left for the loader to report by name.
+func resolveConfigPath() string {
+	if path := os.Getenv(ConfigFileEnv); path != "" {
+		return path
+	}
+	path, err := UserConfigPath()
+	if err != nil {
+		return "" // no home: nothing to read, defaults only
+	}
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	return path
+}
+
 // Load resolves the configuration in documented precedence order and validates
-// it. The YAML file named by QUOTA_ROUTER_CONFIG_FILE is optional; when it is set
-// but unreadable or unparsable, Load returns an error naming it.
+// it. The YAML file is the one named by QUOTA_ROUTER_CONFIG_FILE, or else
+// UserConfigPath when that file exists. An explicit path that is unreadable or
+// unparsable, and a default file that is unreadable, are startup errors naming
+// the file.
 func Load() (Config, error) {
 	cfg := Default()
 
 	k := koanf.New(".")
-	if path := os.Getenv(ConfigFileEnv); path != "" {
+	if path := resolveConfigPath(); path != "" {
 		if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
 			return Config{}, fmt.Errorf("config file %s: %w", path, err)
 		}

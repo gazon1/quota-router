@@ -1,11 +1,18 @@
 # Example quota controller configuration.
 #
-#   cp config.example.yaml config.yaml     # config.yaml is git-ignored
-#   chmod 600 config.yaml
+# The file the controller reads by default is the user-level one:
+#
+#   quota-controller init-config    # writes ~/.config/quota-router/config.yaml
+#
+# It is created 0600 in a 0700 directory and is never overwritten, so it survives
+# a reinstall of the binary. Writing it by hand works too:
+#
+#   mkdir -p ~/.config/quota-router
+#   install -m 600 config.example.yaml ~/.config/quota-router/config.yaml
 #
 # Every setting below is optional: the service starts from its built-in defaults.
-# Precedence is defaults < this file < environment variables. Point the service
-# at a file with QUOTA_ROUTER_CONFIG_FILE=config.yaml.
+# Precedence is defaults < this file < environment variables. QUOTA_ROUTER_CONFIG_FILE
+# selects a different file instead of the user-level default.
 #
 # Real credentials do not belong in this file, and the service rejects any
 # Secret field here as a startup error. Set them through the environment
