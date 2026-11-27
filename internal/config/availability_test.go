@@ -278,3 +278,37 @@ litellm:
 		t.Fatalf("error = %v, want the unknown setting rejected", err)
 	}
 }
+
+// A window ending at 23:59 does not cover 23:59 — end is exclusive — so it is not
+// a way to say "the whole day". This is the mistake a full-day test fixture makes
+// (see TestSelectHonorsUnavailableWindow): the last minute of the day stays
+// eligible unless an overnight window is added.
+func TestWindowAtLastMinuteOfDay(t *testing.T) {
+	all := []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}
+	lastMinute := time.Date(2026, time.November, 28, 23, 59, 30, 0, time.UTC)
+
+	dayOnly := &Unavailable{
+		Timezone: "UTC",
+		Windows:  []UnavailableWindow{{Days: all, Start: "00:00", End: "23:59"}},
+	}
+	if _, ok := dayOnly.WindowAt(lastMinute); ok {
+		t.Fatal("23:59 must be outside a window ending at 23:59, because end is exclusive")
+	}
+
+	// The documented way to cover every instant: an overnight window fills the
+	// gap the exclusive end leaves.
+	full := &Unavailable{
+		Timezone: "UTC",
+		Windows: []UnavailableWindow{
+			{Days: all, Start: "00:00", End: "23:59"},
+			{Days: all, Start: "23:59", End: "00:00"},
+		},
+	}
+	base := time.Date(2026, time.November, 22, 0, 0, 0, 0, time.UTC) // Sunday
+	for m := 0; m < 7*24*60; m++ {
+		instant := base.Add(time.Duration(m) * time.Minute)
+		if _, ok := full.WindowAt(instant); !ok {
+			t.Fatalf("%s is not covered by the two-window schedule", instant.Format(time.RFC3339))
+		}
+	}
+}

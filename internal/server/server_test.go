@@ -932,11 +932,16 @@ var _ = bytes.NewBuffer
 // naming one is rejected rather than honored.
 func TestSelectHonorsUnavailableWindow(t *testing.T) {
 	window := func() *config.Unavailable {
-		// The store stamps observations with time.Now(), so the window is derived
-		// from the real clock: one that contains every instant.
+		// The store stamps observations with time.Now(), so this test cannot pass
+		// an instant the way the selector tests do. Two windows cover the whole
+		// day: end is exclusive, so 00:00-23:59 alone leaves 23:59:00-23:59:59
+		// eligible and the assertion would fail for one minute a day.
 		return &config.Unavailable{
 			Timezone: "UTC",
-			Windows:  []config.UnavailableWindow{{Days: []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}, Start: "00:00", End: "23:59"}},
+			Windows: []config.UnavailableWindow{
+				{Days: []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}, Start: "00:00", End: "23:59"},
+				{Days: []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}, Start: "23:59", End: "00:00"},
+			},
 		}
 	}
 	cfg := testRoutingConfig()
