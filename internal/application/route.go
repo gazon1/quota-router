@@ -111,8 +111,9 @@ func (s *RouteService) Release(ctx context.Context, sessionID string) (store.Ses
 
 // loadSelectState reads what selection needs for one session: quota and health
 // observations plus that session's route pin, if it has a live one. An expired
-// pin is dropped here as well as in the selector, so the decision explanation
-// and the stored state agree on what the session is pinned to. Performance
+// pin is ignored here as well as in the selector, so the decision explanation
+// and the stored state agree on what the session is pinned to. Expired rows are
+// left for TTL/storage cleanup rather than deleted on the read path. Performance
 // tie-breaks are implemented in the selector but no observation store feeds them
 // yet; they stay unused rather than being loaded from nothing.
 func (s *RouteService) loadSelectState(ctx context.Context, sessionID string) (routing.SelectState, error) {

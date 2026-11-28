@@ -249,16 +249,29 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
 	<-state.read // route1 holds session lock and is blocked in state read
 
-	started2 := make(chan struct{})
 	done2 := make(chan error, 1)
-	go func() {
-		close(started2)
-		_, err := svc.Route(context.Background(), routeReq("s1"))
-		done2 <- err
-	}()
-	<-started2
-	// Give route2 a chance to attempt lock acquisition; it must not complete
-	// while route1 still holds the session lock.
+	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done2 <- err }()
+
+	// route2 has reached lock() when it increments the session entry refs to 2;
+	// lock() increments refs before blocking on the per-session mutex.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		svc.sessions.mu.Lock()
+		e := svc.sessions.m["s1"]
+		refs := 0
+		if e != nil {
+			refs = e.refs
+		}
+		svc.sessions.mu.Unlock()
+		if refs >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("second same-session route did not reach session lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	select {
 	case err := <-done2:
 		t.Fatalf("second same-session route completed before first released lock: %v", err)
@@ -308,14 +321,8 @@ func TestRouteDifferentSessionsConcurrent(t *testing.T) {
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
 	<-state.read // route1 holds s1 lock while blocked
 
-	started2 := make(chan struct{})
 	done2 := make(chan error, 1)
-	go func() {
-		close(started2)
-		_, err := svc.Route(context.Background(), routeReq("s2"))
-		done2 <- err
-	}()
-	<-started2
+	go func() { _, err := svc.Route(context.Background(), routeReq("s2")); done2 <- err }()
 	select {
 	case err := <-done2:
 		if err != nil {
