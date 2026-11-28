@@ -169,3 +169,79 @@ func TestLoadRoutingProviderModelEnvNoAmbiguousNormalize(t *testing.T) {
 	assert.Equal(t, 3, cfg.Routing.Providers["commandcode"].Models["free_coding"], "models=%v", cfg.Routing.Providers["commandcode"].Models)
 	assert.Equal(t, 1, cfg.Routing.Providers["commandcode"].Models["free-coding"], "models=%v", cfg.Routing.Providers["commandcode"].Models)
 }
+
+func TestLoadRoutingProviderModelFromEnvHyphenEscape(t *testing.T) {
+	cleanEnv(t)
+	// The documented _H_ escape encodes a hyphen in an alias name.
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FREE_H_CODING__MODEL", "commandcode/stealth/glyph-cluster:free")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__PRIORITY", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_H_CODING", "1")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"free-coding": 1}, cfg.Routing.Providers["commandcode"].Models)
+	assert.Contains(t, cfg.LiteLLM.ModelAliases, "free-coding")
+}
+
+func TestLoadRoutingProviderModelFromEnvHyphenEscapeIsCaseFolded(t *testing.T) {
+	cleanEnv(t)
+	// Names are case folded before the escape is decoded.
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__Free_H_Coding__MODEL", "commandcode/stealth/glyph-cluster:free")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__PRIORITY", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__Free_H_Coding", "1")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"free-coding": 1}, cfg.Routing.Providers["commandcode"].Models)
+}
+
+func TestLoadRoutingProviderModelFromEnvUnderscoreResolvesHyphenatedAlias(t *testing.T) {
+	cleanEnv(t)
+	// The catalogue alias is declared with the escape, so the underscore form
+	// of the same alias has no catalogue entry of its own and resolves to it.
+	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FREE_H_CODING__MODEL", "commandcode/stealth/glyph-cluster:free")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__PRIORITY", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_CODING", "1")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"free-coding": 1}, cfg.Routing.Providers["commandcode"].Models)
+}
+
+func TestLoadRoutingProviderModelEnvOverridesFileWithSameAlias(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "routing/hyphen-alias.yaml")))
+	// The escaped spelling addresses the same alias as the file key, so the
+	// environment wins over the file.
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_H_CODING", "2")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"free-coding": 2}, cfg.Routing.Providers["commandcode"].Models)
+}
+
+func TestLoadEnvRejectsConflictingSpellingsOfOneKey(t *testing.T) {
+	cleanEnv(t)
+	// The hyphenated and the escaped spelling address one key; the loader
+	// must not pick a winner by environment order.
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE-CODING", "1")
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_H_CODING", "2")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE-CODING")
+	assert.ErrorContains(t, err, "QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_H_CODING")
+}
+
+func TestLoadRoutingEnvUnderscoreFormOverridesFileForSameAlias(t *testing.T) {
+	cleanEnv(t)
+	// The file sets the hyphenated alias and the environment the underscore
+	// form. The underscore resolves to the hyphenated alias, so the
+	// environment addresses the same key and wins over the file.
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "routing/hyphen-alias.yaml")))
+	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_CODING", "2")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int{"free-coding": 2}, cfg.Routing.Providers["commandcode"].Models)
+}

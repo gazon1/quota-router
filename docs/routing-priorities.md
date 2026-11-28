@@ -80,10 +80,26 @@ QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__MODELS__FAST=1
 `__` separates nesting levels. For map-key segments such as provider names and
 catalogue aliases, literal hyphens are supported in the environment variable name
 (for example `FREE-CODING` for alias `free-coding`). In shells where `export`
-does not allow hyphens in identifiers, use underscores (`FREE_CODING`); on load,
-an underscore form is mapped to the hyphenated catalogue alias only when that
-hyphenated alias exists and the underscore form is not itself a configured
+does not allow hyphens in identifiers, write the hyphen as `_H_`
+(`FREE_H_CODING` for alias `free-coding`) or use underscores (`FREE_CODING`); on
+load, an underscore form is mapped to the hyphenated catalogue alias only when
+that hyphenated alias exists and the underscore form is not itself a configured
 catalogue alias. Aliases that legitimately contain underscores are not remapped.
+
+The `_H_` escape applies to environment variable names only; in a configuration
+file an alias is written literally. It is the one reserved sequence in an
+environment name, so an alias that itself contains `_H_` can only be set from a
+file.
+
+The environment is decoded and normalized before it is merged with the file, so a
+variable reaches the same configuration key a file key does and the environment
+wins over the file for that key. File keys are literal: a file names an alias
+exactly as the catalogue does, so `free_coding` in a file stays `free_coding`
+and is not remapped to `free-coding`.
+
+Two variables that address one configuration key are rejected at startup instead
+of one silently winning: the error names every variable and the key they
+address. The message is the same whatever order the environment is read in.
 
 ## Validation
 

@@ -13,12 +13,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/knadh/koanf/parsers/yaml"
-	"github.com/knadh/koanf/providers/env"
+	env "github.com/knadh/koanf/providers/env/v2"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 )
@@ -30,6 +31,11 @@ const (
 	EnvPrefix     = "QUOTA_ROUTER_"
 	EnvDelim      = "__"
 	ConfigFileEnv = EnvPrefix + "CONFIG_FILE"
+	// envHyphenEscape encodes a literal hyphen inside one environment variable
+	// name segment: FREE_H_CODING addresses the alias free-coding. Only
+	// environment names use it; file keys are literal. A segment that is
+	// exactly "h" is left alone, so a provider named h keeps its name.
+	envHyphenEscape = "_h_"
 )
 
 // Config is the whole runtime configuration.
@@ -204,6 +210,10 @@ func ConfigPath() string {
 // it. The YAML file is the one ConfigPath selects. An explicit path that is
 // unreadable or unparsable, and a default file that is unreadable, are startup
 // errors naming the file.
+//
+// The file is read as it is: its keys are literal. The environment is
+// normalized before it is merged, so a variable that addresses a hyphenated
+// alias reaches the same configuration path the file key does.
 func Load() (Config, error) {
 	cfg := Default()
 
@@ -222,8 +232,8 @@ func Load() (Config, error) {
 	if err := loadSecretFiles(k); err != nil {
 		return Config{}, err
 	}
-	if err := k.Load(env.ProviderWithValue(EnvPrefix, EnvDelim, envKey), nil); err != nil {
-		return Config{}, fmt.Errorf("environment: %w", err)
+	if err := loadEnv(k); err != nil {
+		return Config{}, err
 	}
 
 	// Decoding into the defaults keeps every value the file and environment do
@@ -250,7 +260,6 @@ func Load() (Config, error) {
 		}
 		cfg.LiteLLM.ModelAliases[alias] = m
 	}
-	normalizeRoutingEnvKeys(&cfg)
 	if err := cfg.validate(); err != nil {
 		errs = append(errs, err)
 	}
@@ -272,87 +281,206 @@ var legacyEnvKeys = map[string]string{
 	"idle_timeout":        "server__idle_timeout",
 }
 
-// envKey maps QUOTA_ROUTER_SERVER__ADDR to server.addr, and the deprecated
-// flat QUOTA_ROUTER_ADDR to the same place. The double delimiter leaves single
-// underscores free for field names such as base_url. Dynamic map keys in
-// routing.providers.*.models.* may contain hyphens (e.g. free-coding); users can
-// write them as literal hyphens or as _H_ in the env var name, and
-// normalizeRoutingEnvKeys resolves them after unmarshal.
-func envKey(key, value string) (string, any) {
-	if value == "" || key == ConfigFileEnv || strings.HasSuffix(key, "_FILE") {
-		return "", nil // empty value means unset; _FILE is handled separately
-	}
-	name := strings.ToLower(strings.TrimPrefix(key, EnvPrefix))
-	if current, ok := legacyEnvKeys[name]; ok {
-		if os.Getenv(EnvPrefix+strings.ToUpper(current)) != "" {
-			return "", nil // the current name wins over its deprecated alias
-		}
-		return current, value
-	}
-	return name, value
+// cataloguePath is where the model catalogue lives in the configuration.
+const cataloguePath = "litellm.model_aliases"
+
+// envSource returns the environment variables the loader reads. It is
+// os.Environ in production; tests replace it to control which variables exist
+// and in which order they are seen.
+var envSource = os.Environ
+
+// envVar is one environment variable after the loader has normalized its name.
+type envVar struct {
+	name  string   // the variable name as it appears in the environment
+	path  []string // the configuration path it addresses
+	value string
 }
 
-// normalizeRoutingEnvKeys rewrites routing.providers.*.models map keys so env
-// vars can address hyphenated catalogue aliases. Env var names are lowercased
-// by envKey, so `FREE-CODING` and `FREE_CODING` both arrive as `free-coding`
-// only if the user wrote a literal hyphen; `FREE_CODING` arrives as
-// `free_coding` and would miss the real alias. We fix only unambiguous cases:
-//
-//   - exact key already exists in catalogue: keep
-//   - key with '_' -> '-' exists in catalogue and the '_' form does not: rewrite
-//   - key with '_h_' -> '-' exists in catalogue and the raw form does not: rewrite
-//
-// No silent normalization when both forms could be valid catalogue aliases.
-func normalizeRoutingEnvKeys(cfg *Config) {
-	if len(cfg.Routing.Providers) == 0 {
-		return
-	}
-	known := make(map[string]bool, len(cfg.LiteLLM.ModelAliases))
-	for alias := range cfg.LiteLLM.ModelAliases {
-		known[alias] = true
-	}
-	for provider, rp := range cfg.Routing.Providers {
-		if len(rp.Models) == 0 {
+// collectEnv turns every environment variable the loader understands into the
+// configuration path it addresses. This is the syntax layer: the prefix, the
+// deprecated flat names and the _H_ escape. No alias is resolved here, so the
+// result does not depend on the catalogue.
+func collectEnv(src []string) []envVar {
+	var out []envVar
+	seen := map[string]bool{}
+	for _, kv := range src {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(name, EnvPrefix) || seen[name] {
 			continue
 		}
-		rewritten := make(map[string]int, len(rp.Models))
-		changed := false
-		for k, v := range rp.Models {
-			nk := normalizeEnvMapKey(k, known)
-			if nk != k {
-				changed = true
-			}
-			// If a collision happens after rewrite, keep the original key's
-			// value by not overwriting an existing rewritten entry unless it
-			// came from the same source key; validation will catch duplicates.
-			if _, exists := rewritten[nk]; !exists {
-				rewritten[nk] = v
-			} else {
-				// Preserve both as-is by keeping the later in a deterministic way?
-				// Better: keep original key so validation reports the real problem.
-				rewritten[k] = v
-			}
+		path, ok := envPath(name, value, src)
+		if !ok {
+			continue
 		}
-		if changed {
-			rp.Models = rewritten
-			cfg.Routing.Providers[provider] = rp
+		seen[name] = true
+		out = append(out, envVar{name: name, path: path, value: value})
+	}
+	return out
+}
+
+// envPath maps an environment variable name to the configuration path it
+// addresses: QUOTA_ROUTER_SERVER__ADDR becomes server.addr, and the deprecated
+// flat QUOTA_ROUTER_ADDR the same place. The double delimiter leaves single
+// underscores free for field names such as base_url. A hyphen in a name
+// segment (an alias such as free-coding) is written as _H_, so FREE_H_CODING
+// addresses free-coding; file keys are literal.
+//
+// ok is false when the variable carries no configuration value: an empty value
+// means unset, a _FILE variable is loaded from its file separately, and a
+// deprecated flat name gives way to its current counterpart.
+func envPath(name, value string, src []string) ([]string, bool) {
+	if value == "" || name == ConfigFileEnv || strings.HasSuffix(name, "_FILE") {
+		return nil, false
+	}
+	raw := strings.ToLower(strings.TrimPrefix(name, EnvPrefix))
+	if current, ok := legacyEnvKeys[raw]; ok {
+		if envSet(src, EnvPrefix+strings.ToUpper(current)) {
+			return nil, false // the current name wins over its deprecated alias
 		}
+		return strings.Split(current, EnvDelim), true
+	}
+	return decodeEnvHyphens(raw), true
+}
+
+// decodeEnvHyphens replaces the _H_ escape with a hyphen in every segment of
+// an environment variable name, so FREE_H_CODING addresses free-coding.
+// Segments are decoded one by one, so a segment that is exactly "h" keeps its
+// name and the __ nesting delimiter is never touched.
+//
+// The escape is reserved in environment names: it always decodes, so an alias
+// whose name contains "_h_" can only be set from a configuration file.
+func decodeEnvHyphens(name string) []string {
+	segments := strings.Split(name, EnvDelim)
+	for i, s := range segments {
+		segments[i] = strings.ReplaceAll(s, envHyphenEscape, "-")
+	}
+	return segments
+}
+
+// envSet reports whether a variable is set to a non-empty value in the
+// environment the loader reads.
+func envSet(src []string, name string) bool {
+	for _, kv := range src {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == name && v != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// catalogueAliases returns every alias name the catalogue holds: the aliases
+// the file declares plus the aliases the environment declares.
+func catalogueAliases(k *koanf.Koanf, vars []envVar) map[string]bool {
+	known := map[string]bool{}
+	if aliases, ok := k.Get(cataloguePath).(map[string]interface{}); ok {
+		for alias := range aliases {
+			known[alias] = true
+		}
+	}
+	for _, v := range vars {
+		if len(v.path) > 2 && v.path[0] == "litellm" && v.path[1] == "model_aliases" {
+			known[v.path[2]] = true
+		}
+	}
+	return known
+}
+
+// resolveRoutingAliases rewrites the alias of every routing model path to the
+// catalogue alias it addresses. Only environment paths are rewritten: file
+// keys are literal.
+func resolveRoutingAliases(vars []envVar, known map[string]bool) {
+	for i := range vars {
+		pos, ok := routingAlias(vars[i].path)
+		if !ok {
+			continue
+		}
+		vars[i].path[pos] = resolveAlias(vars[i].path[pos], known)
 	}
 }
 
-func normalizeEnvMapKey(key string, known map[string]bool) string {
+// routingAlias returns the position of the alias in a routing model path,
+// routing.providers.<provider>.models.<alias>.
+func routingAlias(path []string) (int, bool) {
+	if len(path) == 5 && path[0] == "routing" && path[1] == "providers" && path[3] == "models" {
+		return 4, true
+	}
+	return 0, false
+}
+
+// resolveAlias maps a routing model key to the catalogue alias it addresses.
+// The exact name wins. Otherwise the key matches an alias that differs only in
+// the separator (free_coding for free-coding), which is what an environment
+// variable without hyphens produces. A key that matches nothing is left as it
+// is, and validation reports it as an unknown alias.
+func resolveAlias(key string, known map[string]bool) string {
 	if known[key] {
 		return key
 	}
-	// Common env var form: users write FREE_CODING for free-coding. Normalize
-	// only when the hyphenated form is a known catalogue alias and the
-	// underscore form is not, so aliases that legitimately contain underscores
-	// are never silently remapped.
-	if strings.Contains(key, "_") {
-		candidate := strings.ReplaceAll(key, "_", "-")
-		if known[candidate] && !known[key] {
-			return candidate
-		}
+	if hyphenated := strings.ReplaceAll(key, "_", "-"); known[hyphenated] {
+		return hyphenated
 	}
 	return key
+}
+
+// checkEnvCollisions reports the variables that address one configuration
+// path. Two spellings of one key are a startup error: the loader must not
+// pick a winner by environment order, and that order is not the operator's.
+//
+// The message is deterministic: the paths are sorted, and so are the variable
+// names inside one path, so the same conflict always reads the same way.
+func checkEnvCollisions(vars []envVar) error {
+	groups := map[string][]string{}
+	for _, v := range vars {
+		path := strings.Join(v.path, ".")
+		groups[path] = append(groups[path], v.name)
+	}
+	paths := make([]string, 0, len(groups))
+	for path, names := range groups {
+		if len(names) > 1 {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.Strings(paths)
+	conflicts := make([]string, 0, len(paths))
+	for _, path := range paths {
+		names := groups[path]
+		sort.Strings(names)
+		conflicts = append(conflicts, fmt.Sprintf("%s all set %s", strings.Join(names, ", "), path))
+	}
+	return fmt.Errorf("environment: conflicting variables: %s", strings.Join(conflicts, "; "))
+}
+
+// loadEnv normalizes the environment and loads it into koanf. Normalization
+// happens before the merge, so a variable addresses exactly the configuration
+// path a file key does and the environment wins over the file. Conflicting
+// variables are reported before anything is loaded.
+func loadEnv(k *koanf.Koanf) error {
+	src := envSource()
+	vars := collectEnv(src)
+	resolveRoutingAliases(vars, catalogueAliases(k, vars))
+	if err := checkEnvCollisions(vars); err != nil {
+		return err
+	}
+	paths := make(map[string]envVar, len(vars))
+	for _, v := range vars {
+		paths[v.name] = v
+	}
+	err := k.Load(env.Provider(EnvDelim, env.Opt{
+		Prefix:      EnvPrefix,
+		EnvironFunc: func() []string { return src },
+		TransformFunc: func(name, value string) (string, any) {
+			v, ok := paths[name]
+			if !ok {
+				return "", nil
+			}
+			return strings.Join(v.path, EnvDelim), v.value
+		},
+	}), nil)
+	if err != nil {
+		return fmt.Errorf("environment: %w", err)
+	}
+	return nil
 }
