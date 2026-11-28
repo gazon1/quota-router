@@ -23,7 +23,7 @@ The server listens on `:8080` by default and exposes:
 | `POST /v1/route` | `QUOTA_ROUTER_AUTH__TOKEN` | Route decision (the issue-named alias of `POST /v1/routing/select`). |
 | `POST /v1/routing/select` | `QUOTA_ROUTER_AUTH__TOKEN` | Route decision: versioned request → decision with explanation. See [docs/routing-request.md](./docs/routing-request.md) |
 | `GET /v1/routing/decisions` | `QUOTA_ROUTER_AUTH__TOKEN` | Recent decision audit records. See [docs/routing-request.md](./docs/routing-request.md) |
-| `POST /v1/usage` | `QUOTA_ROUTER_AUTH__TOKEN` | Record one request attempt (tokens, provenance, outcome). See [docs/request-usage.md](./docs/request-usage.md) |
+| `POST /v1/usage` | `QUOTA_ROUTER_AUTH__TOKEN` | Record one request attempt (tokens, provenance, outcome). See [docs/request-usage.md](./docs/request-usage.md) and the canonical event contract in [docs/request-telemetry.md](./docs/request-telemetry.md) |
 | `POST /v1/sessions/{id}/release` | `QUOTA_ROUTER_AUTH__TOKEN` | End one session's route use: deletes its route pin; safely repeatable. See [docs/session-affinity.md](./docs/session-affinity.md) |
 
 The full controller API contract — endpoints, error envelope, status-code

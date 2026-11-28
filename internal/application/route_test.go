@@ -162,6 +162,43 @@ func TestRouteWithoutHTTPOrSQLite(t *testing.T) {
 	assert.Equal(t, got.DecisionID, dec.records[0].DecisionID)
 }
 
+// The routing decision is the route side of the event contract: it records
+// what was asked for and whether the route was an explicit override, so the
+// history can be read without parsing the payload.
+func TestRouteDecisionRecordsTaskClassAndExplicitRoute(t *testing.T) {
+	svc, _, _, dec := newTestService()
+
+	req := routeReq("s1")
+	req.TaskClass = routing.TaskCoding
+	if _, err := svc.Route(context.Background(), req); err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	req = routeReq("s2")
+	req.TaskClass = routing.TaskCoding
+	req.Override = &routing.ManualOverride{ModelAlias: "cc-coding"}
+	if _, err := svc.Route(context.Background(), req); err != nil {
+		t.Fatalf("Route with override: %v", err)
+	}
+
+	dec.mu.Lock()
+	defer dec.mu.Unlock()
+	if len(dec.records) != 2 {
+		t.Fatalf("decisions = %d, want 2", len(dec.records))
+	}
+	if dec.records[0].TaskClass != string(routing.TaskCoding) {
+		t.Fatalf("task class = %q, want %q", dec.records[0].TaskClass, routing.TaskCoding)
+	}
+	if dec.records[0].Explicit {
+		t.Fatal("a normal selection was recorded as an explicit override")
+	}
+	if !dec.records[1].Explicit {
+		t.Fatal("the manual override was not recorded as explicit")
+	}
+	if dec.records[1].TaskClass != string(routing.TaskCoding) {
+		t.Fatalf("task class = %q, want %q", dec.records[1].TaskClass, routing.TaskCoding)
+	}
+}
+
 func TestRoutePersistsDecisionBeforeAffinity(t *testing.T) {
 	cfg := testConfig()
 	state := &fakeState{

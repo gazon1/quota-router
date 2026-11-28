@@ -31,13 +31,31 @@ const (
 	OutcomeFailedBeforeFirstToken = "FAILED_BEFORE_FIRST_TOKEN"
 	OutcomePartialStream          = "PARTIAL_STREAM"
 	OutcomeCancelled              = "CANCELLED"
+	OutcomeAmbiguous              = "AMBIGUOUS"
 )
 
-// Provenance values the usage endpoint accepts. Nothing here estimates, so the
-// default is Reported.
+// Provenance values the usage endpoint accepts for a token count: which
+// channel produced the number. Nothing here estimates on its own, so the
+// default for a count this client received from the proxy is proxy_reported.
 const (
-	ProvenanceReported  = "reported"
-	ProvenanceEstimated = "estimated"
+	ProvenanceProviderReported = "provider_reported"
+	ProvenanceProxyReported    = "proxy_reported"
+	ProvenanceAgentReported    = "agent_reported"
+	ProvenanceEstimated        = "estimated"
+)
+
+// Route sources the usage endpoint accepts: where the route the attempt used
+// came from.
+const (
+	RouteSourceController = "controller"
+	RouteSourceManual     = "manual"
+)
+
+// Stream states the usage endpoint accepts: how far the response stream got.
+const (
+	StreamNotStreamed = "not_streamed"
+	StreamComplete    = "complete"
+	StreamInterrupted = "interrupted"
 )
 
 // Source is the usage-report channel this client reports under.
@@ -105,6 +123,10 @@ type Routed struct {
 	// RequestID is minted here, sent to the controller and the proxy as
 	// X-Request-Id, and reused as the usage report's request_id.
 	RequestID string
+	// TaskClass is the class of work the routing request described, when it
+	// named one. It travels with the usage report so the stored event says
+	// what kind of work it was.
+	TaskClass string
 	// Manual reports that the controller could not answer and Manual was used.
 	Manual bool
 }
@@ -125,6 +147,8 @@ type Reply struct {
 	// Outcome is SUCCESS for a 2xx response and FAILED_BEFORE_FIRST_TOKEN
 	// otherwise: a complete response cannot end in a partial stream.
 	Outcome string
+	// Latency is how long the call took, measured by this client.
+	Latency time.Duration
 }
 
 // Attempt is one finished attempt as the usage endpoint records it.
@@ -133,13 +157,23 @@ type Attempt struct {
 	Number int
 	// Outcome is one of the Outcome constants. Empty is stored as UNKNOWN.
 	Outcome string
+	// ErrorClass is the normalized reason the attempt failed, when it failed.
+	// It is a bounded class, never a provider message.
+	ErrorClass string
+	// StreamState says whether the response was streamed and how far it got.
+	// Empty means the reporter did not say.
+	StreamState string
 	// Counts the provider reported. Nil stays missing, never zero.
 	InputTokens  *int
 	OutputTokens *int
-	// Provenance defaults to ProvenanceReported. Set ProvenanceEstimated only
-	// for a count this installation derived, for example by counting tokens on a
-	// stream that returned no usage object.
+	// Provenance says which channel produced the counts. It defaults to
+	// agent_reported, because this client is the one reporting them; set
+	// ProvenanceEstimated only for a count this installation derived, for
+	// example by counting tokens on a stream that returned no usage object.
 	Provenance string
+	// TTFTMS and LatencyMS are the measured time to the first token and the
+	// total time. Nil means the measurement was not taken; it is not zero.
+	TTFTMS, LatencyMS *int64
 }
 
 // Attempt turns a complete reply into the attempt a report carries.
@@ -148,6 +182,12 @@ func (r Reply) Attempt(number int) Attempt {
 	if r.Usage != nil {
 		a.InputTokens = r.Usage.InputTokens
 		a.OutputTokens = r.Usage.OutputTokens
+		// The counts came from the proxy's response, so the proxy reported them.
+		a.Provenance = ProvenanceProxyReported
+	}
+	if r.Latency > 0 {
+		ms := r.Latency.Milliseconds()
+		a.LatencyMS = &ms
 	}
 	return a
 }
@@ -182,7 +222,7 @@ func (c *Client) Route(ctx context.Context, req routing.RouteRequest) (Routed, e
 
 	resp, err := c.httpClient().Do(httpReq)
 	if err != nil {
-		return c.unavailable(id, err)
+		return c.unavailable(id, string(req.TaskClass), err)
 	}
 	defer resp.Body.Close()
 	payload, err := readBody(resp.Body)
@@ -216,11 +256,12 @@ func (c *Client) Route(ctx context.Context, req routing.RouteRequest) (Routed, e
 			Provider:   d.SelectedProvider,
 			DecisionID: d.DecisionID,
 			RequestID:  id,
+			TaskClass:  string(req.TaskClass),
 		}, nil
 	case resp.StatusCode == http.StatusConflict:
 		return Routed{}, fmt.Errorf("%w: %s", ErrNoRoute, errorDetail(payload))
 	case resp.StatusCode >= 500:
-		return c.unavailable(id, fmt.Errorf("status %d: %s", resp.StatusCode, errorDetail(payload)))
+		return c.unavailable(id, string(req.TaskClass), fmt.Errorf("status %d: %s", resp.StatusCode, errorDetail(payload)))
 	default:
 		return Routed{}, fmt.Errorf("agent: routing request rejected with status %d: %s", resp.StatusCode, errorDetail(payload))
 	}
@@ -276,6 +317,7 @@ func (c *Client) Chat(ctx context.Context, routed Routed, body []byte) (Reply, e
 	if err != nil {
 		return Reply{}, err
 	}
+	started := time.Now()
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return Reply{}, fmt.Errorf("agent: call proxy: %w", err)
@@ -289,7 +331,13 @@ func (c *Client) Chat(ctx context.Context, routed Routed, body []byte) (Reply, e
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		outcome = OutcomeSuccess
 	}
-	return Reply{Status: resp.StatusCode, Body: payload, Usage: parseUsage(payload), Outcome: outcome}, nil
+	return Reply{
+		Status:  resp.StatusCode,
+		Body:    payload,
+		Usage:   parseUsage(payload),
+		Outcome: outcome,
+		Latency: time.Since(started),
+	}, nil
 }
 
 // Report sends one finished attempt to the controller, correlated by the ids
@@ -306,19 +354,29 @@ func (c *Client) Report(ctx context.Context, routed Routed, attempt Attempt) err
 		return errors.New("agent: routed provider is empty; a usage record requires it")
 	}
 	if attempt.Provenance == "" {
-		attempt.Provenance = ProvenanceReported
+		// This client is the one reporting the counts, and it does not know
+		// which upstream channel produced them. It says so rather than
+		// claiming the provider reported them.
+		attempt.Provenance = ProvenanceAgentReported
 	}
 	body, err := json.Marshal(usageBody{
-		RequestID:    routed.RequestID,
-		Attempt:      attempt.Number,
-		Provider:     routed.Provider,
-		Model:        routed.Alias,
-		InputTokens:  attempt.InputTokens,
-		OutputTokens: attempt.OutputTokens,
-		Provenance:   attempt.Provenance,
-		Source:       Source,
-		Outcome:      attempt.Outcome,
-		DecisionID:   routed.DecisionID,
+		RequestID:        routed.RequestID,
+		Attempt:          attempt.Number,
+		Provider:         routed.Provider,
+		Model:            routed.Alias,
+		TaskClass:        routed.TaskClass,
+		RouteSource:      routeSource(routed),
+		InputTokens:      attempt.InputTokens,
+		OutputTokens:     attempt.OutputTokens,
+		InputProvenance:  attempt.Provenance,
+		OutputProvenance: attempt.Provenance,
+		Source:           Source,
+		Outcome:          attempt.Outcome,
+		ErrorClass:       attempt.ErrorClass,
+		StreamState:      attempt.StreamState,
+		TTFTMS:           attempt.TTFTMS,
+		LatencyMS:        attempt.LatencyMS,
+		DecisionID:       routed.DecisionID,
 	})
 	if err != nil {
 		return fmt.Errorf("agent: encode usage report: %w", err)
@@ -346,23 +404,40 @@ func (c *Client) Report(ctx context.Context, routed Routed, attempt Attempt) err
 	return nil
 }
 
+// routeSource says where the route the attempt used came from: the
+// controller's decision, or the manual fallback used when the controller could
+// not answer.
+func routeSource(routed Routed) string {
+	if routed.Manual {
+		return RouteSourceManual
+	}
+	return RouteSourceController
+}
+
 // usageBody is this client's view of the POST /v1/usage contract
 // (docs/request-usage.md). The endpoint rejects unknown fields, so it carries no
 // content beyond these.
 type usageBody struct {
-	RequestID    string `json:"request_id"`
-	Attempt      int    `json:"attempt,omitempty"`
-	Provider     string `json:"provider"`
-	Model        string `json:"model,omitempty"`
-	InputTokens  *int   `json:"input_tokens,omitempty"`
-	OutputTokens *int   `json:"output_tokens,omitempty"`
-	Provenance   string `json:"provenance"`
-	Source       string `json:"source"`
-	Outcome      string `json:"outcome,omitempty"`
-	DecisionID   string `json:"decision_id,omitempty"`
+	RequestID        string `json:"request_id"`
+	Attempt          int    `json:"attempt,omitempty"`
+	Provider         string `json:"provider"`
+	Model            string `json:"model,omitempty"`
+	TaskClass        string `json:"task_class,omitempty"`
+	RouteSource      string `json:"route_source,omitempty"`
+	InputTokens      *int   `json:"input_tokens,omitempty"`
+	OutputTokens     *int   `json:"output_tokens,omitempty"`
+	InputProvenance  string `json:"input_provenance,omitempty"`
+	OutputProvenance string `json:"output_provenance,omitempty"`
+	Source           string `json:"source"`
+	Outcome          string `json:"outcome,omitempty"`
+	ErrorClass       string `json:"error_class,omitempty"`
+	StreamState      string `json:"stream_state,omitempty"`
+	TTFTMS           *int64 `json:"ttft_ms,omitempty"`
+	LatencyMS        *int64 `json:"latency_ms,omitempty"`
+	DecisionID       string `json:"decision_id,omitempty"`
 }
 
-func (c *Client) unavailable(id string, cause error) (Routed, error) {
+func (c *Client) unavailable(id, taskClass string, cause error) (Routed, error) {
 	// A cancelled or expired caller is not an outage. Substituting a manual route
 	// here would let an abandoned request continue down another path, so the
 	// caller's own error is returned unchanged and errors.Is still matches it.
@@ -372,7 +447,7 @@ func (c *Client) unavailable(id string, cause error) (Routed, error) {
 	if c.Manual.Alias == "" {
 		return Routed{}, fmt.Errorf("%w: %w", ErrControllerUnavailable, cause)
 	}
-	return Routed{Alias: c.Manual.Alias, Provider: c.Manual.Provider, RequestID: id, Manual: true}, nil
+	return Routed{Alias: c.Manual.Alias, Provider: c.Manual.Provider, RequestID: id, TaskClass: taskClass, Manual: true}, nil
 }
 
 // defaultHTTP is shared so a client with no HTTP set still reuses connections.

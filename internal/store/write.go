@@ -8,7 +8,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -65,12 +67,13 @@ func (s *Store) SaveQuotaSnapshot(ctx context.Context, snap QuotaSnapshot) error
 	})
 }
 
-// SaveUsageRecord appends one request attempt. A report for an attempt that is
-// already stored is ignored when the event content is identical, so a retried
-// report does not double-count tokens; a retry is a different attempt and gets
-// its own row. An empty outcome is stored as UNKNOWN and attempt 0 as the first
-// attempt, because neither is a value this store may invent. Reusing an event
-// identity for different content is ErrUsageConflict, not an overwrite.
+// SaveUsageRecord appends one request/outcome event. A report for an attempt
+// that is already stored is ignored when the event content is identical, so a
+// retried report does not double-count tokens; a retry is a different attempt
+// and gets its own row. An empty outcome is stored as UNKNOWN and attempt 0 as
+// the first attempt, because neither is a value this store may invent. Reusing
+// an event identity for different content is ErrUsageConflict, not an
+// overwrite.
 func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	if u.Attempt == 0 {
 		u.Attempt = 1
@@ -78,9 +81,18 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	if u.Outcome == "" {
 		u.Outcome = OutcomeUnknown
 	}
+	if u.SchemaVersion == 0 {
+		u.SchemaVersion = EventSchemaVersion
+	}
 	observedAtSet := u.ObservedAtReported
 	if u.ObservedAt.IsZero() {
 		u.ObservedAt = time.Now().UTC()
+	}
+	if u.ReceivedAt.IsZero() {
+		u.ReceivedAt = time.Now().UTC()
+	}
+	if u.EventID == "" {
+		u.EventID = eventID(u.RequestID, u.Attempt)
 	}
 	if err := u.Validate(); err != nil {
 		return fmt.Errorf("usage record: %w", err)
@@ -88,11 +100,18 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO usage_records
-			   (request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			   (request_id, attempt, event_id, schema_version, provider, model, task_class, route_source,
+			    input_tokens, input_provenance, output_tokens, output_provenance, source, outcome, error_class,
+			    stream_state, ttft_ms, latency_ms, decision_id, observed_at, observed_at_reported, received_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT (request_id, attempt) DO NOTHING`,
-			nullString(u.RequestID), u.Attempt, u.Provider, nullString(u.Model), u.InputTokens, u.OutputTokens,
-			u.Provenance, u.Source, u.Outcome, nullString(u.DecisionID), ts(u.ObservedAt))
+			nullString(u.RequestID), u.Attempt, u.EventID, u.SchemaVersion,
+			u.Provider, nullString(u.Model), nullString(u.TaskClass), nullString(string(u.RouteSource)),
+			u.InputTokens, nullString(string(u.InputProvenance)),
+			u.OutputTokens, nullString(string(u.OutputProvenance)),
+			u.Source, u.Outcome, nullString(string(u.ErrorClass)), nullString(string(u.StreamState)),
+			u.TTFTMS, u.LatencyMS, nullString(u.DecisionID),
+			ts(u.ObservedAt), u.ObservedAtReported, ts(u.ReceivedAt))
 		if err != nil {
 			return classify(err)
 		}
@@ -110,6 +129,23 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	})
 }
 
+// EventSchemaVersion versions the canonical request/outcome event contract. A
+// stored event carries the version it was written with, so a reader can tell
+// which shape it sees.
+const EventSchemaVersion = 1
+
+// eventID derives the stable id of an event from its identity. The same
+// request and attempt always produce the same id, and the id reveals neither
+// the request id nor anything about the request content.
+func eventID(requestID string, attempt int) string {
+	if requestID == "" {
+		// Without a request id there is no stable identity to derive from.
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", requestID, attempt)))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
 // usageConflict decides what a skipped duplicate means. A redelivered event with
 // identical content leaves the stored attempt alone and succeeds; the same event
 // id reused for different content is a conflict, not a retry, and must surface.
@@ -117,54 +153,30 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 // a redelivery that omitted it carries server-stamped arrival bookkeeping, not
 // event content, so it must not conflict on that alone.
 func (s *Store) usageConflict(ctx context.Context, tx *sql.Tx, u UsageRecord, observedAtSet bool) error {
-	var (
-		provider   string
-		model      sql.NullString
-		input      sql.NullInt64
-		output     sql.NullInt64
-		prov       string
-		src        string
-		outcome    string
-		decision   sql.NullString
-		observedAt string
-	)
-	err := tx.QueryRowContext(ctx,
-		`SELECT provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at
-		 FROM usage_records WHERE request_id = ? AND attempt = ?`,
-		u.RequestID, u.Attempt).Scan(&provider, &model, &input, &output, &prov, &src, &outcome, &decision, &observedAt)
+	existing, err := usageRecordByIdentity(ctx, tx, u.RequestID, u.Attempt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrUsageConflict
 		}
 		return classify(err)
 	}
-	storedObservedAt, err := parseTS(observedAt)
-	if err != nil {
-		return fmt.Errorf("usage record: stored observed_at: %w", err)
-	}
-	existing := UsageRecord{
-		RequestID:    u.RequestID,
-		Attempt:      u.Attempt,
-		Provider:     provider,
-		Model:        model.String,
-		InputTokens:  intFromNull(&input),
-		OutputTokens: intFromNull(&output),
-		Provenance:   Confidence(prov),
-		Source:       src,
-		Outcome:      Outcome(outcome),
-		DecisionID:   decision.String,
-		ObservedAt:   storedObservedAt,
-	}
 	if existing.Provider == "" || existing.Source == "" || existing.Outcome == "" {
 		return ErrUsageConflict
 	}
 	same := existing.Provider == u.Provider &&
 		existing.Model == u.Model &&
+		existing.TaskClass == u.TaskClass &&
+		existing.RouteSource == u.RouteSource &&
 		intValueEqual(existing.InputTokens, u.InputTokens) &&
 		intValueEqual(existing.OutputTokens, u.OutputTokens) &&
-		existing.Provenance == u.Provenance &&
+		existing.InputProvenance == u.InputProvenance &&
+		existing.OutputProvenance == u.OutputProvenance &&
 		existing.Source == u.Source &&
 		existing.Outcome == u.Outcome &&
+		existing.ErrorClass == u.ErrorClass &&
+		existing.StreamState == u.StreamState &&
+		intValueEqualInt64(existing.TTFTMS, u.TTFTMS) &&
+		intValueEqualInt64(existing.LatencyMS, u.LatencyMS) &&
 		existing.DecisionID == u.DecisionID
 	if same && observedAtSet && !existing.ObservedAt.Equal(u.ObservedAt) {
 		same = false
@@ -173,6 +185,61 @@ func (s *Store) usageConflict(ctx context.Context, tx *sql.Tx, u UsageRecord, ob
 		return ErrUsageConflict
 	}
 	return nil
+}
+
+// usageColumns is the column list of one stored event, in the order
+// scanUsageRecord reads it.
+const usageColumns = `request_id, attempt, event_id, schema_version, provider, model, task_class, route_source,
+	input_tokens, input_provenance, output_tokens, output_provenance, source, outcome, error_class,
+	stream_state, ttft_ms, latency_ms, decision_id, observed_at, observed_at_reported, received_at`
+
+// usageRecordByIdentity reads the stored event of one attempt.
+func usageRecordByIdentity(ctx context.Context, tx *sql.Tx, requestID string, attempt int) (UsageRecord, error) {
+	row := tx.QueryRowContext(ctx,
+		`SELECT `+usageColumns+` FROM usage_records WHERE request_id = ? AND attempt = ?`,
+		requestID, attempt)
+	return scanUsageRecord(row)
+}
+
+// scanUsageRecord reads one event row. A nullable column stays absent: it is
+// never turned into a zero or an empty string.
+func scanUsageRecord(row interface{ Scan(...any) error }) (UsageRecord, error) {
+	var (
+		u                                                    UsageRecord
+		model, taskClass, routeSource, inputProv, outputProv sql.NullString
+		errorClass, streamState                              sql.NullString
+		input, output                                        sql.NullInt64
+		ttft, latency                                        sql.NullInt64
+		decisionID                                           sql.NullString
+		observedAt, receivedAt                               string
+		observedAtReported                                   int
+	)
+	err := row.Scan(&u.RequestID, &u.Attempt, &u.EventID, &u.SchemaVersion, &u.Provider, &model,
+		&taskClass, &routeSource, &input, &inputProv, &output, &outputProv, &u.Source, &u.Outcome,
+		&errorClass, &streamState, &ttft, &latency, &decisionID, &observedAt, &observedAtReported, &receivedAt)
+	if err != nil {
+		return UsageRecord{}, err
+	}
+	u.Model = model.String
+	u.TaskClass = taskClass.String
+	u.RouteSource = RouteSource(routeSource.String)
+	u.InputTokens = intFromNull(&input)
+	u.OutputTokens = intFromNull(&output)
+	u.InputProvenance = TokenProvenance(inputProv.String)
+	u.OutputProvenance = TokenProvenance(outputProv.String)
+	u.ErrorClass = ErrorClass(errorClass.String)
+	u.StreamState = StreamState(streamState.String)
+	u.TTFTMS = int64FromNull(&ttft)
+	u.LatencyMS = int64FromNull(&latency)
+	u.DecisionID = decisionID.String
+	u.ObservedAtReported = observedAtReported == 1
+	if u.ObservedAt, err = parseTS(observedAt); err != nil {
+		return UsageRecord{}, err
+	}
+	if u.ReceivedAt, err = parseTS(receivedAt); err != nil {
+		return UsageRecord{}, err
+	}
+	return u, nil
 }
 
 // intValueEqual compares optional counts without dereferencing a nil: an absent
@@ -184,11 +251,27 @@ func intValueEqual(a, b *int) bool {
 	return a == nil || *a == *b
 }
 
+// intValueEqualInt64 is intValueEqual for the millisecond measurements.
+func intValueEqualInt64(a, b *int64) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
+}
+
 func intFromNull(v *sql.NullInt64) *int {
 	if !v.Valid {
 		return nil
 	}
 	n := int(v.Int64)
+	return &n
+}
+
+func int64FromNull(v *sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	n := v.Int64
 	return &n
 }
 
@@ -426,6 +509,23 @@ type Retention struct {
 	RoutingDecisions time.Duration
 }
 
+// maxUsageRetention is the hard upper bound on how long request/outcome events
+// are kept. A configured age above it is clamped here, so storage stays bounded
+// even when the configuration asks for more history than the controller holds.
+const maxUsageRetention = 365 * 24 * time.Hour
+
+// pruneBatch is how many rows one cleanup statement deletes, and
+// maxPruneBatches bounds how many batches one run performs. Pruning in batches
+// keeps each statement short: a cleanup that ran as one huge delete would hold
+// the write lock long enough to make a request wait for it.
+//
+// They are variables so a test can lower the bound and observe it; the
+// production values are the ones below.
+var (
+	pruneBatch      = 1000
+	maxPruneBatches = 100
+)
+
 // Prune deletes rows older than the retention bounds, keeping the newest row per
 // provider even when it is older than the bound. It returns the deleted counts.
 //
@@ -467,10 +567,6 @@ func (s *Store) Prune(ctx context.Context, r Retention, now time.Time) (deleted 
 			{"provider_health", r.ProviderHealth,
 				"WITH spared AS MATERIALIZED (" + newestPerProvider("provider_health", false) + ") " +
 					"DELETE FROM provider_health WHERE observed_at < ? AND id NOT IN (SELECT id FROM spared)"},
-			{"usage_records", r.UsageRecords,
-				"DELETE FROM usage_records WHERE observed_at < ?"},
-			{"routing_decisions", r.RoutingDecisions,
-				"DELETE FROM routing_decisions WHERE created_at < ?"},
 		} {
 			if p.age <= 0 {
 				continue
@@ -485,12 +581,59 @@ func (s *Store) Prune(ctx context.Context, r Retention, now time.Time) (deleted 
 			}
 			deleted[p.table] = n
 		}
+
+		// The two high-volume tables are pruned in bounded batches, and the
+		// event table's age is clamped to the hard upper bound.
+		if age := r.UsageRecords; age > 0 {
+			if age > maxUsageRetention {
+				age = maxUsageRetention
+			}
+			n, err := deleteBatched(ctx, tx, "usage_records", "observed_at < ?", ts(now.Add(-age)))
+			if err != nil {
+				return err
+			}
+			deleted["usage_records"] = n
+		}
+		if age := r.RoutingDecisions; age > 0 {
+			n, err := deleteBatched(ctx, tx, "routing_decisions", "created_at < ?", ts(now.Add(-age)))
+			if err != nil {
+				return err
+			}
+			deleted["routing_decisions"] = n
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return deleted, nil
+}
+
+// deleteBatched removes the rows a predicate selects, at most pruneBatch rows
+// per statement and maxPruneBatches statements per run. The run is bounded, so
+// cleanup cannot grow without limit; whatever is left is removed by the next
+// run.
+func deleteBatched(ctx context.Context, tx *sql.Tx, table, where string, args ...any) (int64, error) {
+	var total int64
+	for i := 0; i < maxPruneBatches; i++ {
+		stmt := `DELETE FROM ` + table + ` WHERE id IN (SELECT id FROM ` + table + ` WHERE ` + where + ` LIMIT ?)`
+		params := make([]any, 0, len(args)+1)
+		params = append(params, args...)
+		params = append(params, int64(pruneBatch))
+		res, err := tx.ExecContext(ctx, stmt, params...)
+		if err != nil {
+			return 0, classify(err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, classify(err)
+		}
+		total += n
+		if n < int64(pruneBatch) {
+			break
+		}
+	}
+	return total, nil
 }
 
 // tx runs fn in one transaction and rolls back on any error.
@@ -544,44 +687,12 @@ func (s *Store) SaveRoutingDecision(ctx context.Context, r RoutingDecisionRecord
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO routing_decisions (decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			r.DecisionID, r.PolicyVersion, r.SessionID, nullString(r.SelectedAlias), nullString(r.SelectedProvider), r.Payload, ts(r.CreatedAt))
+			`INSERT INTO routing_decisions (decision_id, policy_version, session_id, selected_alias, selected_provider, task_class, explicit, payload, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.DecisionID, r.PolicyVersion, r.SessionID, nullString(r.SelectedAlias), nullString(r.SelectedProvider),
+			nullString(r.TaskClass), r.Explicit, r.Payload, ts(r.CreatedAt))
 		return classify(err)
 	})
-}
-
-// LatestRoutingDecisions returns the newest routing decisions, newest first.
-func (s *Store) LatestRoutingDecisions(ctx context.Context, limit int) ([]RoutingDecisionRecord, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at
-		 FROM routing_decisions ORDER BY id DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, classify(err)
-	}
-	defer rows.Close()
-	var out []RoutingDecisionRecord
-	for rows.Next() {
-		var (
-			r                RoutingDecisionRecord
-			selectedAlias    sql.NullString
-			selectedProvider sql.NullString
-			createdAt        string
-		)
-		if err := rows.Scan(&r.DecisionID, &r.PolicyVersion, &r.SessionID, &selectedAlias, &selectedProvider, &r.Payload, &createdAt); err != nil {
-			return nil, classify(err)
-		}
-		r.SelectedAlias = selectedAlias.String
-		r.SelectedProvider = selectedProvider.String
-		if r.CreatedAt, err = parseTS(createdAt); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, classify(rows.Err())
 }
 
 // SaveSessionAffinity pins a session to a route. The latest write wins, except

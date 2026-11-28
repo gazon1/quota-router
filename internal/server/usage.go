@@ -13,11 +13,13 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/gazon1/quota-router/internal/routing"
 	"github.com/gazon1/quota-router/internal/store"
 )
 
@@ -32,18 +34,34 @@ const maxUsageBody = 64 << 10
 
 // usageReport is the wire form. Pointers keep "not supplied" distinct from a
 // reported zero, so a missing token count is stored as NULL rather than 0.
+//
+// Every field is optional except the ones the schema cannot do without
+// (provider, source). The body is a closed set: an unknown field is rejected
+// rather than ignored, so a report cannot slip a prompt through.
 type usageReport struct {
 	RequestID    string `json:"request_id"`
 	Attempt      int    `json:"attempt"`
 	Provider     string `json:"provider"`
 	Model        string `json:"model"`
+	TaskClass    string `json:"task_class"`
+	RouteSource  string `json:"route_source"`
 	InputTokens  *int   `json:"input_tokens"`
 	OutputTokens *int   `json:"output_tokens"`
-	Provenance   string `json:"provenance"`
-	Source       string `json:"source"`
-	Outcome      string `json:"outcome"`
-	DecisionID   string `json:"decision_id"`
-	ObservedAt   string `json:"observed_at"`
+	// Provenance is the row-level fallback for reporters that do not name a
+	// channel per count. InputProvenance and OutputProvenance win over it.
+	Provenance string `json:"provenance"`
+	// InputProvenance and OutputProvenance say which channel produced the
+	// matching count. A count without a provenance is rejected.
+	InputProvenance  string `json:"input_provenance"`
+	OutputProvenance string `json:"output_provenance"`
+	Source           string `json:"source"`
+	Outcome          string `json:"outcome"`
+	ErrorClass       string `json:"error_class"`
+	StreamState      string `json:"stream_state"`
+	TTFTMS           *int64 `json:"ttft_ms"`
+	LatencyMS        *int64 `json:"latency_ms"`
+	DecisionID       string `json:"decision_id"`
+	ObservedAt       string `json:"observed_at"`
 }
 
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
@@ -117,19 +135,39 @@ func (r usageReport) record(now time.Time) (store.UsageRecord, error) {
 	if observedAt.IsZero() {
 		observedAt = now
 	}
+	taskClass := strings.TrimSpace(r.TaskClass)
+	if taskClass != "" && !routing.TaskClass(taskClass).Known() {
+		return store.UsageRecord{}, fmt.Errorf("task_class %q is not a known task class", taskClass)
+	}
+	inputProvenance, err := provenance("input", r.InputProvenance, r.Provenance, r.InputTokens != nil)
+	if err != nil {
+		return store.UsageRecord{}, err
+	}
+	outputProvenance, err := provenance("output", r.OutputProvenance, r.Provenance, r.OutputTokens != nil)
+	if err != nil {
+		return store.UsageRecord{}, err
+	}
 	rec := store.UsageRecord{
 		RequestID:          strings.TrimSpace(r.RequestID),
 		Attempt:            r.Attempt,
 		Provider:           strings.TrimSpace(r.Provider),
 		Model:              strings.TrimSpace(r.Model),
+		TaskClass:          taskClass,
+		RouteSource:        store.RouteSource(strings.TrimSpace(r.RouteSource)),
 		InputTokens:        r.InputTokens,
 		OutputTokens:       r.OutputTokens,
-		Provenance:         store.Confidence(r.Provenance),
+		InputProvenance:    inputProvenance,
+		OutputProvenance:   outputProvenance,
 		Source:             strings.TrimSpace(r.Source),
 		Outcome:            store.Outcome(r.Outcome),
+		ErrorClass:         store.ErrorClass(strings.TrimSpace(r.ErrorClass)),
+		StreamState:        store.StreamState(strings.TrimSpace(r.StreamState)),
+		TTFTMS:             r.TTFTMS,
+		LatencyMS:          r.LatencyMS,
 		DecisionID:         strings.TrimSpace(r.DecisionID),
 		ObservedAt:         observedAt,
 		ObservedAtReported: observedAtReported,
+		ReceivedAt:         now,
 	}
 	if rec.Outcome == "" {
 		rec.Outcome = store.OutcomeUnknown
@@ -138,6 +176,33 @@ func (r usageReport) record(now time.Time) (store.UsageRecord, error) {
 		return store.UsageRecord{}, err
 	}
 	return rec, nil
+}
+
+// provenance resolves the channel of a token count. The count's own provenance
+// wins; the row-level value is the fallback for reporters that name one
+// channel for the whole report.
+//
+// An unknown channel is rejected here, before any count is considered: a
+// reporter that names a channel nobody can aggregate on has made a mistake,
+// and dropping it silently would hide that. A known channel without a count is
+// dropped instead: it names the channel of a number that was never observed,
+// and keeping it would make the stored row claim a count it does not have.
+func provenance(name, specific, fallback string, countPresent bool) (store.TokenProvenance, error) {
+	value := strings.TrimSpace(specific)
+	if value == "" {
+		value = strings.TrimSpace(fallback)
+	}
+	if value == "" {
+		return "", nil
+	}
+	p := store.TokenProvenance(value)
+	if !p.Valid() {
+		return "", fmt.Errorf("%s_provenance %q is not a documented provenance", name, value)
+	}
+	if !countPresent {
+		return "", nil
+	}
+	return p, nil
 }
 
 // authorized compares the bearer token in constant time. An unconfigured token

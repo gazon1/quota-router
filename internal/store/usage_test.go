@@ -20,10 +20,11 @@ func TestUsageRetriesAreSeparateAttempts(t *testing.T) {
 
 	attempts := []UsageRecord{
 		{RequestID: "req-1", Attempt: 1, Provider: "minimax", Source: "agent",
-			Provenance: Reported, Outcome: OutcomeFailedBeforeFirstToken, ObservedAt: time.Now()},
+			Outcome: OutcomeFailedBeforeFirstToken, ObservedAt: time.Now()},
 		{RequestID: "req-1", Attempt: 2, Provider: "minimax", Source: "agent",
 			InputTokens: intPtr(11), OutputTokens: intPtr(7),
-			Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: time.Now()},
+			InputProvenance: TokenProviderReported, OutputProvenance: TokenProviderReported,
+			Outcome: OutcomeSuccess, ObservedAt: time.Now()},
 	}
 	for _, u := range attempts {
 		require.NoError(t, s.SaveUsageRecord(ctx, u), "SaveUsageRecord attempt %d", u.Attempt)
@@ -51,7 +52,7 @@ func TestUsageMissingTokensStayNull(t *testing.T) {
 
 	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{
 		RequestID: "req-nil", Provider: "minimax", Source: "agent",
-		Provenance: Estimated, Outcome: OutcomeCancelled, ObservedAt: time.Now(),
+		Outcome: OutcomeCancelled, ObservedAt: time.Now(),
 	}), "SaveUsageRecord")
 	var in, out *int64
 	require.NoError(t, s.db.QueryRow("SELECT input_tokens, output_tokens FROM usage_records WHERE request_id = 'req-nil'").Scan(&in, &out),
@@ -66,23 +67,27 @@ func TestUsageProvenanceIsNotPromoted(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)
 
-	for _, p := range []Confidence{Reported, Estimated} {
+	for _, p := range []TokenProvenance{TokenProviderReported, TokenProxyReported, TokenEstimated} {
 		require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{
 			RequestID: "req-" + string(p), Provider: "minimax", Source: "agent",
-			InputTokens: intPtr(5), Provenance: p, Outcome: OutcomeSuccess, ObservedAt: time.Now(),
+			InputTokens: intPtr(5), InputProvenance: p,
+			OutputTokens: intPtr(7), OutputProvenance: p,
+			Outcome: OutcomeSuccess, ObservedAt: time.Now(),
 		}), "SaveUsageRecord %s", p)
 	}
-	rows, err := s.db.Query("SELECT request_id, provenance FROM usage_records ORDER BY request_id")
+	rows, err := s.db.Query("SELECT request_id, input_provenance, output_provenance FROM usage_records ORDER BY request_id")
 	require.NoError(t, err, "query")
 	defer rows.Close()
-	got := map[string]string{}
+	got := map[string][2]string{}
 	for rows.Next() {
-		var id, prov string
-		require.NoError(t, rows.Scan(&id, &prov), "scan")
-		got[id] = prov
+		var id, inProv, outProv string
+		require.NoError(t, rows.Scan(&id, &inProv, &outProv), "scan")
+		got[id] = [2]string{inProv, outProv}
 	}
-	assert.Equal(t, "reported", got["req-reported"], "each row keeps its own provenance")
-	assert.Equal(t, "estimated", got["req-estimated"], "each row keeps its own provenance")
+	assert.Equal(t, [2]string{"provider_reported", "provider_reported"}, got["req-provider_reported"],
+		"each count keeps its own provenance")
+	assert.Equal(t, [2]string{"estimated", "estimated"}, got["req-estimated"],
+		"each count keeps its own provenance")
 }
 
 // A redelivered event with identical content is a no-op; the same event id
@@ -92,11 +97,12 @@ func TestUsageConflictingEventReuseIsConflict(t *testing.T) {
 	s, _ := openMigrated(t)
 
 	base := UsageRecord{RequestID: "req-1", Attempt: 1, Provider: "minimax", Source: "agent",
-		Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: time.Now()}
+		Outcome: OutcomeSuccess, ObservedAt: time.Now()}
 	require.NoError(t, s.SaveUsageRecord(ctx, base), "SaveUsageRecord")
 
 	conflict := base
 	conflict.InputTokens = intPtr(999)
+	conflict.InputProvenance = TokenProviderReported
 	err := s.SaveUsageRecord(ctx, conflict)
 	assert.ErrorIs(t, err, ErrUsageConflict)
 
@@ -117,7 +123,7 @@ func TestUsageConflictingEventReuseWithDifferentObservedAt(t *testing.T) {
 	s, _ := openMigrated(t)
 
 	base := UsageRecord{RequestID: "req-2", Attempt: 1, Provider: "minimax", Source: "agent",
-		Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: time.Now(), ObservedAtReported: true}
+		Outcome: OutcomeSuccess, ObservedAt: time.Now(), ObservedAtReported: true}
 	require.NoError(t, s.SaveUsageRecord(ctx, base), "SaveUsageRecord")
 
 	conflict := base
@@ -139,7 +145,8 @@ func TestUsageRecordsOutcomeAndDecision(t *testing.T) {
 	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{
 		RequestID: "req-1", Provider: "minimax", Source: "litellm.callback",
 		InputTokens: intPtr(30), OutputTokens: intPtr(4),
-		Provenance: Reported, Outcome: OutcomePartialStream, DecisionID: "dec-42", ObservedAt: time.Now(),
+		InputProvenance: TokenProviderReported, OutputProvenance: TokenProviderReported,
+		Outcome: OutcomePartialStream, DecisionID: "dec-42", ObservedAt: time.Now(),
 	}), "SaveUsageRecord")
 	var outcome, decision string
 	require.NoError(t, s.db.QueryRow("SELECT outcome, decision_id FROM usage_records WHERE request_id = 'req-1'").Scan(&outcome, &decision),
@@ -156,7 +163,7 @@ func TestUsageDecisionStaysNullWhenUnreported(t *testing.T) {
 
 	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{
 		RequestID: "req-1", Provider: "minimax", Source: "agent",
-		Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: time.Now(),
+		Outcome: OutcomeSuccess, ObservedAt: time.Now(),
 	}), "SaveUsageRecord")
 	var decision *string
 	require.NoError(t, s.db.QueryRow("SELECT decision_id FROM usage_records WHERE request_id = 'req-1'").Scan(&decision), "read")
@@ -174,11 +181,18 @@ func TestUsageRejectsUnrepresentableValues(t *testing.T) {
 		name string
 		rec  UsageRecord
 	}{
-		{"negative attempt", UsageRecord{Attempt: -1, Provider: "p", Source: "s", Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
-		{"unknown outcome", UsageRecord{Provider: "p", Source: "s", Provenance: Reported, Outcome: "TIMEOUT", ObservedAt: now}},
-		{"missing source", UsageRecord{Provider: "p", Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
-		{"negative tokens", UsageRecord{Provider: "p", Source: "s", InputTokens: intPtr(-1), Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
-		{"oversized request id", UsageRecord{RequestID: string(make([]byte, maxKey+1)), Provider: "p", Source: "s", Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"negative attempt", UsageRecord{Attempt: -1, Provider: "p", Source: "s", Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"unknown outcome", UsageRecord{Provider: "p", Source: "s", Outcome: "TIMEOUT", ObservedAt: now}},
+		{"missing source", UsageRecord{Provider: "p", Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"negative tokens", UsageRecord{Provider: "p", Source: "s", InputTokens: intPtr(-1), InputProvenance: TokenEstimated, Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"count without provenance", UsageRecord{Provider: "p", Source: "s", InputTokens: intPtr(1), Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"provenance without count", UsageRecord{Provider: "p", Source: "s", InputProvenance: TokenEstimated, Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"unknown provenance", UsageRecord{Provider: "p", Source: "s", InputTokens: intPtr(1), InputProvenance: "guessed", Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"unknown error class", UsageRecord{Provider: "p", Source: "s", ErrorClass: "weird", Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"unknown stream state", UsageRecord{Provider: "p", Source: "s", StreamState: "half", Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"unknown route source", UsageRecord{Provider: "p", Source: "s", RouteSource: "guess", Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"negative latency", UsageRecord{Provider: "p", Source: "s", LatencyMS: int64Ptr(-1), Outcome: OutcomeSuccess, ObservedAt: now}},
+		{"oversized request id", UsageRecord{RequestID: string(make([]byte, maxKey+1)), Provider: "p", Source: "s", Outcome: OutcomeSuccess, ObservedAt: now}},
 	} {
 		assert.Error(t, s.SaveUsageRecord(ctx, tc.rec), "%s: saved, want an error", tc.name)
 	}
@@ -194,7 +208,7 @@ func TestUsageDefaultsAttemptOneAndUnknownOutcome(t *testing.T) {
 	s, _ := openMigrated(t)
 
 	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{
-		RequestID: "req-1", Provider: "p", Source: "s", Provenance: Reported, ObservedAt: time.Now(),
+		RequestID: "req-1", Provider: "p", Source: "s", ObservedAt: time.Now(),
 	}), "SaveUsageRecord")
 	var attempt int
 	var outcome string
@@ -245,7 +259,7 @@ func TestUsageMigrationDownKeepsFirstAttempts(t *testing.T) {
 	for attempt := 1; attempt <= 2; attempt++ {
 		require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{
 			RequestID: "req-1", Attempt: attempt, Provider: "p", Source: "s",
-			Provenance: Reported, ObservedAt: time.Now(),
+			ObservedAt: time.Now(),
 		}), "SaveUsageRecord attempt %d", attempt)
 	}
 	dir := t.TempDir()
@@ -256,6 +270,7 @@ func TestUsageMigrationDownKeepsFirstAttempts(t *testing.T) {
 		"0004_routing_decisions.sql",
 		"0005_provider_cooldown.sql",
 		"0006_session_affinity.sql",
+		"0007_request_events.sql",
 	} {
 		apply(t, dir, f, readMigration(t, f))
 	}
