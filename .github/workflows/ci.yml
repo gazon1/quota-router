@@ -32,13 +32,13 @@ jobs:
       - name: go test -race
         run: go test -race ./... -count=1
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
         env:
-          GOTOOLCHAIN: go1.24.0
+          GOTOOLCHAIN: go1.27.3
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
         env:
-          GOTOOLCHAIN: go1.24.0
+          GOTOOLCHAIN: go1.27.3
 
   docker:
     runs-on: ubuntu-latest
