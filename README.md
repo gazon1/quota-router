@@ -22,8 +22,8 @@ The server listens on `:8080` by default and exposes:
 | `GET /v1/status` | `QUOTA_ROUTER_AUTH__TOKEN` | Latest quota and provider health per provider. See [docs/api.md](./docs/api.md) |
 | `POST /v1/route` | `QUOTA_ROUTER_AUTH__TOKEN` | Route decision (the issue-named alias of `POST /v1/routing/select`). |
 | `POST /v1/routing/select` | `QUOTA_ROUTER_AUTH__TOKEN` | Route decision: versioned request → decision with explanation. See [docs/routing-request.md](./docs/routing-request.md) |
-| `GET /v1/routing/decisions` | `QUOTA_ROUTER_AUTH__TOKEN` | Recent decision audit records. See [docs/routing-request.md](./docs/routing-request.md) |
-| `POST /v1/usage` | `QUOTA_ROUTER_AUTH__TOKEN` | Record one request attempt (tokens, provenance, outcome). See [docs/request-usage.md](./docs/request-usage.md) |
+| `GET /v1/routing/decisions` | `QUOTA_ROUTER_AUTH__TOKEN` | Recent decision audit records, with the evaluated candidate set. See [docs/routing-decision-history.md](./docs/routing-decision-history.md) |
+| `POST /v1/usage` | `QUOTA_ROUTER_AUTH__TOKEN` | Record one request attempt (tokens, provenance, outcome, latency, error class). See [docs/request-usage.md](./docs/request-usage.md) |
 | `POST /v1/sessions/{id}/release` | `QUOTA_ROUTER_AUTH__TOKEN` | End one session's route use: deletes its route pin; safely repeatable. See [docs/session-affinity.md](./docs/session-affinity.md) |
 
 The full controller API contract — endpoints, error envelope, status-code
@@ -118,6 +118,19 @@ HTTP endpoints: `POST /v1/routing/select` and `GET /v1/routing/decisions`
 require the configured bearer token. Invalid requests return `400`; valid requests
 with no eligible model return `409`; audit persistence or state failures return
 `503`. See [docs/routing-request.md](./docs/routing-request.md).
+
+## Routing decision history
+
+Every completed decision is persisted with the candidate set it was made from:
+which alias was selected, which alternatives were rejected, in which order, and
+with a stable reason code beside the prose. Outcomes correlate back to the
+decision through `decision_id`.
+
+The history is **observational**: routing never reads it. Selection reads quota,
+health and the session's route pin, never a previous decision or an outcome.
+Decision and candidates are written in one transaction, so a partially persisted
+decision does not exist. See
+[docs/routing-decision-history.md](./docs/routing-decision-history.md).
 
 ## Routing priorities
 
@@ -270,6 +283,7 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_SQLITE__RETENTION__QUOTA_SNAPSHOTS` | `720h` | Keep quota snapshots this long (`0` keeps all) |
 | `QUOTA_ROUTER_SQLITE__RETENTION__PROVIDER_HEALTH` | `720h` | Keep health observations this long (`0` keeps all) |
 | `QUOTA_ROUTER_SQLITE__RETENTION__USAGE_RECORDS` | `2160h` | Keep usage records this long (`0` keeps all) |
+| `QUOTA_ROUTER_SQLITE__RETENTION__ROUTING_DECISIONS` | `720h` | Keep routing decisions and their candidates this long (`0` keeps all) |
 | `QUOTA_ROUTER_AUTH__TOKEN` | unset | Bearer token for the controller API (secret) |
 | `QUOTA_ROUTER_OBSERVABILITY__LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 

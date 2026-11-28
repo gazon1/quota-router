@@ -54,6 +54,8 @@ The schema is versioned SQL migrations under
 | `poll_state` | per-provider `last_attempt_at` and `last_success_at`, kept separately so a failure never erases when quota was last known good |
 | `controller_state` | key/value controller state, upserted |
 | `session_affinity` | one row per session: the route it is pinned to and its `created_at` / `updated_at` / `expires_at`. Rows past `expires_at` are deleted by every retention run regardless of the configured ages, because the TTL is what says they stopped being routing state ([docs/session-affinity.md](./session-affinity.md)) |
+| `routing_decisions` | one row per routing decision: decision id, policy version, session, task class, requested and selected alias/provider, the selected reason code, affinity expiry, the decision JSON payload, UTC `created_at` ([docs/routing-decision-history.md](./routing-decision-history.md)) |
+| `routing_decision_candidates` | one row per evaluated candidate of a decision: evaluation order, alias/provider, selected/eligible, the eliminating stage, the stable reason code, and the quota/health values the decision acted on. Cascades with its decision, so pruning history never orphans a candidate |
 
 `UNKNOWN` states are constrained by the schema: `unknown_reason` is required
 exactly when `state = 'UNKNOWN'` and must be one of the documented reasons, so a
@@ -69,8 +71,13 @@ routed. It is **not** a replica of a provider's quota or dashboard counter.
 - `provenance` says whether the counts are the provider's own (`reported`) or
   this installation's estimate (`estimated`). An estimate is never promoted.
 - `outcome` is `SUCCESS`, `FAILED_BEFORE_FIRST_TOKEN`, `PARTIAL_STREAM`,
-  `CANCELLED` or `UNKNOWN`. It is never inferred: a reporter that does not say
-  gets `UNKNOWN`.
+  `CANCELLED`, `TIMEOUT` or `UNKNOWN`. It is never inferred: a reporter that does
+  not say gets `UNKNOWN`.
+- `latency_ms` is NULL unless somebody measured the attempt. Nothing is
+  estimated to zero.
+- `error_class` is a normalized class (`TIMEOUT`, `RATE_LIMITED`,
+  `AUTHENTICATION_OR_PERMISSION_FAILURE`, `PROVIDER_ERROR`, `UNREACHABLE`,
+  `CLIENT_ERROR`, `UNKNOWN`), never raw error text.
 - `attempt` numbers the attempts of one request. A retry is a new row, so the
   failed attempt and the successful one are both visible and the usage is not
   duplicated.
@@ -175,6 +182,7 @@ retention failure is not, unless it is `ErrFull` — see [Retention](#retention)
 | `retention.quota_snapshots` | 30 days |
 | `retention.provider_health` | 30 days |
 | `retention.usage_records` | 90 days |
+| `retention.routing_decisions` | 30 days |
 
 Cleanup runs at startup and then **hourly while the controller serves**, so a
 long-running process cannot accumulate history the configuration says it dropped;
@@ -189,6 +197,12 @@ not read it. Each run is one transaction.
 retention setting is `0`. The pin's own TTL is what says it stopped meaning
 anything, and routing already refuses it; cleanup only stops the table from
 growing with sessions nobody released.
+
+`routing_decision_candidates` has no retention setting of its own: the rows
+cascade with their decision (`ON DELETE CASCADE`), so pruning decisions can
+never leave an orphan candidate. `usage_records` is pruned independently of the
+decisions, because a usage row may outlive the decision it references —
+`decision_id` is a soft reference, not a foreign key.
 
 A failed run does not stop the controller: the schema is current and the database
 readable, so it keeps routing, logs a warning, and retries at the next tick.

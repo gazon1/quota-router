@@ -38,7 +38,9 @@ curl -fsS -X POST http://127.0.0.1:8080/v1/usage \
         "provenance": "reported",
         "source": "litellm.callback",
         "outcome": "SUCCESS",
-        "decision_id": "dec-7"
+        "decision_id": "dec-7",
+        "latency_ms": 812,
+        "error_class": ""
       }'
 ```
 
@@ -52,8 +54,10 @@ curl -fsS -X POST http://127.0.0.1:8080/v1/usage \
 | `output_tokens` | no | Completion tokens, only if supplied. Absent stays unknown, never `0`. |
 | `provenance` | yes | `reported` (the provider's own count) or `estimated` (this installation derived it). The two are never promoted into each other. |
 | `source` | yes | Channel that reported the row, for example `litellm.callback` or `agent.usage_report`. |
-| `outcome` | no | `SUCCESS`, `FAILED_BEFORE_FIRST_TOKEN`, `PARTIAL_STREAM`, `CANCELLED`, or `UNKNOWN` when absent. |
+| `outcome` | no | `SUCCESS`, `FAILED_BEFORE_FIRST_TOKEN`, `PARTIAL_STREAM`, `CANCELLED`, `TIMEOUT`, or `UNKNOWN` when absent. |
 | `decision_id` | no | Routing decision that routed the attempt. Routing history owns that record; this only references it. |
+| `latency_ms` | no | How long the attempt took, in milliseconds. Absent stays unknown, never `0`. |
+| `error_class` | no | Normalized class of a failed attempt: `TIMEOUT`, `RATE_LIMITED`, `AUTHENTICATION_OR_PERMISSION_FAILURE`, `PROVIDER_ERROR`, `UNREACHABLE`, `CLIENT_ERROR`, `UNKNOWN`. Never raw error text — a provider message can carry a credential. |
 | `observed_at` | no | RFC 3339. Absent means the time the report arrived. |
 
 Responses: `202` for a stored or already-stored report, `400` for a malformed or
@@ -77,9 +81,31 @@ different content, `413` for a body over 64 KiB, `503` when the database is busy
   zero. A reported `0` is stored as `0`.
 - **Unknown outcomes are UNKNOWN.** The store does not guess between a broken
   stream and a cancellation.
+- **Failure detail is a class, not a message.** `error_class` is one of the
+  closed codes above. A raw provider error is refused by the store rather than
+  stored, because it can carry a credential into the database and every backup
+  of it.
 - **No prompt content.** The body is a closed field set: unknown JSON fields are
   rejected, so a report carrying messages or a conversation fails rather than
   having that content dropped silently. Nothing in the body is logged or echoed.
+
+## Outcome correlation with routing decisions
+
+`decision_id` correlates an attempt with the routing decision that routed it.
+The decision record and its evaluated candidate set live in the routing history
+([docs/routing-decision-history.md](./routing-decision-history.md)); this table
+only references that id.
+
+The correlation is deliberately one-directional and soft:
+
+- A decision may have **no outcome yet** — the attempt is still running, or
+  nobody reported it. Nothing is inferred from the absence.
+- The `decision_id` reference has **no foreign key**. A usage row may outlive the
+  decision it references, because the two tables have separate retention bounds
+  (90 days for usage, 30 days for decisions).
+- The outcome is **observational**. Nothing in the usage table is read by the
+  selector: routing reads quota, health and the session pin, never a previous
+  outcome.
 
 ## Wiring a reporter
 

@@ -111,6 +111,9 @@ const (
 	OutcomePartialStream Outcome = "PARTIAL_STREAM"
 	// OutcomeCancelled means the caller abandoned the attempt.
 	OutcomeCancelled Outcome = "CANCELLED"
+	// OutcomeTimeout means the attempt exceeded its deadline. The error class
+	// says whether the deadline was the caller's or the provider's.
+	OutcomeTimeout Outcome = "TIMEOUT"
 	// OutcomeUnknown means the reporter did not say. It is not a failure and
 	// not a success, and no usage is inferred from it.
 	OutcomeUnknown Outcome = "UNKNOWN"
@@ -118,7 +121,43 @@ const (
 
 func (o Outcome) valid() bool {
 	switch o {
-	case OutcomeSuccess, OutcomeFailedBeforeFirstToken, OutcomePartialStream, OutcomeCancelled, OutcomeUnknown:
+	case OutcomeSuccess, OutcomeFailedBeforeFirstToken, OutcomePartialStream, OutcomeCancelled, OutcomeTimeout, OutcomeUnknown:
+		return true
+	}
+	return false
+}
+
+// ErrorClass is the normalized class of a failed attempt. It is a closed set
+// for the same reason the health reasons are: a raw provider error can carry a
+// credential in a URL or a header, so only the class is stored and the text
+// stays in the reporter's own logs.
+//
+// The vocabulary matches the provider-health reasons, so a consumer reads one
+// set of codes across the two domains.
+type ErrorClass string
+
+const (
+	// ErrorClassTimeout means the attempt exceeded its deadline.
+	ErrorClassTimeout ErrorClass = "TIMEOUT"
+	// ErrorClassRateLimited means the provider returned a rate or usage limit.
+	ErrorClassRateLimited ErrorClass = "RATE_LIMITED"
+	// ErrorClassAuthentication means the provider rejected authentication or
+	// permission.
+	ErrorClassAuthentication ErrorClass = "AUTHENTICATION_OR_PERMISSION_FAILURE"
+	// ErrorClassProviderError means the provider answered 5xx or an unusable body.
+	ErrorClassProviderError ErrorClass = "PROVIDER_ERROR"
+	// ErrorClassUnreachable means the connection failed or was refused.
+	ErrorClassUnreachable ErrorClass = "UNREACHABLE"
+	// ErrorClassClientError means the request itself was rejected.
+	ErrorClassClientError ErrorClass = "CLIENT_ERROR"
+	// ErrorClassUnknown means the failure could not be classified.
+	ErrorClassUnknown ErrorClass = "UNKNOWN"
+)
+
+func (e ErrorClass) valid() bool {
+	switch e {
+	case ErrorClassTimeout, ErrorClassRateLimited, ErrorClassAuthentication,
+		ErrorClassProviderError, ErrorClassUnreachable, ErrorClassClientError, ErrorClassUnknown:
 		return true
 	}
 	return false
@@ -149,6 +188,12 @@ type UsageRecord struct {
 	// reporter knows it. Routing history owns that record; this only references
 	// it, and an id that no decision claims is kept as reported.
 	DecisionID string
+	// LatencyMS is how long the attempt took in milliseconds. Nil means
+	// nobody measured it; it is never estimated to zero.
+	LatencyMS *int
+	// ErrorClass is the normalized class of a failed attempt. Empty means the
+	// attempt did not fail or nobody classified it. Never raw error text.
+	ErrorClass ErrorClass
 	ObservedAt time.Time
 	// ObservedAtReported records whether the reporter supplied the observation
 	// timestamp. A redelivery that omitted it carries server-stamped arrival
@@ -261,7 +306,7 @@ func (u UsageRecord) Validate() error {
 		errs = append(errs, errors.New("source must not be empty"))
 	}
 	if !u.Outcome.valid() {
-		errs = append(errs, fmt.Errorf("outcome %q must be SUCCESS, FAILED_BEFORE_FIRST_TOKEN, PARTIAL_STREAM, CANCELLED or UNKNOWN", u.Outcome))
+		errs = append(errs, fmt.Errorf("outcome %q must be SUCCESS, FAILED_BEFORE_FIRST_TOKEN, PARTIAL_STREAM, CANCELLED, TIMEOUT or UNKNOWN", u.Outcome))
 	}
 	// Negative counts are a broken reporter, and storing one would corrupt a
 	// SUM later. Zero is a legitimate reported value.
@@ -270,6 +315,14 @@ func (u UsageRecord) Validate() error {
 	}
 	if u.OutputTokens != nil && *u.OutputTokens < 0 {
 		errs = append(errs, fmt.Errorf("output_tokens must be >= 0, got %d", *u.OutputTokens))
+	}
+	if u.LatencyMS != nil && *u.LatencyMS < 0 {
+		errs = append(errs, fmt.Errorf("latency_ms must be >= 0, got %d", *u.LatencyMS))
+	}
+	// An error class outside the declared set is refused rather than stored: it
+	// is the one place a raw provider message could enter the database.
+	if u.ErrorClass != "" && !u.ErrorClass.valid() {
+		errs = append(errs, fmt.Errorf("error_class %q is not one of the documented classes", u.ErrorClass))
 	}
 	if len(u.RequestID) > maxKey || len(u.DecisionID) > maxKey || len(u.Source) > maxKey {
 		errs = append(errs, fmt.Errorf("request_id, decision_id and source must be at most %d bytes", maxKey))
@@ -303,13 +356,72 @@ func (h HealthRecord) Validate() error {
 
 // RoutingDecisionRecord is one persisted routing decision.
 type RoutingDecisionRecord struct {
-	DecisionID       string
-	PolicyVersion    string
-	SessionID        string
-	SelectedAlias    string
-	SelectedProvider string
-	Payload          string
-	CreatedAt        time.Time
+	DecisionID    string
+	PolicyVersion string
+	SessionID     string
+	// TaskClass is the agent-supplied task class, empty when the request
+	// carried none.
+	TaskClass string
+	// RequestedAlias is the alias the request asked for — an override or a
+	// preference — and RequestedProvider the provider it named. Both are empty
+	// when the request named neither.
+	RequestedAlias    string
+	RequestedProvider string
+	SelectedAlias     string
+	SelectedProvider  string
+	// SelectedReasonCode is the stable code of the policy result that chose
+	// the route; SelectedReason is the prose beside it.
+	SelectedReasonCode string
+	SelectedReason     string
+	// AffinityExpiresAt is when the session's route pin expires, when the
+	// decision was made under a pin. Nil when the session was not pinned.
+	AffinityExpiresAt *time.Time
+	// Payload is the decision JSON, the immutable snapshot of the decision.
+	Payload string
+	// Candidates is the evaluated candidate set, in evaluation order. It is
+	// written in the same transaction as the decision: a decision without its
+	// candidates is not valid history.
+	Candidates []RoutingDecisionCandidate
+	CreatedAt  time.Time
+}
+
+// RoutingDecisionCandidate is one evaluated candidate of a decision: what it
+// was, whether it was eligible and whether it was chosen, the stable reason
+// code of that outcome, and the quota/health values the hard checks read.
+//
+// The values are copies of what the decision acted on, not references to
+// observation rows: a pruned observation must not make a decision unreadable.
+// A value that was not observed stays empty.
+type RoutingDecisionCandidate struct {
+	// Ordinal is the evaluation order, 1-based.
+	Ordinal int
+	Alias   string
+	// Provider is the provider the alias belongs to.
+	Provider string
+	// Selected reports whether the decision chose this candidate.
+	Selected bool
+	// Eligible reports whether the candidate satisfied every hard constraint.
+	Eligible bool
+	// EliminatedStage is the stage that eliminated the candidate, empty when
+	// it was not eliminated.
+	EliminatedStage string
+	// ReasonCode is the stable code of the decision about this candidate.
+	ReasonCode string
+	// Reason is the prose beside the code. It is a short description, never a
+	// raw provider message.
+	Reason string
+	// Transient marks an elimination that says nothing about the route itself.
+	Transient bool
+	// The quota values the decision acted on.
+	QuotaState         string
+	QuotaUnknownReason string
+	QuotaObservedAt    *time.Time
+	QuotaResetAt       *time.Time
+	// The health values the decision acted on.
+	HealthState      string
+	HealthReason     string
+	HealthObservedAt *time.Time
+	CooldownUntil    *time.Time
 }
 
 // Validate checks the routing decision record fields.
@@ -329,6 +441,43 @@ func (r RoutingDecisionRecord) Validate() error {
 	}
 	if r.CreatedAt.IsZero() {
 		errs = append(errs, errors.New("created_at must be set"))
+	}
+	if len(r.DecisionID) > maxKey || len(r.SessionID) > maxKey {
+		errs = append(errs, fmt.Errorf("decision_id and session_id must be at most %d bytes", maxKey))
+	}
+	for i, c := range r.Candidates {
+		if err := c.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("candidate %d: %w", i, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Validate checks one candidate row. The uniqueness of the ordinal and of the
+// alias inside one decision is a storage invariant, not a field check: the
+// database enforces it, so an injected duplicate fails the write and rolls the
+// decision back.
+func (c RoutingDecisionCandidate) Validate() error {
+	var errs []error
+	if c.Ordinal <= 0 {
+		errs = append(errs, fmt.Errorf("ordinal must be >= 1, got %d", c.Ordinal))
+	}
+	if c.Alias == "" {
+		errs = append(errs, errors.New("alias must not be empty"))
+	}
+	if c.Provider == "" {
+		errs = append(errs, errors.New("provider must not be empty"))
+	}
+	if c.ReasonCode == "" {
+		errs = append(errs, errors.New("reason_code must not be empty"))
+	}
+	if len(c.Alias) > maxKey || len(c.Provider) > maxKey || len(c.ReasonCode) > maxKey {
+		errs = append(errs, fmt.Errorf("alias, provider and reason_code must be at most %d bytes", maxKey))
+	}
+	// The reason is written into a column an operator reads and a backup
+	// carries, so it must be a short description like every other error text.
+	if err := checkSafeError(c.Reason); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

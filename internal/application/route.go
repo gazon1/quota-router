@@ -73,7 +73,7 @@ func (s *RouteService) Route(ctx context.Context, req routing.RouteRequest) (rou
 		return routing.Decision{}, errors.New("routing state unavailable")
 	}
 	decision := s.selector.Select(req, state)
-	if err := s.persistDecision(ctx, decision); err != nil {
+	if err := s.persistDecision(ctx, decision, state); err != nil {
 		return routing.Decision{}, errors.New("routing decision audit persistence failed")
 	}
 	// The pin is written after the decision is audited: a decision that cannot be
@@ -176,7 +176,10 @@ func (s *RouteService) pinAffinity(ctx context.Context, sessionID string, d rout
 	})
 }
 
-func (s *RouteService) persistDecision(ctx context.Context, d routing.Decision) error {
+// persistDecision writes the decision and the candidate set it was made from.
+// The store writes both in one transaction, so a decision that could not be
+// stored completely is not reported as stored.
+func (s *RouteService) persistDecision(ctx context.Context, d routing.Decision, state routing.SelectState) error {
 	if s.decisions == nil {
 		return fmt.Errorf("decision store unavailable")
 	}
@@ -185,15 +188,90 @@ func (s *RouteService) persistDecision(ctx context.Context, d routing.Decision) 
 		return err
 	}
 	rec := store.RoutingDecisionRecord{
-		DecisionID:       d.DecisionID,
-		PolicyVersion:    d.PolicyVersion,
-		SessionID:        d.Request.SessionID,
-		SelectedAlias:    d.SelectedAlias,
-		SelectedProvider: d.SelectedProvider,
-		Payload:          string(payload),
-		CreatedAt:        time.Now().UTC(),
+		DecisionID:         d.DecisionID,
+		PolicyVersion:      d.PolicyVersion,
+		SessionID:          d.Request.SessionID,
+		TaskClass:          string(d.Request.TaskClass),
+		RequestedAlias:     requestedAlias(d.Request),
+		RequestedProvider:  requestedProvider(d.Request),
+		SelectedAlias:      d.SelectedAlias,
+		SelectedProvider:   d.SelectedProvider,
+		SelectedReasonCode: selectedReasonCode(d),
+		SelectedReason:     d.PrimaryReason(),
+		Payload:            string(payload),
+		CreatedAt:          time.Now().UTC(),
+		Candidates:         decisionCandidates(d.Candidates),
+	}
+	// The pin's expiry is the route lease the decision was made under: it says
+	// how long the chosen route stays the session's route.
+	if state.Affinity != nil && !state.Affinity.ExpiresAt.IsZero() {
+		expires := state.Affinity.ExpiresAt.UTC()
+		rec.AffinityExpiresAt = &expires
 	}
 	return s.decisions.SaveRoutingDecision(ctx, rec)
+}
+
+// requestedAlias is the alias the request asked for: an override first, then a
+// request preference. Empty when the request named neither.
+func requestedAlias(req routing.RouteRequest) string {
+	if req.Override != nil && strings.TrimSpace(req.Override.ModelAlias) != "" {
+		return strings.TrimSpace(req.Override.ModelAlias)
+	}
+	if req.Preference != nil {
+		return strings.TrimSpace(req.Preference.ModelAlias)
+	}
+	return ""
+}
+
+// requestedProvider is the provider the request asked for, empty when it named
+// none.
+func requestedProvider(req routing.RouteRequest) string {
+	if req.Preference == nil {
+		return ""
+	}
+	return strings.TrimSpace(req.Preference.Provider)
+}
+
+// selectedReasonCode is the stable code of the policy result that chose the
+// route. It is taken from the selected candidate, so the decision row and the
+// candidate row cannot disagree about why the route was chosen.
+func selectedReasonCode(d routing.Decision) string {
+	for _, c := range d.Candidates {
+		if c.Selected {
+			return string(c.ReasonCode)
+		}
+	}
+	return ""
+}
+
+// decisionCandidates maps the evaluated candidate set onto the stored rows.
+func decisionCandidates(cands []routing.CandidateEvaluation) []store.RoutingDecisionCandidate {
+	if len(cands) == 0 {
+		return nil
+	}
+	out := make([]store.RoutingDecisionCandidate, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, store.RoutingDecisionCandidate{
+			Ordinal:            c.Ordinal,
+			Alias:              c.Alias,
+			Provider:           c.Provider,
+			Selected:           c.Selected,
+			Eligible:           c.Eligible,
+			EliminatedStage:    c.EliminatedStage,
+			ReasonCode:         string(c.ReasonCode),
+			Reason:             c.Reason,
+			Transient:          c.Transient,
+			QuotaState:         c.QuotaState,
+			QuotaUnknownReason: c.QuotaUnknownReason,
+			QuotaObservedAt:    c.QuotaObservedAt,
+			QuotaResetAt:       c.QuotaResetAt,
+			HealthState:        c.HealthState,
+			HealthReason:       c.HealthReason,
+			HealthObservedAt:   c.HealthObservedAt,
+			CooldownUntil:      c.CooldownUntil,
+		})
+	}
+	return out
 }
 
 func staleAfter(interval time.Duration) time.Duration {

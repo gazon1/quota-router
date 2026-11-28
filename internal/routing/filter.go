@@ -14,7 +14,7 @@ func filterCapabilities(cs []candidate, req RouteRequest) ([]candidate, []Reject
 	var elim []RejectedCandidate
 	for _, c := range cs {
 		if !required.SatisfiedBy(c.Model) {
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "capabilities", Reason: capabilityReason(required, c.Model)})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "capabilities", Code: ReasonCapabilityMismatch, Reason: capabilityReason(required, c.Model)})
 		}
 	}
 	return cs, elim
@@ -82,6 +82,7 @@ func filterAvailability(cs []candidate, state SelectState) ([]candidate, []Rejec
 			Alias:    c.Alias,
 			Provider: c.Provider,
 			Stage:    "model_availability",
+			Code:     ReasonModelUnavailableWindow,
 			Reason:   fmt.Sprintf("model unavailable by configured schedule (%s %s): %s", c.Model.Unavailable.Timezone, w, state.Now.UTC().Format(time.RFC3339)),
 		})
 	}
@@ -93,15 +94,15 @@ func filterHealth(cs []candidate, state SelectState) ([]candidate, []RejectedCan
 	for _, c := range cs {
 		h, ok := state.Health[c.Provider]
 		if !ok {
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health unknown", Transient: true})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Code: ReasonHealthNotObserved, Reason: "provider health unknown", Transient: true})
 			continue
 		}
 		switch quota.ClassifyHealth(h.ObservedAt, state.Now, state.HealthMaxAge) {
 		case quota.HealthNotObserved:
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health not observed", Transient: true})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Code: ReasonHealthNotObserved, Reason: "provider health not observed", Transient: true})
 			continue
 		case quota.HealthStale:
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health stale", Transient: true})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Code: ReasonHealthStale, Reason: "provider health stale", Transient: true})
 			continue
 		}
 		if h.Health == quota.Unavailable {
@@ -109,7 +110,7 @@ func filterHealth(cs []candidate, state SelectState) ([]candidate, []RejectedCan
 			if r := h.Reason(); r != "" {
 				reason += ": " + string(r)
 			}
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: reason})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Code: ReasonProviderUnavailable, Reason: reason})
 			continue
 		}
 		if h.Health == quota.HealthUnknown {
@@ -117,7 +118,7 @@ func filterHealth(cs []candidate, state SelectState) ([]candidate, []RejectedCan
 			if r := h.Reason(); r != "" {
 				reason += ": " + string(r)
 			}
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: reason, Transient: true})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Code: ReasonHealthUnknown, Reason: reason, Transient: true})
 			continue
 		}
 		// Degraded is allowed by explicit policy: it is not unavailable. The
@@ -132,25 +133,25 @@ func filterQuota(cs []candidate, cfg settings.Catalogue, req RouteRequest, state
 	for _, c := range cs {
 		snap, ok := state.Quota[c.Provider]
 		if !ok {
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: "quota unknown: not observed", Transient: true})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Code: ReasonQuotaNotObserved, Reason: "quota unknown: not observed", Transient: true})
 			continue
 		}
 		st, reason := snap.StateAt(state.Now, quotaFreshness(state))
 		switch st {
 		case quota.Exhausted:
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: "subscription quota exhausted"})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Code: ReasonQuotaExhausted, Reason: "subscription quota exhausted"})
 		case quota.QuotaUnknown:
 			r := "quota unknown"
 			if reason != "" {
 				r += ": " + string(reason)
 			}
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: r, Transient: true})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Code: ReasonQuotaUnknown, Reason: r, Transient: true})
 		case quota.LowQuota, quota.Available:
 			if reserveApplies(req, cfg) && belowReserve(snap, cfg.Routing.ReserveFraction) {
-				elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: fmt.Sprintf("remaining quota reserved for %s workload (reserve %.0f%%)", req.TaskClass, cfg.Routing.ReserveFraction*100)})
+				elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Code: ReasonQuotaReserved, Reason: fmt.Sprintf("remaining quota reserved for %s workload (reserve %.0f%%)", req.TaskClass, cfg.Routing.ReserveFraction*100)})
 			}
 		default:
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Reason: fmt.Sprintf("quota state %q not eligible", st)})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "subscription_quota", Code: ReasonQuotaIneligible, Reason: fmt.Sprintf("quota state %q not eligible", st)})
 		}
 	}
 	return cs, elim
@@ -204,7 +205,7 @@ func filterCooldown(cs []candidate, state SelectState) ([]candidate, []RejectedC
 		}
 		if h.CooldownActive(state.Now) {
 			until := h.CooldownUntil.UTC().Format(time.RFC3339)
-			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "temporary_exclusions", Reason: "provider in cooldown until " + until})
+			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "temporary_exclusions", Code: ReasonProviderCooldown, Reason: "provider in cooldown until " + until})
 		}
 	}
 	return cs, elim
@@ -234,7 +235,7 @@ func overrideEliminations(cs []candidate, selected string) []RejectedCandidate {
 		if c.Alias == selected {
 			continue
 		}
-		elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "manual_override", Reason: "not selected by manual override"})
+		elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "manual_override", Code: ReasonNotSelectedByOverride, Reason: "not selected by manual override"})
 	}
 	return elim
 }

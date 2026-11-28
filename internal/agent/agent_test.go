@@ -263,6 +263,15 @@ type proxyStub struct {
 
 	mu    sync.Mutex
 	calls []proxyCall
+	// status is the HTTP status the stub answers with; 0 means the default
+	// success.
+	status int
+}
+
+func (p *proxyStub) setStatus(status int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.status = status
 }
 
 type proxyCall struct {
@@ -364,8 +373,14 @@ func (p *proxyStub) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	p.mu.Lock()
 	p.calls = append(p.calls, proxyCall{model: req.Model, requestID: r.Header.Get("X-Request-Id"), prompt: prompt})
+	status := p.status
 	p.mu.Unlock()
 
+	if status != 0 {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, `{"error":"gateway timeout"}`)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1200,"completion_tokens":34}}`)
 }
@@ -413,20 +428,27 @@ func (h *harness) usageRows(t *testing.T) []store.UsageRecord {
 	db, err := sql.Open("sqlite", "file:"+h.path+"?mode=ro")
 	require.NoError(t, err, "open read-only")
 	defer db.Close()
-	rows, err := db.Query(`SELECT request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id FROM usage_records ORDER BY id`)
+	rows, err := db.Query(`SELECT request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, latency_ms, error_class FROM usage_records ORDER BY id`)
 	require.NoError(t, err, "query usage_records")
 	defer rows.Close()
 	var out []store.UsageRecord
 	for rows.Next() {
 		var u store.UsageRecord
 		var reqID, model, prov, source, outcome, decisionID *string
-		require.NoError(t, rows.Scan(&reqID, &u.Attempt, &u.Provider, &model, &u.InputTokens, &u.OutputTokens, &prov, &source, &outcome, &decisionID), "scan usage row")
+		var latency *int64
+		var errorClass *string
+		require.NoError(t, rows.Scan(&reqID, &u.Attempt, &u.Provider, &model, &u.InputTokens, &u.OutputTokens, &prov, &source, &outcome, &decisionID, &latency, &errorClass), "scan usage row")
 		u.RequestID = deref(reqID)
 		u.Model = deref(model)
 		u.Provenance = store.Confidence(deref(prov))
 		u.Source = deref(source)
 		u.Outcome = store.Outcome(deref(outcome))
 		u.DecisionID = deref(decisionID)
+		if latency != nil {
+			v := int(*latency)
+			u.LatencyMS = &v
+		}
+		u.ErrorClass = store.ErrorClass(deref(errorClass))
 		out = append(out, u)
 	}
 	require.NoError(t, rows.Err(), "iterate usage rows")
@@ -438,4 +460,33 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// A timed-out call is reported as a timeout with its latency and its
+// normalized error class, so the outcome can be correlated with the decision
+// that routed it.
+func TestAgentReportsTimeoutOutcomeWithLatencyAndErrorClass(t *testing.T) {
+	h := newHarness(t)
+	h.seed(t, "commandcode", store.QuotaAvailable, 80)
+
+	got, err := h.client.Route(context.Background(), routing.RouteRequest{
+		Version:      routing.RouteRequestVersionV1,
+		SessionID:    "session-1",
+		Capabilities: &routing.RequiredCapabilities{},
+	})
+	require.NoError(t, err, "Route")
+
+	h.proxy.setStatus(http.StatusGatewayTimeout)
+	reply, err := h.client.Chat(context.Background(), got, []byte(`{"model":"ignored-by-agent","messages":[]}`))
+	require.NoError(t, err, "Chat")
+	assert.Equal(t, agent.OutcomeTimeout, reply.Outcome)
+	assert.Equal(t, agent.ErrorClassTimeout, reply.ErrorClass)
+	require.NotNil(t, reply.LatencyMS, "the measured latency must be reported")
+
+	require.NoError(t, h.client.Report(context.Background(), got, reply.Attempt(1)), "Report")
+	row := h.usageRow(t)
+	assert.Equal(t, store.OutcomeTimeout, row.Outcome)
+	assert.Equal(t, store.ErrorClassTimeout, row.ErrorClass)
+	require.NotNil(t, row.LatencyMS, "the usage row must carry the latency")
+	assert.Equal(t, *reply.LatencyMS, *row.LatencyMS)
 }

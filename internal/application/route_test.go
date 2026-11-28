@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -447,4 +448,45 @@ func TestRouteDependencyFailuresReturnErrors(t *testing.T) {
 		require.Error(t, err)
 		assert.Equal(t, "routing decision audit persistence failed", err.Error())
 	})
+}
+
+// The persisted decision carries the evaluated candidate set and the stable
+// reason code of the route that was chosen, so the history can explain a
+// decision without the selector being run again.
+func TestRoutePersistsCandidatesAndReasonCode(t *testing.T) {
+	svc, _, _, dec := newTestService()
+	got, err := svc.Route(context.Background(), routeReq("s1"))
+	require.NoError(t, err)
+	require.Len(t, dec.records, 1)
+
+	rec := dec.records[0]
+	assert.Equal(t, "selected_by_preference", rec.SelectedReasonCode)
+	assert.Equal(t, got.SelectedAlias, rec.SelectedAlias)
+	require.Len(t, rec.Candidates, 2, "every evaluated candidate must be persisted")
+	assert.Equal(t, "cc-coding", rec.Candidates[0].Alias)
+	assert.True(t, rec.Candidates[0].Selected)
+	assert.Equal(t, "selected_by_preference", rec.Candidates[0].ReasonCode)
+	assert.Equal(t, "mm-fast", rec.Candidates[1].Alias)
+	assert.False(t, rec.Candidates[1].Selected)
+	assert.Equal(t, "eligible_not_selected", rec.Candidates[1].ReasonCode)
+}
+
+// The decision payload carries the candidate set too, so a reader of the
+// immutable snapshot sees the same set as the candidate rows.
+func TestRoutePersistsCandidateSetInPayload(t *testing.T) {
+	svc, _, _, dec := newTestService()
+	_, err := svc.Route(context.Background(), routeReq("s1"))
+	require.NoError(t, err)
+	require.Len(t, dec.records, 1)
+
+	var payload struct {
+		Candidates []struct {
+			Alias      string `json:"alias"`
+			ReasonCode string `json:"reason_code"`
+		} `json:"candidates"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dec.records[0].Payload), &payload), "payload")
+	require.Len(t, payload.Candidates, 2)
+	assert.Equal(t, "cc-coding", payload.Candidates[0].Alias)
+	assert.Equal(t, "selected_by_preference", payload.Candidates[0].ReasonCode)
 }

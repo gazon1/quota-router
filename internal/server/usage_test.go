@@ -132,9 +132,11 @@ func TestUsageRejectsInvalidValues(t *testing.T) {
 		{"no provider", `{"provenance":"reported","source":"agent"}`},
 		{"no source", `{"provider":"p","provenance":"reported"}`},
 		{"bad provenance", `{"provider":"p","provenance":"guessed","source":"agent"}`},
-		{"bad outcome", `{"provider":"p","provenance":"reported","source":"agent","outcome":"TIMEOUT"}`},
+		{"bad outcome", `{"provider":"p","provenance":"reported","source":"agent","outcome":"MAYBE"}`},
 		{"negative attempt", `{"provider":"p","provenance":"reported","source":"agent","attempt":-1}`},
 		{"negative tokens", `{"provider":"p","provenance":"reported","source":"agent","input_tokens":-5}`},
+		{"negative latency", `{"provider":"p","provenance":"reported","source":"agent","latency_ms":-1}`},
+		{"unknown error class", `{"provider":"p","provenance":"reported","source":"agent","error_class":"kaboom"}`},
 		{"bad timestamp", `{"provider":"p","provenance":"reported","source":"agent","observed_at":"yesterday"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

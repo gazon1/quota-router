@@ -39,7 +39,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 
 	v, err := s.Version(context.Background())
 	require.NoError(t, err, "Version")
-	assert.Equal(t, int64(6), v)
+	assert.Equal(t, int64(7), v)
 
 	// A restart must not re-apply or fail: this is the existing-database path.
 	require.NoError(t, s.Migrate(context.Background()), "second Migrate")
@@ -49,7 +49,7 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	require.NoError(t, err, "reopen")
 	defer again.Close()
 	require.NoError(t, again.Migrate(context.Background()), "Migrate after restart")
-	for _, table := range []string{"quota_snapshots", "quota_windows", "usage_records", "provider_health", "controller_state", "poll_state", "routing_decisions", "session_affinity"} {
+	for _, table := range []string{"quota_snapshots", "quota_windows", "usage_records", "provider_health", "controller_state", "poll_state", "routing_decisions", "routing_decision_candidates", "session_affinity"} {
 		var name string
 		require.NoError(t, again.db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name),
 			"table %s missing after restart", table)
@@ -892,7 +892,7 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	// Both ran, the schema exists once, and the version is recorded once.
 	v, err := first.Version(context.Background())
 	require.NoError(t, err, "Version")
-	assert.Equal(t, int64(6), v)
+	assert.Equal(t, int64(7), v)
 	var applied int
 	require.NoError(t, first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied),
 		"count versions")

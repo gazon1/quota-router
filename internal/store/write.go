@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -88,11 +89,11 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO usage_records
-			   (request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			   (request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, latency_ms, error_class, observed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT (request_id, attempt) DO NOTHING`,
 			nullString(u.RequestID), u.Attempt, u.Provider, nullString(u.Model), u.InputTokens, u.OutputTokens,
-			u.Provenance, u.Source, u.Outcome, nullString(u.DecisionID), ts(u.ObservedAt))
+			u.Provenance, u.Source, u.Outcome, nullString(u.DecisionID), u.LatencyMS, nullString(string(u.ErrorClass)), ts(u.ObservedAt))
 		if err != nil {
 			return classify(err)
 		}
@@ -126,12 +127,14 @@ func (s *Store) usageConflict(ctx context.Context, tx *sql.Tx, u UsageRecord, ob
 		src        string
 		outcome    string
 		decision   sql.NullString
+		latency    sql.NullInt64
+		errClass   sql.NullString
 		observedAt string
 	)
 	err := tx.QueryRowContext(ctx,
-		`SELECT provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at
+		`SELECT provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, latency_ms, error_class, observed_at
 		 FROM usage_records WHERE request_id = ? AND attempt = ?`,
-		u.RequestID, u.Attempt).Scan(&provider, &model, &input, &output, &prov, &src, &outcome, &decision, &observedAt)
+		u.RequestID, u.Attempt).Scan(&provider, &model, &input, &output, &prov, &src, &outcome, &decision, &latency, &errClass, &observedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrUsageConflict
@@ -153,6 +156,8 @@ func (s *Store) usageConflict(ctx context.Context, tx *sql.Tx, u UsageRecord, ob
 		Source:       src,
 		Outcome:      Outcome(outcome),
 		DecisionID:   decision.String,
+		LatencyMS:    intFromNull(&latency),
+		ErrorClass:   ErrorClass(errClass.String),
 		ObservedAt:   storedObservedAt,
 	}
 	if existing.Provider == "" || existing.Source == "" || existing.Outcome == "" {
@@ -165,7 +170,9 @@ func (s *Store) usageConflict(ctx context.Context, tx *sql.Tx, u UsageRecord, ob
 		existing.Provenance == u.Provenance &&
 		existing.Source == u.Source &&
 		existing.Outcome == u.Outcome &&
-		existing.DecisionID == u.DecisionID
+		existing.DecisionID == u.DecisionID &&
+		intValueEqual(existing.LatencyMS, u.LatencyMS) &&
+		existing.ErrorClass == u.ErrorClass
 	if same && observedAtSet && !existing.ObservedAt.Equal(u.ObservedAt) {
 		same = false
 	}
@@ -537,49 +544,235 @@ func nullString(v string) *string {
 	return &v
 }
 
-// SaveRoutingDecision appends a routing decision audit record.
+// SaveRoutingDecision appends a routing decision audit record together with the
+// candidates the selector evaluated.
+//
+// Both are written in one transaction: a decision whose candidates are missing
+// is not valid history, and a candidate row without its decision is an orphan.
+// A failure anywhere in the write leaves the database exactly as it was.
 func (s *Store) SaveRoutingDecision(ctx context.Context, r RoutingDecisionRecord) error {
 	if err := r.Validate(); err != nil {
 		return fmt.Errorf("routing decision: %w", err)
 	}
+	var affinityExpiresAt *string
+	if r.AffinityExpiresAt != nil && !r.AffinityExpiresAt.IsZero() {
+		v := ts(*r.AffinityExpiresAt)
+		affinityExpiresAt = &v
+	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO routing_decisions (decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			r.DecisionID, r.PolicyVersion, r.SessionID, nullString(r.SelectedAlias), nullString(r.SelectedProvider), r.Payload, ts(r.CreatedAt))
-		return classify(err)
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO routing_decisions
+			   (decision_id, policy_version, session_id, task_class, requested_alias, requested_provider,
+			    selected_alias, selected_provider, selected_reason_code, selected_reason, affinity_expires_at,
+			    payload, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.DecisionID, r.PolicyVersion, r.SessionID, nullString(r.TaskClass), nullString(r.RequestedAlias),
+			nullString(r.RequestedProvider), nullString(r.SelectedAlias), nullString(r.SelectedProvider),
+			nullString(r.SelectedReasonCode), nullString(r.SelectedReason), affinityExpiresAt,
+			r.Payload, ts(r.CreatedAt))
+		if err != nil {
+			return classify(err)
+		}
+		rowID, err := res.LastInsertId()
+		if err != nil {
+			return classify(err)
+		}
+		for _, c := range r.Candidates {
+			if err := insertDecisionCandidate(ctx, tx, rowID, r.DecisionID, r.CreatedAt, c); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
-// LatestRoutingDecisions returns the newest routing decisions, newest first.
+// insertDecisionCandidate writes one evaluated candidate of a decision. The
+// values that were not observed are written as NULL, never as a zero or a
+// healthy-looking default.
+func insertDecisionCandidate(ctx context.Context, tx *sql.Tx, rowID int64, decisionID string, createdAt time.Time, c RoutingDecisionCandidate) error {
+	var quotaObservedAt, quotaResetAt, healthObservedAt, cooldownUntil *string
+	for _, f := range []struct {
+		dst **string
+		src *time.Time
+	}{
+		{&quotaObservedAt, c.QuotaObservedAt},
+		{&quotaResetAt, c.QuotaResetAt},
+		{&healthObservedAt, c.HealthObservedAt},
+		{&cooldownUntil, c.CooldownUntil},
+	} {
+		if f.src == nil || f.src.IsZero() {
+			continue
+		}
+		v := ts(*f.src)
+		*f.dst = &v
+	}
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO routing_decision_candidates
+		   (decision_row_id, decision_id, ordinal, alias, provider, selected, eligible, eliminated_stage,
+		    reason_code, reason, transient, quota_state, quota_unknown_reason, quota_observed_at, quota_reset_at,
+		    health_state, health_reason, health_observed_at, cooldown_until, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rowID, decisionID, c.Ordinal, c.Alias, c.Provider, boolInt(c.Selected), boolInt(c.Eligible),
+		nullString(c.EliminatedStage), c.ReasonCode, nullString(c.Reason), boolInt(c.Transient),
+		nullString(c.QuotaState), nullString(c.QuotaUnknownReason), quotaObservedAt, quotaResetAt,
+		nullString(c.HealthState), nullString(c.HealthReason), healthObservedAt, cooldownUntil, ts(createdAt))
+	return classify(err)
+}
+
+// boolInt maps a flag to the integer SQLite stores in a CHECK-bounded column.
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+// LatestRoutingDecisions returns the newest routing decisions, newest first,
+// each with the candidate set that was evaluated for it.
 func (s *Store) LatestRoutingDecisions(ctx context.Context, limit int) ([]RoutingDecisionRecord, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at
+		`SELECT id, decision_id, policy_version, session_id, task_class, requested_alias, requested_provider,
+		        selected_alias, selected_provider, selected_reason_code, selected_reason, affinity_expires_at,
+		        payload, created_at
 		 FROM routing_decisions ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, classify(err)
 	}
 	defer rows.Close()
-	var out []RoutingDecisionRecord
+
+	var (
+		out   []*RoutingDecisionRecord
+		rowID []int64
+	)
 	for rows.Next() {
 		var (
 			r                RoutingDecisionRecord
+			id               int64
+			taskClass        sql.NullString
+			requestedAlias   sql.NullString
+			requestedProvide sql.NullString
 			selectedAlias    sql.NullString
 			selectedProvider sql.NullString
+			selectedCode     sql.NullString
+			selectedReason   sql.NullString
+			affinityExpires  sql.NullString
 			createdAt        string
 		)
-		if err := rows.Scan(&r.DecisionID, &r.PolicyVersion, &r.SessionID, &selectedAlias, &selectedProvider, &r.Payload, &createdAt); err != nil {
+		if err := rows.Scan(&id, &r.DecisionID, &r.PolicyVersion, &r.SessionID, &taskClass, &requestedAlias,
+			&requestedProvide, &selectedAlias, &selectedProvider, &selectedCode, &selectedReason,
+			&affinityExpires, &r.Payload, &createdAt); err != nil {
 			return nil, classify(err)
 		}
+		r.TaskClass = taskClass.String
+		r.RequestedAlias = requestedAlias.String
+		r.RequestedProvider = requestedProvide.String
 		r.SelectedAlias = selectedAlias.String
 		r.SelectedProvider = selectedProvider.String
+		r.SelectedReasonCode = selectedCode.String
+		r.SelectedReason = selectedReason.String
+		if affinityExpires.Valid {
+			t, err := parseTS(affinityExpires.String)
+			if err != nil {
+				return nil, err
+			}
+			r.AffinityExpiresAt = &t
+		}
 		if r.CreatedAt, err = parseTS(createdAt); err != nil {
 			return nil, err
 		}
-		out = append(out, r)
+		rec := r
+		out = append(out, &rec)
+		rowID = append(rowID, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classify(err)
+	}
+	rows.Close()
+
+	// The candidates are read for the decisions this call returned, in one
+	// query: a candidate row belongs to the decision it was evaluated for, and
+	// a decision without its candidates is not valid history.
+	candidates, err := s.decisionCandidates(ctx, rowID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]RoutingDecisionRecord, 0, len(out))
+	for i, rec := range out {
+		rec.Candidates = candidates[rowID[i]]
+		result = append(result, *rec)
+	}
+	return result, nil
+}
+
+// decisionCandidates reads the candidate rows of the given decision rows,
+// grouped by the decision row they belong to.
+func (s *Store) decisionCandidates(ctx context.Context, rowIDs []int64) (map[int64][]RoutingDecisionCandidate, error) {
+	out := map[int64][]RoutingDecisionCandidate{}
+	if len(rowIDs) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(rowIDs)), ",")
+	args := make([]any, 0, len(rowIDs))
+	for _, id := range rowIDs {
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT decision_row_id, ordinal, alias, provider, selected, eligible, eliminated_stage, reason_code,
+		        reason, transient, quota_state, quota_unknown_reason, quota_observed_at, quota_reset_at,
+		        health_state, health_reason, health_observed_at, cooldown_until
+		 FROM routing_decision_candidates WHERE decision_row_id IN (`+placeholders+`) ORDER BY decision_row_id, ordinal`, args...)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			rowID                           int64
+			c                               RoutingDecisionCandidate
+			selected, eligible, transient   int
+			eliminatedStage                 sql.NullString
+			reason                          sql.NullString
+			quotaState, quotaReason         sql.NullString
+			healthState, healthReason       sql.NullString
+			quotaObservedAt, quotaResetAt   sql.NullString
+			healthObservedAt, cooldownUntil sql.NullString
+		)
+		if err := rows.Scan(&rowID, &c.Ordinal, &c.Alias, &c.Provider, &selected, &eligible, &eliminatedStage,
+			&c.ReasonCode, &reason, &transient, &quotaState, &quotaReason, &quotaObservedAt, &quotaResetAt,
+			&healthState, &healthReason, &healthObservedAt, &cooldownUntil); err != nil {
+			return nil, classify(err)
+		}
+		c.Selected = selected == 1
+		c.Eligible = eligible == 1
+		c.Transient = transient == 1
+		c.EliminatedStage = eliminatedStage.String
+		c.Reason = reason.String
+		c.QuotaState = quotaState.String
+		c.QuotaUnknownReason = quotaReason.String
+		c.HealthState = healthState.String
+		c.HealthReason = healthReason.String
+		for _, f := range []struct {
+			dst **time.Time
+			src sql.NullString
+		}{
+			{&c.QuotaObservedAt, quotaObservedAt},
+			{&c.QuotaResetAt, quotaResetAt},
+			{&c.HealthObservedAt, healthObservedAt},
+			{&c.CooldownUntil, cooldownUntil},
+		} {
+			if !f.src.Valid {
+				continue
+			}
+			t, err := parseTS(f.src.String)
+			if err != nil {
+				return nil, err
+			}
+			*f.dst = &t
+		}
+		out[rowID] = append(out[rowID], c)
 	}
 	return out, classify(rows.Err())
 }
