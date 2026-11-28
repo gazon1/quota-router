@@ -190,8 +190,13 @@ func (s *RouteService) persistDecision(ctx context.Context, d routing.Decision) 
 		SessionID:        d.Request.SessionID,
 		SelectedAlias:    d.SelectedAlias,
 		SelectedProvider: d.SelectedProvider,
-		Payload:          string(payload),
-		CreatedAt:        time.Now().UTC(),
+		// The task class and whether the route was an explicit override are the
+		// route-side facts a consumer of the event contract needs, without
+		// parsing the payload JSON.
+		TaskClass: string(d.Request.TaskClass),
+		Explicit:  d.OverrideApplied,
+		Payload:   string(payload),
+		CreatedAt: time.Now().UTC(),
 	}
 	return s.decisions.SaveRoutingDecision(ctx, rec)
 }

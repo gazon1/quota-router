@@ -31,6 +31,11 @@ func (t TaskClass) known() bool {
 	}
 }
 
+// Known reports whether the task class is part of the documented vocabulary.
+// It is how another boundary (the telemetry contract, for example) checks a
+// task class it received without duplicating the list.
+func (t TaskClass) Known() bool { return t.known() }
+
 // RouteRequest is the agent-to-router contract for one routing decision.
 // It is an explicit decision boundary, not an instruction to switch models
 // after every agent message. The router selects an eligible provider/model for

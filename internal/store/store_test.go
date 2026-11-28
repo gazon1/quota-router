@@ -33,13 +33,14 @@ func openMigrated(t *testing.T) (*Store, string) {
 
 func floatPtr(v float64) *float64 { return &v }
 func intPtr(v int) *int           { return &v }
+func int64Ptr(v int64) *int64     { return &v }
 
 func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	s, path := openMigrated(t)
 
 	v, err := s.Version(context.Background())
 	require.NoError(t, err, "Version")
-	assert.Equal(t, int64(6), v)
+	assert.Equal(t, int64(7), v)
 
 	// A restart must not re-apply or fail: this is the existing-database path.
 	require.NoError(t, s.Migrate(context.Background()), "second Migrate")
@@ -181,7 +182,7 @@ func TestUsageIsSeparateAndDeduplicated(t *testing.T) {
 	u := UsageRecord{
 		Source: "test", RequestID: "req-1", Provider: "minimax", Model: "MiniMax-M3.1-Flash",
 		InputTokens: intPtr(10), OutputTokens: intPtr(20),
-		Provenance: Estimated, ObservedAt: time.Now(),
+		InputProvenance: TokenEstimated, OutputProvenance: TokenEstimated, ObservedAt: time.Now(),
 	}
 	require.NoError(t, s.SaveUsageRecord(ctx, u), "SaveUsageRecord")
 	// A retried report with the same ID must not double-count tokens.
@@ -201,7 +202,7 @@ func TestUsageWithoutRequestIDIsKept(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)
 
-	u := UsageRecord{Source: "test", Provider: "minimax", Provenance: Estimated, ObservedAt: time.Now()}
+	u := UsageRecord{Source: "test", Provider: "minimax", ObservedAt: time.Now()}
 	for i := 0; i < 2; i++ {
 		require.NoError(t, s.SaveUsageRecord(ctx, u), "SaveUsageRecord #%d", i)
 	}
@@ -349,7 +350,7 @@ func TestPruneKeepsTheLatestStateItMustNotRemove(t *testing.T) {
 	}
 	require.NoError(t, s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: old}),
 		"SaveProviderHealth")
-	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "minimax", Provenance: Estimated, ObservedAt: old}),
+	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "minimax", ObservedAt: old}),
 		"SaveUsageRecord")
 
 	deleted, err := s.Prune(ctx, Retention{
@@ -380,7 +381,7 @@ func TestPruneKeepsEverythingWhenRetentionIsZero(t *testing.T) {
 	s, _ := openMigrated(t)
 
 	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: old}),
+	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", ObservedAt: old}),
 		"SaveUsageRecord")
 	deleted, err := s.Prune(ctx, Retention{}, time.Now())
 	require.NoError(t, err, "Prune")
@@ -394,7 +395,7 @@ func TestPruneIsAtomicOnFailure(t *testing.T) {
 	// A cancelled context fails the transaction; nothing may be deleted.
 	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 3; i++ {
-		require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: old}),
+		require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", ObservedAt: old}),
 			"SaveUsageRecord")
 	}
 	cancelled, cancel := context.WithCancel(ctx)
@@ -849,12 +850,12 @@ func TestBusyIsClassifiedAndLosesNoWrite(t *testing.T) {
 	impatient, err := Open(Config{Path: path, BusyTimeout: 1 * time.Millisecond}, testLog())
 	require.NoError(t, err, "open impatient")
 	defer impatient.Close()
-	err = impatient.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: time.Now()})
+	err = impatient.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", ObservedAt: time.Now()})
 	assert.ErrorIs(t, err, ErrBusy, "the conflict must be reported while another writer holds the lock")
 
 	require.NoError(t, held.Rollback(), "rollback")
 	// Once the lock is free the write lands, and exactly once.
-	require.NoError(t, impatient.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: time.Now()}),
+	require.NoError(t, impatient.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", ObservedAt: time.Now()}),
 		"write after the lock was released")
 	var n int
 	require.NoError(t, s.db.QueryRow("SELECT COUNT(*) FROM usage_records").Scan(&n), "count")
@@ -892,7 +893,7 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	// Both ran, the schema exists once, and the version is recorded once.
 	v, err := first.Version(context.Background())
 	require.NoError(t, err, "Version")
-	assert.Equal(t, int64(6), v)
+	assert.Equal(t, int64(7), v)
 	var applied int
 	require.NoError(t, first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied),
 		"count versions")
@@ -1009,7 +1010,7 @@ func TestReadOnlyFileFailsWritesWithErrReadOnly(t *testing.T) {
 		return // some systems refuse to open read-write at all; that is also fine
 	}
 	defer ro.Close()
-	err = ro.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Estimated, ObservedAt: time.Now()})
+	err = ro.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", ObservedAt: time.Now()})
 	if err == nil {
 		t.Skip("the filesystem allowed a write to a read-only file (running as root?)")
 	}

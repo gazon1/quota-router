@@ -8,10 +8,16 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
+
+	sqlite3 "modernc.org/sqlite"
 )
 
 // tsLayout is the fixed-width UTC layout every timestamp column uses, so
@@ -65,12 +71,14 @@ func (s *Store) SaveQuotaSnapshot(ctx context.Context, snap QuotaSnapshot) error
 	})
 }
 
-// SaveUsageRecord appends one request attempt. A report for an attempt that is
-// already stored is ignored when the event content is identical, so a retried
-// report does not double-count tokens; a retry is a different attempt and gets
-// its own row. An empty outcome is stored as UNKNOWN and attempt 0 as the first
-// attempt, because neither is a value this store may invent. Reusing an event
-// identity for different content is ErrUsageConflict, not an overwrite.
+// SaveUsageRecord appends one request/outcome event. A report for an attempt
+// that is already stored is ignored when the event content is identical, so a
+// retried report does not double-count tokens; a retry is a different attempt
+// and gets its own row. An empty outcome is stored as UNKNOWN and attempt 0 as
+// the first attempt, because neither is a value this store may invent. Reusing
+// an event identity for different content is ErrUsageConflict, not an
+// overwrite: the stored observation stays as it is, and the disagreement is
+// kept as a conflict record so both sides remain visible.
 func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	if u.Attempt == 0 {
 		u.Attempt = 1
@@ -78,21 +86,43 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 	if u.Outcome == "" {
 		u.Outcome = OutcomeUnknown
 	}
+	if u.SchemaVersion == 0 {
+		u.SchemaVersion = EventSchemaVersion
+	}
 	observedAtSet := u.ObservedAtReported
 	if u.ObservedAt.IsZero() {
 		u.ObservedAt = time.Now().UTC()
 	}
+	if u.ReceivedAt.IsZero() {
+		u.ReceivedAt = time.Now().UTC()
+	}
+	if u.EventID == "" {
+		u.EventID = eventID(u.RequestID, u.Attempt)
+	}
 	if err := u.Validate(); err != nil {
 		return fmt.Errorf("usage record: %w", err)
 	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
+	// The conflict is written in the same transaction as the failed insert, so
+	// the caller is told about the conflict only after the record of it is
+	// durable. The error itself is returned after the commit: the transaction
+	// helper rolls back on an error, and a rolled-back conflict would be no
+	// conflict at all.
+	var conflict error
+	err := s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO usage_records
-			   (request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			   (request_id, attempt, event_id, schema_version, provider, model, task_class, route_source,
+			    input_tokens, input_provenance, output_tokens, output_provenance, source, outcome, error_class,
+			    stream_state, ttft_ms, latency_ms, decision_id, observed_at, observed_at_reported, received_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT (request_id, attempt) DO NOTHING`,
-			nullString(u.RequestID), u.Attempt, u.Provider, nullString(u.Model), u.InputTokens, u.OutputTokens,
-			u.Provenance, u.Source, u.Outcome, nullString(u.DecisionID), ts(u.ObservedAt))
+			nullString(u.RequestID), u.Attempt, u.EventID, u.SchemaVersion,
+			u.Provider, nullString(u.Model), nullString(u.TaskClass), nullString(string(u.RouteSource)),
+			u.InputTokens, nullString(string(u.InputProvenance)),
+			u.OutputTokens, nullString(string(u.OutputProvenance)),
+			u.Source, u.Outcome, nullString(string(u.ErrorClass)), nullString(string(u.StreamState)),
+			u.TTFTMS, u.LatencyMS, nullString(u.DecisionID),
+			ts(u.ObservedAt), u.ObservedAtReported, ts(u.ReceivedAt))
 		if err != nil {
 			return classify(err)
 		}
@@ -100,79 +130,282 @@ func (s *Store) SaveUsageRecord(ctx context.Context, u UsageRecord) error {
 		if err != nil {
 			return classify(err)
 		}
-		if rows == 0 {
-			// The attempt identity was taken by an earlier report. The same
-			// event redelivered is a no-op; the same identity carrying different
-			// content is a conflicting reuse and fails the write.
-			return s.usageConflict(ctx, tx, u, observedAtSet)
+		if rows > 0 {
+			return nil
 		}
+		// The attempt identity was taken by an earlier report. The same
+		// event redelivered is a no-op; the same identity carrying different
+		// content is a conflicting reuse and is kept, not overwritten.
+		diffs, err := usageDiffs(ctx, tx, u, observedAtSet)
+		if err != nil {
+			if errors.Is(err, ErrUsageConflict) {
+				conflict = ErrUsageConflict
+				return nil
+			}
+			return err
+		}
+		if len(diffs) == 0 {
+			return nil
+		}
+		if err := recordConflicts(ctx, tx, u, diffs); err != nil {
+			return err
+		}
+		conflict = ErrUsageConflict
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return conflict
 }
 
-// usageConflict decides what a skipped duplicate means. A redelivered event with
-// identical content leaves the stored attempt alone and succeeds; the same event
-// id reused for different content is a conflict, not a retry, and must surface.
+// EventSchemaVersion versions the canonical request/outcome event contract. A
+// stored event carries the version it was written with, so a reader can tell
+// which shape it sees.
+const EventSchemaVersion = 1
+
+// eventID derives the stable id of an event from its identity. The same
+// request and attempt always produce the same id, and the id reveals neither
+// the request id nor anything about the request content.
+func eventID(requestID string, attempt int) string {
+	if requestID == "" {
+		// Without a request id there is no stable identity to derive from.
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", requestID, attempt)))
+	return hex.EncodeToString(sum[:])[:32]
+}
+
+// usageEventIDFunc is the SQL name of the helper the migration uses to give
+// legacy rows an event id. SQLite has no hashing function, so the id is
+// computed in Go and registered with the driver: the migration and the store
+// therefore derive the same id for the same identity.
+const usageEventIDFunc = "usage_event_id"
+
+func init() {
+	// The driver's function registry is global and one-shot. A second
+	// registration of the same name is an error, and there is nothing to
+	// recover from: the helper is registered once, before any connection
+	// exists.
+	_ = sqlite3.RegisterDeterministicScalarFunction(usageEventIDFunc, 2,
+		func(_ *sqlite3.FunctionContext, args []driver.Value) (driver.Value, error) {
+			if len(args) != 2 {
+				return nil, fmt.Errorf("%s takes two arguments", usageEventIDFunc)
+			}
+			requestID, _ := args[0].(string)
+			attempt, ok := args[1].(int64)
+			if !ok {
+				return nil, fmt.Errorf("%s attempt must be an integer", usageEventIDFunc)
+			}
+			return eventID(requestID, int(attempt)), nil
+		})
+}
+
+// usageDiffs decides what a skipped duplicate means and, when the two reports
+// disagree, which fields they disagree on. A redelivered event with identical
+// content leaves the stored attempt alone and produces no diff; the same event
+// id reused for different content is a conflict, not a retry, and each
+// differing field is reported so the disagreement can be kept.
+//
 // observedAtSet reports whether the reporter supplied an observation timestamp;
 // a redelivery that omitted it carries server-stamped arrival bookkeeping, not
 // event content, so it must not conflict on that alone.
-func (s *Store) usageConflict(ctx context.Context, tx *sql.Tx, u UsageRecord, observedAtSet bool) error {
-	var (
-		provider   string
-		model      sql.NullString
-		input      sql.NullInt64
-		output     sql.NullInt64
-		prov       string
-		src        string
-		outcome    string
-		decision   sql.NullString
-		observedAt string
-	)
-	err := tx.QueryRowContext(ctx,
-		`SELECT provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at
-		 FROM usage_records WHERE request_id = ? AND attempt = ?`,
-		u.RequestID, u.Attempt).Scan(&provider, &model, &input, &output, &prov, &src, &outcome, &decision, &observedAt)
+func usageDiffs(ctx context.Context, tx *sql.Tx, u UsageRecord, observedAtSet bool) ([]conflictDiff, error) {
+	existing, err := usageRecordByIdentity(ctx, tx, u.RequestID, u.Attempt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrUsageConflict
+			return nil, ErrUsageConflict
 		}
-		return classify(err)
-	}
-	storedObservedAt, err := parseTS(observedAt)
-	if err != nil {
-		return fmt.Errorf("usage record: stored observed_at: %w", err)
-	}
-	existing := UsageRecord{
-		RequestID:    u.RequestID,
-		Attempt:      u.Attempt,
-		Provider:     provider,
-		Model:        model.String,
-		InputTokens:  intFromNull(&input),
-		OutputTokens: intFromNull(&output),
-		Provenance:   Confidence(prov),
-		Source:       src,
-		Outcome:      Outcome(outcome),
-		DecisionID:   decision.String,
-		ObservedAt:   storedObservedAt,
+		return nil, classify(err)
 	}
 	if existing.Provider == "" || existing.Source == "" || existing.Outcome == "" {
-		return ErrUsageConflict
+		// A stored row this store cannot read back is not comparable, so it
+		// cannot be called identical either.
+		return nil, ErrUsageConflict
 	}
-	same := existing.Provider == u.Provider &&
-		existing.Model == u.Model &&
-		intValueEqual(existing.InputTokens, u.InputTokens) &&
-		intValueEqual(existing.OutputTokens, u.OutputTokens) &&
-		existing.Provenance == u.Provenance &&
-		existing.Source == u.Source &&
-		existing.Outcome == u.Outcome &&
-		existing.DecisionID == u.DecisionID
-	if same && observedAtSet && !existing.ObservedAt.Equal(u.ObservedAt) {
-		same = false
+	var diffs []conflictDiff
+	add := func(field, original, incoming string, originalProv, incomingProv TokenProvenance) {
+		diffs = append(diffs, conflictDiff{
+			field:              field,
+			originalValue:      original,
+			originalProvenance: originalProv,
+			incomingValue:      incoming,
+			incomingProvenance: incomingProv,
+		})
 	}
-	if !same {
-		return ErrUsageConflict
+	if existing.Provider != u.Provider {
+		add("provider", existing.Provider, u.Provider, "", "")
+	}
+	if existing.Model != u.Model {
+		add("model", existing.Model, u.Model, "", "")
+	}
+	if existing.TaskClass != u.TaskClass {
+		add("task_class", existing.TaskClass, u.TaskClass, "", "")
+	}
+	if existing.RouteSource != u.RouteSource {
+		add("route_source", string(existing.RouteSource), string(u.RouteSource), "", "")
+	}
+	if !intValueEqual(existing.InputTokens, u.InputTokens) {
+		add("input_tokens", countText(existing.InputTokens), countText(u.InputTokens),
+			existing.InputProvenance, u.InputProvenance)
+	}
+	if !intValueEqual(existing.OutputTokens, u.OutputTokens) {
+		add("output_tokens", countText(existing.OutputTokens), countText(u.OutputTokens),
+			existing.OutputProvenance, u.OutputProvenance)
+	}
+	if existing.InputProvenance != u.InputProvenance {
+		add("input_provenance", string(existing.InputProvenance), string(u.InputProvenance), "", "")
+	}
+	if existing.OutputProvenance != u.OutputProvenance {
+		add("output_provenance", string(existing.OutputProvenance), string(u.OutputProvenance), "", "")
+	}
+	if existing.Source != u.Source {
+		add("source", existing.Source, u.Source, "", "")
+	}
+	if existing.Outcome != u.Outcome {
+		add("outcome", string(existing.Outcome), string(u.Outcome), "", "")
+	}
+	if existing.ErrorClass != u.ErrorClass {
+		add("error_class", string(existing.ErrorClass), string(u.ErrorClass), "", "")
+	}
+	if existing.StreamState != u.StreamState {
+		add("stream_state", string(existing.StreamState), string(u.StreamState), "", "")
+	}
+	if !intValueEqualInt64(existing.TTFTMS, u.TTFTMS) {
+		add("ttft_ms", msText(existing.TTFTMS), msText(u.TTFTMS), "", "")
+	}
+	if !intValueEqualInt64(existing.LatencyMS, u.LatencyMS) {
+		add("latency_ms", msText(existing.LatencyMS), msText(u.LatencyMS), "", "")
+	}
+	if existing.DecisionID != u.DecisionID {
+		add("decision_id", existing.DecisionID, u.DecisionID, "", "")
+	}
+	if observedAtSet && !existing.ObservedAt.Equal(u.ObservedAt) {
+		add("observed_at", ts(existing.ObservedAt), ts(u.ObservedAt), "", "")
+	}
+	return diffs, nil
+}
+
+// conflictDiff is one field the two reports disagreed on.
+type conflictDiff struct {
+	field              string
+	originalValue      string
+	originalProvenance TokenProvenance
+	incomingValue      string
+	incomingProvenance TokenProvenance
+}
+
+// maxConflictsPerEvent bounds how many conflict rows one event identity keeps.
+// The number of fields is finite, so the bound is never reached by one
+// disagreement; it stops a repeated, differently-worded conflict from growing
+// the table without limit.
+const maxConflictsPerEvent = 8
+
+// recordConflicts keeps the disagreement. Only the field name and the two
+// values are stored: a conflict is not a place for the report that caused it,
+// so no provider payload, prompt or transcript can reach this table.
+func recordConflicts(ctx context.Context, tx *sql.Tx, u UsageRecord, diffs []conflictDiff) error {
+	var kept int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM usage_conflicts WHERE request_id = ? AND attempt = ?`,
+		u.RequestID, u.Attempt).Scan(&kept); err != nil {
+		return classify(err)
+	}
+	for _, d := range diffs {
+		if kept >= maxConflictsPerEvent {
+			break
+		}
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO usage_conflicts
+			   (request_id, attempt, field, original_value, original_provenance,
+			    incoming_value, incoming_provenance, source, observed_at, received_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT (request_id, attempt, field, incoming_value) DO NOTHING`,
+			u.RequestID, u.Attempt, d.field, d.originalValue, nullString(string(d.originalProvenance)),
+			d.incomingValue, nullString(string(d.incomingProvenance)),
+			u.Source, ts(u.ObservedAt), ts(u.ReceivedAt))
+		if err != nil {
+			return classify(err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return classify(err)
+		}
+		kept += int(n)
 	}
 	return nil
+}
+
+// countText renders an optional count for a conflict record. An absent count
+// is the empty string, never a zero.
+func countText(v *int) string {
+	if v == nil {
+		return ""
+	}
+	return strconv.Itoa(*v)
+}
+
+// msText renders an optional measurement for a conflict record.
+func msText(v *int64) string {
+	if v == nil {
+		return ""
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// usageColumns is the column list of one stored event, in the order
+// scanUsageRecord reads it.
+const usageColumns = `request_id, attempt, event_id, schema_version, provider, model, task_class, route_source,
+	input_tokens, input_provenance, output_tokens, output_provenance, source, outcome, error_class,
+	stream_state, ttft_ms, latency_ms, decision_id, observed_at, observed_at_reported, received_at`
+
+// usageRecordByIdentity reads the stored event of one attempt.
+func usageRecordByIdentity(ctx context.Context, tx *sql.Tx, requestID string, attempt int) (UsageRecord, error) {
+	row := tx.QueryRowContext(ctx,
+		`SELECT `+usageColumns+` FROM usage_records WHERE request_id = ? AND attempt = ?`,
+		requestID, attempt)
+	return scanUsageRecord(row)
+}
+
+// scanUsageRecord reads one event row. A nullable column stays absent: it is
+// never turned into a zero or an empty string.
+func scanUsageRecord(row interface{ Scan(...any) error }) (UsageRecord, error) {
+	var (
+		u                                                    UsageRecord
+		model, taskClass, routeSource, inputProv, outputProv sql.NullString
+		errorClass, streamState                              sql.NullString
+		input, output                                        sql.NullInt64
+		ttft, latency                                        sql.NullInt64
+		decisionID                                           sql.NullString
+		observedAt, receivedAt                               string
+		observedAtReported                                   int
+	)
+	err := row.Scan(&u.RequestID, &u.Attempt, &u.EventID, &u.SchemaVersion, &u.Provider, &model,
+		&taskClass, &routeSource, &input, &inputProv, &output, &outputProv, &u.Source, &u.Outcome,
+		&errorClass, &streamState, &ttft, &latency, &decisionID, &observedAt, &observedAtReported, &receivedAt)
+	if err != nil {
+		return UsageRecord{}, err
+	}
+	u.Model = model.String
+	u.TaskClass = taskClass.String
+	u.RouteSource = RouteSource(routeSource.String)
+	u.InputTokens = intFromNull(&input)
+	u.OutputTokens = intFromNull(&output)
+	u.InputProvenance = TokenProvenance(inputProv.String)
+	u.OutputProvenance = TokenProvenance(outputProv.String)
+	u.ErrorClass = ErrorClass(errorClass.String)
+	u.StreamState = StreamState(streamState.String)
+	u.TTFTMS = int64FromNull(&ttft)
+	u.LatencyMS = int64FromNull(&latency)
+	u.DecisionID = decisionID.String
+	u.ObservedAtReported = observedAtReported == 1
+	if u.ObservedAt, err = parseTS(observedAt); err != nil {
+		return UsageRecord{}, err
+	}
+	if u.ReceivedAt, err = parseTS(receivedAt); err != nil {
+		return UsageRecord{}, err
+	}
+	return u, nil
 }
 
 // intValueEqual compares optional counts without dereferencing a nil: an absent
@@ -184,11 +417,27 @@ func intValueEqual(a, b *int) bool {
 	return a == nil || *a == *b
 }
 
+// intValueEqualInt64 is intValueEqual for the millisecond measurements.
+func intValueEqualInt64(a, b *int64) bool {
+	if (a == nil) != (b == nil) {
+		return false
+	}
+	return a == nil || *a == *b
+}
+
 func intFromNull(v *sql.NullInt64) *int {
 	if !v.Valid {
 		return nil
 	}
 	n := int(v.Int64)
+	return &n
+}
+
+func int64FromNull(v *sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	n := v.Int64
 	return &n
 }
 
@@ -426,6 +675,23 @@ type Retention struct {
 	RoutingDecisions time.Duration
 }
 
+// maxUsageRetention is the hard upper bound on how long request/outcome events
+// are kept. A configured age above it is clamped here, so storage stays bounded
+// even when the configuration asks for more history than the controller holds.
+const maxUsageRetention = 365 * 24 * time.Hour
+
+// pruneBatch is how many rows one cleanup statement deletes, and
+// maxPruneBatches bounds how many batches one run performs. Pruning in batches
+// keeps each statement short: a cleanup that ran as one huge delete would hold
+// the write lock long enough to make a request wait for it.
+//
+// They are variables so a test can lower the bound and observe it; the
+// production values are the ones below.
+var (
+	pruneBatch      = 1000
+	maxPruneBatches = 100
+)
+
 // Prune deletes rows older than the retention bounds, keeping the newest row per
 // provider even when it is older than the bound. It returns the deleted counts.
 //
@@ -467,10 +733,6 @@ func (s *Store) Prune(ctx context.Context, r Retention, now time.Time) (deleted 
 			{"provider_health", r.ProviderHealth,
 				"WITH spared AS MATERIALIZED (" + newestPerProvider("provider_health", false) + ") " +
 					"DELETE FROM provider_health WHERE observed_at < ? AND id NOT IN (SELECT id FROM spared)"},
-			{"usage_records", r.UsageRecords,
-				"DELETE FROM usage_records WHERE observed_at < ?"},
-			{"routing_decisions", r.RoutingDecisions,
-				"DELETE FROM routing_decisions WHERE created_at < ?"},
 		} {
 			if p.age <= 0 {
 				continue
@@ -485,12 +747,66 @@ func (s *Store) Prune(ctx context.Context, r Retention, now time.Time) (deleted 
 			}
 			deleted[p.table] = n
 		}
+
+		// The two high-volume tables are pruned in bounded batches, and the
+		// event table's age is clamped to the hard upper bound.
+		if age := r.UsageRecords; age > 0 {
+			if age > maxUsageRetention {
+				age = maxUsageRetention
+			}
+			n, err := deleteBatched(ctx, tx, "usage_records", "observed_at < ?", ts(now.Add(-age)))
+			if err != nil {
+				return err
+			}
+			deleted["usage_records"] = n
+			// The conflicts belong to the events: they go with them, or a
+			// conflict would outlive the observation it is about.
+			n, err = deleteBatched(ctx, tx, "usage_conflicts", "observed_at < ?", ts(now.Add(-age)))
+			if err != nil {
+				return err
+			}
+			deleted["usage_conflicts"] = n
+		}
+		if age := r.RoutingDecisions; age > 0 {
+			n, err := deleteBatched(ctx, tx, "routing_decisions", "created_at < ?", ts(now.Add(-age)))
+			if err != nil {
+				return err
+			}
+			deleted["routing_decisions"] = n
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return deleted, nil
+}
+
+// deleteBatched removes the rows a predicate selects, at most pruneBatch rows
+// per statement and maxPruneBatches statements per run. The run is bounded, so
+// cleanup cannot grow without limit; whatever is left is removed by the next
+// run.
+func deleteBatched(ctx context.Context, tx *sql.Tx, table, where string, args ...any) (int64, error) {
+	var total int64
+	for i := 0; i < maxPruneBatches; i++ {
+		stmt := `DELETE FROM ` + table + ` WHERE id IN (SELECT id FROM ` + table + ` WHERE ` + where + ` LIMIT ?)`
+		params := make([]any, 0, len(args)+1)
+		params = append(params, args...)
+		params = append(params, int64(pruneBatch))
+		res, err := tx.ExecContext(ctx, stmt, params...)
+		if err != nil {
+			return 0, classify(err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, classify(err)
+		}
+		total += n
+		if n < int64(pruneBatch) {
+			break
+		}
+	}
+	return total, nil
 }
 
 // tx runs fn in one transaction and rolls back on any error.
@@ -544,44 +860,12 @@ func (s *Store) SaveRoutingDecision(ctx context.Context, r RoutingDecisionRecord
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO routing_decisions (decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			r.DecisionID, r.PolicyVersion, r.SessionID, nullString(r.SelectedAlias), nullString(r.SelectedProvider), r.Payload, ts(r.CreatedAt))
+			`INSERT INTO routing_decisions (decision_id, policy_version, session_id, selected_alias, selected_provider, task_class, explicit, payload, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			r.DecisionID, r.PolicyVersion, r.SessionID, nullString(r.SelectedAlias), nullString(r.SelectedProvider),
+			nullString(r.TaskClass), r.Explicit, r.Payload, ts(r.CreatedAt))
 		return classify(err)
 	})
-}
-
-// LatestRoutingDecisions returns the newest routing decisions, newest first.
-func (s *Store) LatestRoutingDecisions(ctx context.Context, limit int) ([]RoutingDecisionRecord, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT decision_id, policy_version, session_id, selected_alias, selected_provider, payload, created_at
-		 FROM routing_decisions ORDER BY id DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, classify(err)
-	}
-	defer rows.Close()
-	var out []RoutingDecisionRecord
-	for rows.Next() {
-		var (
-			r                RoutingDecisionRecord
-			selectedAlias    sql.NullString
-			selectedProvider sql.NullString
-			createdAt        string
-		)
-		if err := rows.Scan(&r.DecisionID, &r.PolicyVersion, &r.SessionID, &selectedAlias, &selectedProvider, &r.Payload, &createdAt); err != nil {
-			return nil, classify(err)
-		}
-		r.SelectedAlias = selectedAlias.String
-		r.SelectedProvider = selectedProvider.String
-		if r.CreatedAt, err = parseTS(createdAt); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, classify(rows.Err())
 }
 
 // SaveSessionAffinity pins a session to a route. The latest write wins, except

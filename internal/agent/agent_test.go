@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -75,7 +76,7 @@ func TestAgentContract(t *testing.T) {
 	require.NotNil(t, row.OutputTokens)
 	assert.Equal(t, 34, *row.OutputTokens, "want the reported 1200/34")
 	assert.Equal(t, store.OutcomeSuccess, row.Outcome, "usage row provenance")
-	assert.Equal(t, store.Reported, row.Provenance, "usage row provenance")
+	assert.Equal(t, store.TokenProxyReported, row.InputProvenance, "usage row provenance")
 	assert.Equal(t, agent.Source, row.Source, "usage row provenance")
 
 	// A repeated report writes nothing and still succeeds (idempotent).
@@ -98,6 +99,73 @@ func TestAgentNoRouteIsNotAnOutage(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.ErrorContains(t, err, agent.ErrNoRoute.Error())
+}
+
+// TestAgentReportsRouteTelemetry is the reporting-boundary half of the event
+// contract: the agent reports what it knows about the attempt, and what it
+// does not know stays absent.
+func TestAgentReportsRouteTelemetry(t *testing.T) {
+	h := newHarness(t)
+	h.seed(t, "commandcode", store.QuotaAvailable, 80)
+	h.seed(t, "minimax", store.QuotaAvailable, 80)
+
+	ctx := context.Background()
+	got, err := h.client.Route(ctx, routing.RouteRequest{
+		Version:      routing.RouteRequestVersionV1,
+		SessionID:    "session-1",
+		Capabilities: &routing.RequiredCapabilities{},
+		TaskClass:    routing.TaskCoding,
+	})
+	require.NoError(t, err, "Route")
+	reply, err := h.client.Chat(ctx, got, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	require.NoError(t, err, "Chat")
+	require.NoError(t, h.client.Report(ctx, got, reply.Attempt(1)), "Report")
+	row := h.usageRow(t)
+	assert.Equal(t, string(routing.TaskCoding), row.TaskClass, "task class")
+	assert.Equal(t, store.RouteController, row.RouteSource, "route source")
+	require.NotNil(t, row.LatencyMS, "latency = %v, want the measured duration", row.LatencyMS)
+	assert.GreaterOrEqual(t, *row.LatencyMS, int64(0), "latency")
+}
+
+// TestAgentManualRouteIsReportedAsManual: the manual fallback is a route of
+// its own, and the event says so instead of pretending the controller chose
+// it.
+func TestAgentManualRouteIsReportedAsManual(t *testing.T) {
+	h := newHarness(t)
+	h.client.Manual = agent.ManualRoute{Alias: "cc-coding", Provider: "commandcode"}
+
+	down := *h.client
+	down.ControllerURL = "http://127.0.0.1:1"
+	got, err := down.Route(context.Background(), routing.RouteRequest{
+		Version:      routing.RouteRequestVersionV1,
+		SessionID:    "session-1",
+		Capabilities: &routing.RequiredCapabilities{},
+	})
+	require.NoError(t, err, "manual Route")
+	require.NoError(t, h.client.Report(context.Background(), got, agent.Attempt{Number: 1, Outcome: agent.OutcomeSuccess}), "Report")
+	row := h.usageRow(t)
+	assert.Equal(t, store.RouteManual, row.RouteSource, "route source")
+}
+
+// TestAgentReportFailureDoesNotChangeTheRequest is the non-invasion rule:
+// telemetry is best effort. A controller that cannot store the report must not
+// change the answer the caller already got.
+func TestAgentReportFailureDoesNotChangeTheRequest(t *testing.T) {
+	h := newHarness(t)
+
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	c := *h.client
+	c.ControllerURL = failing.URL
+
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode", RequestID: "req-1"}
+	reply, err := c.Chat(context.Background(), routed, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	require.NoError(t, err, "Chat")
+	assert.Equal(t, http.StatusOK, reply.Status, "reply = %d %q, want the proxy answer unchanged", reply.Status, reply.Body)
+	assert.NotEmpty(t, reply.Body, "reply body")
+	require.Error(t, c.Report(context.Background(), routed, reply.Attempt(1)), "a failing usage report was reported as a success")
 }
 
 // TestAgentControllerDownFailsClosedAndManual is the documented outage rule:
@@ -413,20 +481,23 @@ func (h *harness) usageRows(t *testing.T) []store.UsageRecord {
 	db, err := sql.Open("sqlite", "file:"+h.path+"?mode=ro")
 	require.NoError(t, err, "open read-only")
 	defer db.Close()
-	rows, err := db.Query(`SELECT request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id FROM usage_records ORDER BY id`)
+	rows, err := db.Query(`SELECT request_id, attempt, provider, model, input_tokens, output_tokens, input_provenance, output_provenance, source, outcome, decision_id, task_class, route_source, latency_ms FROM usage_records ORDER BY id`)
 	require.NoError(t, err, "query usage_records")
 	defer rows.Close()
 	var out []store.UsageRecord
 	for rows.Next() {
 		var u store.UsageRecord
-		var reqID, model, prov, source, outcome, decisionID *string
-		require.NoError(t, rows.Scan(&reqID, &u.Attempt, &u.Provider, &model, &u.InputTokens, &u.OutputTokens, &prov, &source, &outcome, &decisionID), "scan usage row")
+		var reqID, model, inProv, outProv, source, outcome, decisionID, taskClass, routeSource *string
+		require.NoError(t, rows.Scan(&reqID, &u.Attempt, &u.Provider, &model, &u.InputTokens, &u.OutputTokens, &inProv, &outProv, &source, &outcome, &decisionID, &taskClass, &routeSource, &u.LatencyMS), "scan usage row")
 		u.RequestID = deref(reqID)
 		u.Model = deref(model)
-		u.Provenance = store.Confidence(deref(prov))
+		u.InputProvenance = store.TokenProvenance(deref(inProv))
+		u.OutputProvenance = store.TokenProvenance(deref(outProv))
 		u.Source = deref(source)
 		u.Outcome = store.Outcome(deref(outcome))
 		u.DecisionID = deref(decisionID)
+		u.TaskClass = deref(taskClass)
+		u.RouteSource = store.RouteSource(deref(routeSource))
 		out = append(out, u)
 	}
 	require.NoError(t, rows.Err(), "iterate usage rows")
@@ -438,4 +509,108 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// A call that failed on the wire is still an attempt: without it the usage
+// history would show a request that apparently never happened, while the
+// provider may well have served it. The attempt says so, and it is reportable.
+func TestFailedCallAfterDispatchIsAmbiguousAndReportable(t *testing.T) {
+	h := newHarness(t)
+	// A proxy that takes the request and then drops the connection: nothing
+	// says whether the provider answered it.
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}))
+	defer broken.Close()
+
+	c := *h.client
+	c.ProxyURL = broken.URL
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode", RequestID: "req-1"}
+	_, attempt, err := c.ChatAttempt(context.Background(), routed, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if err == nil {
+		t.Fatal("the failed call was reported as a success")
+	}
+	if attempt.Outcome != agent.OutcomeAmbiguous {
+		t.Fatalf("outcome = %q, want %q", attempt.Outcome, agent.OutcomeAmbiguous)
+	}
+	if attempt.ErrorClass != agent.ErrorNetwork {
+		t.Fatalf("error class = %q, want %q", attempt.ErrorClass, agent.ErrorNetwork)
+	}
+	if attempt.LatencyMS == nil {
+		t.Fatal("the failed attempt carries no measurement")
+	}
+
+	// The attempt is reportable, and the stored event says what happened.
+	if err := c.Report(context.Background(), routed, attempt); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if row := h.usageRow(t); row.Outcome != store.OutcomeAmbiguous {
+		t.Fatalf("outcome = %q, want %q", row.Outcome, store.OutcomeAmbiguous)
+	}
+}
+
+// A failure that happened before the request was sent is not a maybe: nothing
+// was dispatched, so the attempt failed.
+func TestFailureBeforeDispatchIsNotAmbiguous(t *testing.T) {
+	h := newHarness(t)
+	c := *h.client
+	// Nothing listens there: the connection fails before the request is
+	// written.
+	c.ProxyURL = "http://127.0.0.1:1"
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode", RequestID: "req-2"}
+	_, attempt, err := c.ChatAttempt(context.Background(), routed, []byte(`{"messages":[]}`))
+	if err == nil {
+		t.Fatal("the failed call was reported as a success")
+	}
+	if attempt.Outcome == agent.OutcomeAmbiguous {
+		t.Fatal("a failure before the request was sent was called ambiguous")
+	}
+	if attempt.Outcome != agent.OutcomeFailedBeforeFirstToken {
+		t.Fatalf("outcome = %q, want %q", attempt.Outcome, agent.OutcomeFailedBeforeFirstToken)
+	}
+
+	// A request that was never built fails the same way: nothing was sent.
+	unconfigured := *h.client
+	unconfigured.ProxyURL = ""
+	_, attempt, err = unconfigured.ChatAttempt(context.Background(), routed, []byte(`{"messages":[]}`))
+	if err == nil {
+		t.Fatal("the unconfigured proxy was reported as a success")
+	}
+	if attempt.Outcome != agent.OutcomeFailedBeforeFirstToken {
+		t.Fatalf("outcome = %q, want %q", attempt.Outcome, agent.OutcomeFailedBeforeFirstToken)
+	}
+	if attempt.ErrorClass != agent.ErrorInvalidRequest {
+		t.Fatalf("error class = %q, want %q", attempt.ErrorClass, agent.ErrorInvalidRequest)
+	}
+}
+
+// A failed report must not replace the reason the call failed: the caller has
+// to learn both.
+func TestReportFailureDoesNotReplaceTheProxyError(t *testing.T) {
+	h := newHarness(t)
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+
+	c := *h.client
+	c.ControllerURL = failing.URL
+	c.ProxyURL = "http://127.0.0.1:1"
+
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode", RequestID: "req-3"}
+	_, attempt, callErr := c.ChatAttempt(context.Background(), routed, []byte(`{"messages":[]}`))
+	if callErr == nil {
+		t.Fatal("the failed call was reported as a success")
+	}
+	err := c.ReportAttempt(context.Background(), routed, attempt, callErr)
+	if err == nil {
+		t.Fatal("the failed report was reported as a success")
+	}
+	if !errors.Is(err, callErr) {
+		t.Fatalf("err = %v, want the proxy error to survive it", err)
+	}
 }

@@ -49,28 +49,34 @@ The schema is versioned SQL migrations under
 |---|---|
 | `quota_snapshots` | provider, quota state, UNKNOWN reason, source, confidence, observed-at, reset-at (via windows), safe error text |
 | `quota_windows` | one row per quota window (`5h`, `weekly`, …) with limit/used/remaining/reset-at, each nullable so "not reported" ≠ `0` |
-| `usage_records` | one row per request attempt: provider, model, nullable input/output tokens, `reported` vs `estimated` provenance, reporting source, outcome, optional routing `decision_id`. Deduplicated on `(request_id, attempt)`, so a retry is a new row and a repeated report is ignored |
+| `usage_records` | one row per request attempt — the canonical request/outcome event ([docs/request-telemetry.md](./request-telemetry.md)): provider, model, task class, route source, nullable input/output tokens each with its own provenance, reporting source, outcome, error class, stream state, measured latencies, optional routing `decision_id`, source observation time and server arrival time. Deduplicated on `(request_id, attempt)`, so a retry is a new row and a repeated report is ignored |
+| `usage_conflicts` | one row per disagreement between two reports of the same attempt: the field name and the two values with the channel that produced each. The event keeps the first observation; this keeps the evidence of the disagreement. Holds no provider payload |
 | `provider_health` | reachability state, independent of quota |
 | `poll_state` | per-provider `last_attempt_at` and `last_success_at`, kept separately so a failure never erases when quota was last known good |
 | `controller_state` | key/value controller state, upserted |
+| `routing_decisions` | one row per routing decision: decision id, policy version, session, selected alias/provider, the task class it was made for and whether it was an explicit manual override, the decision payload and its creation time |
 | `session_affinity` | one row per session: the route it is pinned to and its `created_at` / `updated_at` / `expires_at`. Rows past `expires_at` are deleted by every retention run regardless of the configured ages, because the TTL is what says they stopped being routing state ([docs/session-affinity.md](./session-affinity.md)) |
 
 `UNKNOWN` states are constrained by the schema: `unknown_reason` is required
 exactly when `state = 'UNKNOWN'` and must be one of the documented reasons, so a
 missing or stale observation cannot be stored as `AVAILABLE`.
 
-### Request usage is observational (issue #14)
+### Request usage is observational (issue #14, extended by #23)
 
 `usage_records` is a record of what this installation was told about requests it
 routed. It is **not** a replica of a provider's quota or dashboard counter.
 
 - `input_tokens`/`output_tokens` are NULL unless the response or usage report
   supplied them. Nothing is estimated to zero, and there is no local tokenizer.
-- `provenance` says whether the counts are the provider's own (`reported`) or
-  this installation's estimate (`estimated`). An estimate is never promoted.
+- Each count carries its own `input_provenance`/`output_provenance`
+  (`provider_reported`, `proxy_reported`, `agent_reported`, `estimated`), so an
+  estimate is never promoted and counts from two channels are never merged. A
+  count without a provenance is rejected; a provenance without a count is
+  dropped.
 - `outcome` is `SUCCESS`, `FAILED_BEFORE_FIRST_TOKEN`, `PARTIAL_STREAM`,
-  `CANCELLED` or `UNKNOWN`. It is never inferred: a reporter that does not say
-  gets `UNKNOWN`.
+  `CANCELLED`, `AMBIGUOUS` or `UNKNOWN`. It is never inferred: a reporter that
+  does not say gets `UNKNOWN`. `error_class` and `stream_state` are bounded
+  sets, so a raw provider message cannot be stored.
 - `attempt` numbers the attempts of one request. A retry is a new row, so the
   failed attempt and the successful one are both visible and the usage is not
   duplicated.
@@ -79,6 +85,18 @@ routed. It is **not** a replica of a provider's quota or dashboard counter.
 - `(request_id, attempt)` is the ingestion identity. A repeated report of an
   already-stored attempt writes nothing, so a retry of the HTTP call is safe. A
   report without a `request_id` cannot be deduplicated and is stored as sent.
+- A report that disagrees with a stored attempt is a **conflict**: the stored
+  event keeps the first observation, the API answers `409`, and the
+  disagreement is recorded in `usage_conflicts` so both sides stay visible.
+- `task_class` is constrained to the routing vocabulary (`routine`, `coding`,
+  `reasoning`) by the store and by a `CHECK` constraint in the schema, so a
+  direct write cannot store a class nobody can aggregate on.
+- `event_id` is derived from `(request_id, attempt)`. Rows that predate the
+  column get one when the schema migrates — SQLite has no hashing function, so
+  the id is computed by a helper registered with the driver — and the id is
+  the same on every migration, so identities never silently change.
+- `observed_at` is the source's clock and `received_at` is the server's; the
+  two are never reconciled, and the gap between them is the report delay.
 - No prompt, message or conversation field is accepted: the route rejects
   unknown JSON fields, so such a body fails instead of being silently dropped.
 
@@ -174,7 +192,7 @@ retention failure is not, unless it is `ErrFull` — see [Retention](#retention)
 |---|---|
 | `retention.quota_snapshots` | 30 days |
 | `retention.provider_health` | 30 days |
-| `retention.usage_records` | 90 days |
+| `retention.usage_records` | 90 days (hard-capped at 365 days) |
 
 Cleanup runs at startup and then **hourly while the controller serves**, so a
 long-running process cannot accumulate history the configuration says it dropped;
@@ -183,6 +201,14 @@ polls that fill the tables. Cleanup never removes what routing reads: the newest
 snapshot per provider and the newest health row per provider always survive, even
 when they are older than the bound. Usage has no such rule because routing does
 not read it. Each run is one transaction.
+
+The two high-volume tables — `usage_records` and `routing_decisions` — are
+pruned in **bounded batches** (1000 rows per statement, at most 100 statements
+per run) so a cleanup never holds the write lock for the whole table; whatever
+is left over goes in the next run. The usage-record age is additionally
+**clamped to 365 days** inside the store, so storage stays bounded even when
+the configuration asks for more history than the controller holds. The conflict
+rows are removed with the events they belong to.
 
 `session_affinity` is not governed by a configured age at all: a pin whose
 `expires_at` has passed is deleted by every run, including one where every

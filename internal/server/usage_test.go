@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -93,7 +96,7 @@ func TestUsageAcceptsProviderReportedAttempt(t *testing.T) {
 	assert.Equal(t, "req-1", got.RequestID)
 	assert.Equal(t, 2, got.Attempt)
 	assert.Equal(t, "dec-9", got.DecisionID)
-	assert.Equal(t, store.Reported, got.Provenance)
+	assert.Equal(t, store.TokenReportedLegacy, got.InputProvenance)
 	assert.Equal(t, store.OutcomePartialStream, got.Outcome)
 	// A reported zero must survive as zero, not become "missing".
 	require.NotNil(t, got.OutputTokens, "output_tokens = %v, want a reported 0", got.OutputTokens)
@@ -133,8 +136,13 @@ func TestUsageRejectsInvalidValues(t *testing.T) {
 		{"no source", `{"provider":"p","provenance":"reported"}`},
 		{"bad provenance", `{"provider":"p","provenance":"guessed","source":"agent"}`},
 		{"bad outcome", `{"provider":"p","provenance":"reported","source":"agent","outcome":"TIMEOUT"}`},
+		{"bad task class", `{"provider":"p","source":"agent","task_class":"teleportation"}`},
+		{"bad route source", `{"provider":"p","source":"agent","route_source":"guess"}`},
+		{"bad stream state", `{"provider":"p","source":"agent","stream_state":"half"}`},
+		{"raw provider message as error class", `{"provider":"p","source":"agent","error_class":"provider said: sk-secret"}`},
 		{"negative attempt", `{"provider":"p","provenance":"reported","source":"agent","attempt":-1}`},
 		{"negative tokens", `{"provider":"p","provenance":"reported","source":"agent","input_tokens":-5}`},
+		{"negative latency", `{"provider":"p","source":"agent","latency_ms":-1}`},
 		{"bad timestamp", `{"provider":"p","provenance":"reported","source":"agent","observed_at":"yesterday"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -185,6 +193,62 @@ func TestUsageIsUnavailableWithoutASink(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 }
 
+// The canonical event fields survive the wire: the handler maps them onto the
+// persisted record without inventing or dropping any of them.
+func TestUsageAcceptsCanonicalEventFields(t *testing.T) {
+	sink := &memSink{}
+	srv := New(nil, Options{Usage: sink, AuthToken: testToken})
+
+	w := post(t, srv, testToken, `{
+		"request_id": "req-1",
+		"attempt": 1,
+		"provider": "minimax",
+		"model": "MiniMax-M2.7",
+		"task_class": "coding",
+		"route_source": "controller",
+		"input_tokens": 120,
+		"input_provenance": "provider_reported",
+		"output_tokens": 34,
+		"output_provenance": "proxy_reported",
+		"source": "litellm.callback",
+		"outcome": "PARTIAL_STREAM",
+		"error_class": "network",
+		"stream_state": "interrupted",
+		"ttft_ms": 250,
+		"latency_ms": 1900,
+		"decision_id": "dec-9"
+	}`)
+	assert.Equal(t, http.StatusAccepted, w.Code, "body: %s", w.Body)
+	require.Len(t, sink.records, 1)
+	got := sink.records[0]
+	assert.Equal(t, "coding", got.TaskClass)
+	assert.Equal(t, store.RouteController, got.RouteSource)
+	assert.Equal(t, store.TokenProviderReported, got.InputProvenance)
+	assert.Equal(t, store.TokenProxyReported, got.OutputProvenance)
+	assert.Equal(t, store.ErrorNetwork, got.ErrorClass)
+	assert.Equal(t, store.StreamInterrupted, got.StreamState)
+	require.NotNil(t, got.TTFTMS, "ttft_ms = %v, want the measured 250", got.TTFTMS)
+	assert.Equal(t, int64(250), *got.TTFTMS)
+	require.NotNil(t, got.LatencyMS, "latency_ms = %v, want the measured 1900", got.LatencyMS)
+	assert.Equal(t, int64(1900), *got.LatencyMS)
+}
+
+// A provenance without a count describes a number nobody observed, so it is
+// dropped rather than stored: the row must not claim a count it does not have.
+func TestUsageDropsProvenanceWithoutCount(t *testing.T) {
+	sink := &memSink{}
+	srv := New(nil, Options{Usage: sink, AuthToken: testToken})
+
+	w := post(t, srv, testToken, `{"provider":"minimax","provenance":"reported","source":"agent"}`)
+	assert.Equal(t, http.StatusAccepted, w.Code, "body: %s", w.Body)
+	require.Len(t, sink.records, 1)
+	got := sink.records[0]
+	assert.Empty(t, got.InputProvenance, "provenance = %q, want none without a count", got.InputProvenance)
+	assert.Empty(t, got.OutputProvenance, "provenance = %q, want none without a count", got.OutputProvenance)
+	assert.Nil(t, got.InputTokens, "tokens = %v, want unknown", got.InputTokens)
+	assert.Nil(t, got.OutputTokens, "tokens = %v, want unknown", got.OutputTokens)
+}
+
 // The response is a status, not an echo: a report is not reflected back, so no
 // request content ends up in a client's logs by accident.
 func TestUsageResponseHasNoContent(t *testing.T) {
@@ -194,4 +258,47 @@ func TestUsageResponseHasNoContent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "body %q is not JSON", w.Body)
 	assert.Len(t, body, 1, "body = %v, want only a status", body)
 	assert.Equal(t, "recorded", body["status"], "body = %v, want only a status", body)
+}
+
+// Two sources that disagree about one attempt: the second report is a conflict
+// the caller is told about (409), and the disagreement itself is kept so it
+// stays visible instead of being answered once and lost.
+func TestUsageConflictIsReportedAndKept(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(store.Config{Path: filepath.Join(t.TempDir(), "test.db")},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	srv := New(nil, Options{Usage: st, AuthToken: testToken})
+
+	first := `{"request_id":"req-1","provider":"minimax","source":"agent","outcome":"SUCCESS",` +
+		`"input_tokens":10,"input_provenance":"proxy_reported"}`
+	if w := post(t, srv, testToken, first); w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", w.Code)
+	}
+	second := `{"request_id":"req-1","provider":"minimax","source":"agent","outcome":"SUCCESS",` +
+		`"input_tokens":20,"input_provenance":"proxy_reported"}`
+	if w := post(t, srv, testToken, second); w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+
+	conflicts, err := st.QueryUsageConflicts(ctx, store.UsageConflictQuery{RequestID: "req-1"})
+	if err != nil {
+		t.Fatalf("QueryUsageConflicts: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Field != "input_tokens" {
+		t.Fatalf("conflicts = %+v, want the disagreeing count", conflicts)
+	}
+	events, err := st.QueryUsageRecords(ctx, store.UsageQuery{Provider: "minimax"})
+	if err != nil {
+		t.Fatalf("QueryUsageRecords: %v", err)
+	}
+	if len(events) != 1 || events[0].InputTokens == nil || *events[0].InputTokens != 10 {
+		t.Fatalf("events = %+v, want the first observation kept", events)
+	}
 }

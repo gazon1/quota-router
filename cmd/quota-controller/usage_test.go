@@ -62,19 +62,21 @@ func TestRunAcceptsUsageReports(t *testing.T) {
 	got := rows[0]
 	assert.Equal(t, 1, got.attempt)
 	assert.Equal(t, "SUCCESS", got.outcome)
-	assert.Equal(t, "reported", got.provenance)
+	// The row-level provenance of the report is the fallback for both counts.
+	assert.Equal(t, "reported", got.inputProvenance)
+	assert.Equal(t, "reported", got.outputProv)
 	assert.Equal(t, "dec-1", got.decision)
 	assert.Equal(t, 100, got.in, "the reported input tokens")
 	assert.Equal(t, 20, got.out, "the reported output tokens")
 }
 
 type usageRow struct {
-	attempt             int
-	outcome, provenance string
-	decision            string
-	in, out             int
-	source              string
-	observedAt          time.Time
+	attempt                              int
+	outcome, inputProvenance, outputProv string
+	decision                             string
+	in, out                              int
+	source                               string
+	observedAt                           time.Time
 }
 
 func usageRows(path string) ([]usageRow, error) {
@@ -84,7 +86,8 @@ func usageRows(path string) ([]usageRow, error) {
 	}
 	defer db.Close()
 	rows, err := db.Query(
-		`SELECT attempt, outcome, provenance, COALESCE(decision_id, ''), COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), source, observed_at
+		`SELECT attempt, outcome, input_provenance, output_provenance, COALESCE(decision_id, ''),
+		        COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), source, observed_at
 		 FROM usage_records ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -96,7 +99,8 @@ func usageRows(path string) ([]usageRow, error) {
 			r   usageRow
 			obs string
 		)
-		if err := rows.Scan(&r.attempt, &r.outcome, &r.provenance, &r.decision, &r.in, &r.out, &r.source, &obs); err != nil {
+		if err := rows.Scan(&r.attempt, &r.outcome, &r.inputProvenance, &r.outputProv, &r.decision,
+			&r.in, &r.out, &r.source, &obs); err != nil {
 			return nil, err
 		}
 		if r.observedAt, err = time.Parse("2006-01-02T15:04:05.000000000Z", obs); err != nil {

@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gazon1/quota-router/internal/routing"
 )
 
 // QuotaState is the subscription-quota state. UNKNOWN is never zero remaining:
@@ -111,6 +113,10 @@ const (
 	OutcomePartialStream Outcome = "PARTIAL_STREAM"
 	// OutcomeCancelled means the caller abandoned the attempt.
 	OutcomeCancelled Outcome = "CANCELLED"
+	// OutcomeAmbiguous means the attempt may or may not have been served: a
+	// timeout after dispatch, for example. It is neither a success nor a
+	// failure, and it never implies that nothing was charged.
+	OutcomeAmbiguous Outcome = "AMBIGUOUS"
 	// OutcomeUnknown means the reporter did not say. It is not a failure and
 	// not a success, and no usage is inferred from it.
 	OutcomeUnknown Outcome = "UNKNOWN"
@@ -118,16 +124,121 @@ const (
 
 func (o Outcome) valid() bool {
 	switch o {
-	case OutcomeSuccess, OutcomeFailedBeforeFirstToken, OutcomePartialStream, OutcomeCancelled, OutcomeUnknown:
+	case OutcomeSuccess, OutcomeFailedBeforeFirstToken, OutcomePartialStream, OutcomeCancelled, OutcomeAmbiguous, OutcomeUnknown:
 		return true
 	}
 	return false
 }
 
-// UsageRecord is one attempt of one request, as this installation observed it.
+// TokenProvenance says which channel produced a token count. Every count
+// carries the provenance of the observation that produced it: an estimate is
+// never promoted to a reported count, and counts from different sources are
+// never merged into one number.
+type TokenProvenance string
+
+const (
+	// TokenProviderReported is the provider's own accounting.
+	TokenProviderReported TokenProvenance = "provider_reported"
+	// TokenProxyReported is a count the proxy (LiteLLM) reported.
+	TokenProxyReported TokenProvenance = "proxy_reported"
+	// TokenAgentReported is a count the agent reported.
+	TokenAgentReported TokenProvenance = "agent_reported"
+	// TokenEstimated is a count this installation derived, for example by
+	// counting tokens itself.
+	TokenEstimated TokenProvenance = "estimated"
+	// TokenReportedLegacy is what rows written before per-count provenance
+	// carry. The exact channel was not recorded, so it stays ambiguous.
+	TokenReportedLegacy TokenProvenance = "reported"
+)
+
+func (p TokenProvenance) valid() bool {
+	switch p {
+	case TokenProviderReported, TokenProxyReported, TokenAgentReported, TokenEstimated, TokenReportedLegacy:
+		return true
+	}
+	return false
+}
+
+// Valid reports whether the provenance is one of the documented channels. The
+// wire boundary uses it to reject an unknown channel by name instead of
+// storing a value nothing can aggregate on.
+func (p TokenProvenance) Valid() bool { return p.valid() }
+
+// ErrorClass is the normalized reason an attempt failed. It is a closed set:
+// the class is what an operator aggregates on, never a provider message.
+type ErrorClass string
+
+const (
+	ErrorTimeout        ErrorClass = "timeout"
+	ErrorRateLimited    ErrorClass = "rate_limited"
+	ErrorAuth           ErrorClass = "auth"
+	ErrorInvalidRequest ErrorClass = "invalid_request"
+	ErrorProvider       ErrorClass = "provider_error"
+	ErrorNetwork        ErrorClass = "network"
+	ErrorUnknown        ErrorClass = "unknown"
+)
+
+func (e ErrorClass) valid() bool {
+	switch e {
+	case ErrorTimeout, ErrorRateLimited, ErrorAuth, ErrorInvalidRequest, ErrorProvider, ErrorNetwork, ErrorUnknown:
+		return true
+	}
+	return false
+}
+
+// StreamState is how far the response stream got. It is separate from the
+// outcome: a completed non-streaming response and a completed stream are both
+// successes, and only the stream state says which one it was.
+type StreamState string
+
+const (
+	// StreamNotStreamed means the response was not streamed.
+	StreamNotStreamed StreamState = "not_streamed"
+	// StreamComplete means the stream ran to its end.
+	StreamComplete StreamState = "complete"
+	// StreamInterrupted means the stream stopped before its end.
+	StreamInterrupted StreamState = "interrupted"
+)
+
+func (s StreamState) valid() bool {
+	switch s {
+	case StreamNotStreamed, StreamComplete, StreamInterrupted:
+		return true
+	}
+	return false
+}
+
+// RouteSource says where the route an attempt used came from. A manual route
+// is the operator's explicit stand-in used when the controller could not
+// answer; it never has a routing decision behind it.
+type RouteSource string
+
+const (
+	// RouteController means the controller selected the route.
+	RouteController RouteSource = "controller"
+	// RouteManual means the agent used its manual fallback.
+	RouteManual RouteSource = "manual"
+)
+
+func (r RouteSource) valid() bool {
+	switch r {
+	case RouteController, RouteManual:
+		return true
+	}
+	return false
+}
+
+// UsageRecord is one attempt of one request, as this installation observed it:
+// the canonical request/outcome event (issue #23).
+//
 // It is accounting data, never a substitute for subscription quota: a reported
 // token count describes what the provider reported for that request, not how
 // much subscription quota it consumed.
+//
+// Every optional field is absent, not zero, when the reporter did not supply
+// it. Nothing here is guessed: an outcome that was not reported is UNKNOWN, a
+// latency that was not measured is absent, and a count that was not observed
+// has no value and no provenance.
 type UsageRecord struct {
 	// RequestID deduplicates retried or repeated reports; empty means the
 	// source supplied none and duplicates cannot be detected.
@@ -135,25 +246,101 @@ type UsageRecord struct {
 	// Attempt numbers the attempt within the request, starting at 1. A retry is
 	// a new attempt, not a second copy of the usage it replaces. Zero means the
 	// first attempt.
-	Attempt  int
-	Provider string
-	Model    string
+	Attempt int
+	// EventID identifies this event. Empty means the store derives a stable one
+	// from (request_id, attempt); it is never a metric label.
+	EventID string
+	// SchemaVersion versions the event contract. Zero means the current one.
+	SchemaVersion int
+	Provider      string
+	Model         string
+	// TaskClass is the bounded class of work the request described, when the
+	// reporter named one. The vocabulary belongs to the routing request
+	// contract, so an unknown value is rejected before it is stored.
+	TaskClass string
+	// RouteSource says whether the controller selected the route or the agent
+	// used its manual fallback.
+	RouteSource RouteSource
 	// Nil means the number was not supplied; it is not estimated to zero.
 	InputTokens,
 	OutputTokens *int
-	Provenance Confidence
+	// InputProvenance and OutputProvenance say which channel produced the
+	// matching count. A count without provenance, or a provenance without a
+	// count, is not stored: the two travel together.
+	InputProvenance,
+	OutputProvenance TokenProvenance
 	// Source names the channel that reported the row, for provenance.
 	Source  string
 	Outcome Outcome
+	// ErrorClass is the normalized failure reason, when the attempt failed.
+	ErrorClass ErrorClass
+	// StreamState says whether the response was streamed and how far it got.
+	StreamState StreamState
+	// TTFTMS and LatencyMS are the measured time to the first token and the
+	// total time, in milliseconds. Nil means the boundary did not measure
+	// them; it never means zero.
+	TTFTMS,
+	LatencyMS *int64
 	// DecisionID is the routing decision this attempt was routed by, when the
 	// reporter knows it. Routing history owns that record; this only references
 	// it, and an id that no decision claims is kept as reported.
 	DecisionID string
+	// ObservedAt is when the source observed the attempt, in UTC.
 	ObservedAt time.Time
 	// ObservedAtReported records whether the reporter supplied the observation
 	// timestamp. A redelivery that omitted it carries server-stamped arrival
 	// bookkeeping, not event content, so it must not conflict on that alone.
 	ObservedAtReported bool
+	// ReceivedAt is when this installation stored the report. The gap to
+	// ObservedAt is the report delay; the two clocks are never reconciled.
+	ReceivedAt time.Time
+}
+
+// UsageConflict records that two sources reported different content for one
+// event identity.
+//
+// The stored event keeps the first observation: a conflict never overwrites
+// it. The conflict row keeps both sides of the disagreement, so the conflict
+// stays visible instead of being answered once and lost.
+type UsageConflict struct {
+	// RequestID and Attempt identify the event the conflict is about.
+	RequestID string
+	Attempt   int
+	// Field is the name of the field the two reports disagreed on.
+	Field string
+	// OriginalValue and IncomingValue are the two values, as text. An absent
+	// value is the empty string: a conflict never invents one.
+	OriginalValue, IncomingValue string
+	// OriginalProvenance and IncomingProvenance say which channel produced the
+	// matching value. They are set for the token counts; a field that is not a
+	// count has no channel of its own.
+	OriginalProvenance, IncomingProvenance TokenProvenance
+	// Source is the channel that reported the incoming value.
+	Source string
+	// ObservedAt is when the source observed the conflicting report, ReceivedAt
+	// when this installation stored it.
+	ObservedAt, ReceivedAt time.Time
+}
+
+// Validate checks the fields the conflict schema constrains.
+func (c UsageConflict) Validate() error {
+	var errs []error
+	if c.RequestID == "" {
+		errs = append(errs, errors.New("request_id must not be empty"))
+	}
+	if c.Attempt < 1 {
+		errs = append(errs, fmt.Errorf("attempt must be >= 1, got %d", c.Attempt))
+	}
+	if c.Field == "" {
+		errs = append(errs, errors.New("field must not be empty"))
+	}
+	if c.Source == "" {
+		errs = append(errs, errors.New("source must not be empty"))
+	}
+	if len(c.RequestID) > maxKey || len(c.Field) > maxKey || len(c.Source) > maxKey {
+		errs = append(errs, fmt.Errorf("request_id, field and source must be at most %d bytes", maxKey))
+	}
+	return errors.Join(errs...)
 }
 
 // HealthRecord is one observation of provider reachability.
@@ -254,14 +441,11 @@ func (u UsageRecord) Validate() error {
 	if u.Attempt < 0 {
 		errs = append(errs, fmt.Errorf("attempt must be >= 1 (or 0 for the first), got %d", u.Attempt))
 	}
-	if !u.Provenance.valid() {
-		errs = append(errs, fmt.Errorf("provenance %q must be %s or %s", u.Provenance, Reported, Estimated))
-	}
 	if u.Source == "" {
 		errs = append(errs, errors.New("source must not be empty"))
 	}
 	if !u.Outcome.valid() {
-		errs = append(errs, fmt.Errorf("outcome %q must be SUCCESS, FAILED_BEFORE_FIRST_TOKEN, PARTIAL_STREAM, CANCELLED or UNKNOWN", u.Outcome))
+		errs = append(errs, fmt.Errorf("outcome %q must be SUCCESS, FAILED_BEFORE_FIRST_TOKEN, PARTIAL_STREAM, CANCELLED, AMBIGUOUS or UNKNOWN", u.Outcome))
 	}
 	// Negative counts are a broken reporter, and storing one would corrupt a
 	// SUM later. Zero is a legitimate reported value.
@@ -271,10 +455,58 @@ func (u UsageRecord) Validate() error {
 	if u.OutputTokens != nil && *u.OutputTokens < 0 {
 		errs = append(errs, fmt.Errorf("output_tokens must be >= 0, got %d", *u.OutputTokens))
 	}
-	if len(u.RequestID) > maxKey || len(u.DecisionID) > maxKey || len(u.Source) > maxKey {
-		errs = append(errs, fmt.Errorf("request_id, decision_id and source must be at most %d bytes", maxKey))
+	// A count and its provenance travel together: a count with no source is an
+	// unsourced number, and a source with no count describes nothing.
+	if err := checkProvenance("input", u.InputTokens, u.InputProvenance); err != nil {
+		errs = append(errs, err)
+	}
+	if err := checkProvenance("output", u.OutputTokens, u.OutputProvenance); err != nil {
+		errs = append(errs, err)
+	}
+	if u.ErrorClass != "" && !u.ErrorClass.valid() {
+		errs = append(errs, fmt.Errorf("error_class %q is not one of the documented classes", u.ErrorClass))
+	}
+	if u.StreamState != "" && !u.StreamState.valid() {
+		errs = append(errs, fmt.Errorf("stream_state %q must be not_streamed, complete or interrupted", u.StreamState))
+	}
+	if u.RouteSource != "" && !u.RouteSource.valid() {
+		errs = append(errs, fmt.Errorf("route_source %q must be controller or manual", u.RouteSource))
+	}
+	if u.TTFTMS != nil && *u.TTFTMS < 0 {
+		errs = append(errs, fmt.Errorf("ttft_ms must be >= 0, got %d", *u.TTFTMS))
+	}
+	if u.LatencyMS != nil && *u.LatencyMS < 0 {
+		errs = append(errs, fmt.Errorf("latency_ms must be >= 0, got %d", *u.LatencyMS))
+	}
+	if len(u.TaskClass) > maxKey {
+		errs = append(errs, fmt.Errorf("task_class must be at most %d bytes", maxKey))
+	}
+	// The vocabulary belongs to the routing request contract, so the store
+	// checks it against the same list instead of keeping a second one. A task
+	// class nobody can aggregate on is rejected here, not only at the wire
+	// boundary: a direct write must not be able to store one either.
+	if u.TaskClass != "" && !routing.TaskClass(u.TaskClass).Known() {
+		errs = append(errs, fmt.Errorf("task_class %q is not a known task class", u.TaskClass))
+	}
+	if len(u.RequestID) > maxKey || len(u.DecisionID) > maxKey || len(u.Source) > maxKey || len(u.EventID) > maxKey {
+		errs = append(errs, fmt.Errorf("request_id, decision_id, source and event_id must be at most %d bytes", maxKey))
 	}
 	return errors.Join(errs...)
+}
+
+// checkProvenance keeps a token count and the channel that produced it
+// together: one without the other is either an unsourced number or a claim
+// about a count that was never observed.
+func checkProvenance(name string, count *int, p TokenProvenance) error {
+	switch {
+	case count != nil && p == "":
+		return fmt.Errorf("%s_tokens must state their provenance", name)
+	case count == nil && p != "":
+		return fmt.Errorf("%s_provenance must not be set without %s_tokens", name, name)
+	case p != "" && !p.valid():
+		return fmt.Errorf("%s_provenance %q is not a documented provenance", name, p)
+	}
+	return nil
 }
 
 // maxKey bounds the identifier columns. They are written verbatim from an HTTP
@@ -301,15 +533,22 @@ func (h HealthRecord) Validate() error {
 	return errors.Join(errs...)
 }
 
-// RoutingDecisionRecord is one persisted routing decision.
+// RoutingDecisionRecord is one persisted routing decision: the route telemetry
+// side of the event contract (issue #23).
 type RoutingDecisionRecord struct {
 	DecisionID       string
 	PolicyVersion    string
 	SessionID        string
 	SelectedAlias    string
 	SelectedProvider string
-	Payload          string
-	CreatedAt        time.Time
+	// TaskClass is the class of work the decision was made for, when the
+	// request named one.
+	TaskClass string
+	// Explicit says the selected route was an explicit manual override rather
+	// than the result of normal selection.
+	Explicit  bool
+	Payload   string
+	CreatedAt time.Time
 }
 
 // Validate checks the routing decision record fields.
@@ -329,6 +568,11 @@ func (r RoutingDecisionRecord) Validate() error {
 	}
 	if r.CreatedAt.IsZero() {
 		errs = append(errs, errors.New("created_at must be set"))
+	}
+	// The task class is the same bounded vocabulary as on the event, so a
+	// decision cannot carry a class the events refuse.
+	if r.TaskClass != "" && !routing.TaskClass(r.TaskClass).Known() {
+		errs = append(errs, fmt.Errorf("task_class %q is not a known task class", r.TaskClass))
 	}
 	return errors.Join(errs...)
 }

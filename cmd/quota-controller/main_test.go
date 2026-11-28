@@ -315,7 +315,7 @@ func TestPrunerRunsWhileServing(t *testing.T) {
 	old := time.Now().Add(-2 * time.Hour)
 	for i := 0; i < 3; i++ {
 		require.NoError(t, st.SaveUsageRecord(context.Background(), store.UsageRecord{
-			Source: "test", Provider: "p", Provenance: store.Estimated, ObservedAt: old,
+			Source: "test", Provider: "p", ObservedAt: old,
 		}), "SaveUsageRecord")
 	}
 	// Retention of one hour, so the ticker has exactly the seeded rows to remove.
@@ -342,7 +342,7 @@ func TestPrunerRunsWhileServing(t *testing.T) {
 	}
 	// A fresh row must survive the same ticker.
 	require.NoError(t, st.SaveUsageRecord(ctx, store.UsageRecord{
-		Source: "test", Provider: "p", Provenance: store.Estimated, ObservedAt: time.Now(),
+		Source: "test", Provider: "p", ObservedAt: time.Now(),
 	}), "SaveUsageRecord")
 	time.Sleep(60 * time.Millisecond)
 	n, err := countUsageRows(path)

@@ -33,7 +33,7 @@ func TestBrokenMigrationRollsBack(t *testing.T) {
 	apply(t, mig, "0004_routing_decisions.sql", readMigration(t, "0004_routing_decisions.sql"))
 	apply(t, mig, "0005_provider_cooldown.sql", readMigration(t, "0005_provider_cooldown.sql"))
 	apply(t, mig, "0006_session_affinity.sql", readMigration(t, "0006_session_affinity.sql"))
-	apply(t, mig, "0007_broken.sql", `
+	apply(t, mig, "0008_broken.sql", `
 -- +goose Up
 CREATE TABLE half_applied (id INTEGER PRIMARY KEY);
 INSERT INTO no_such_table (id) VALUES (1);
@@ -52,15 +52,15 @@ DROP TABLE half_applied;
 	err = s.db.QueryRow("SELECT name FROM sqlite_master WHERE name='half_applied'").Scan(&name)
 	assert.Error(t, err, "half_applied survived: the failed migration was not rolled back")
 	var applied int
-	require.NoError(t, s.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 7 AND is_applied = 1").Scan(&applied),
+	require.NoError(t, s.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 8 AND is_applied = 1").Scan(&applied),
 		"count versions")
 	assert.Equal(t, 0, applied, "the failed version is recorded as applied")
 	// The versions that already committed must still be intact and usable:
 	// startup can report where it stopped.
 	v, err := s.Version(ctx)
 	require.NoError(t, err, "Version")
-	assert.Equal(t, int64(6), v, "version after a failed migration")
-	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Reported, ObservedAt: time.Now()}),
+	assert.Equal(t, int64(7), v, "version after a failed migration")
+	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", ObservedAt: time.Now()}),
 		"the database is not usable after a rolled-back migration")
 }
 

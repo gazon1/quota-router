@@ -96,9 +96,12 @@ A streaming caller finishes the stream and reports its own outcome:
 | caller walked away | `CANCELLED` |
 
 A cancelled stream yields **no** `usage` object. That is a missing count, not
-zero: leave `InputTokens`/`OutputTokens` nil. Only a count the response actually
-returned is `provenance: "reported"`; anything this installation counted itself
-is `provenance: "estimated"`, and the two are never promoted into each other.
+zero: leave `InputTokens`/`OutputTokens` nil. Each count names the channel that
+produced it: `proxy_reported` for a count the proxy returned, `agent_reported`
+for a count the agent itself observed, `estimated` for a count this
+installation derived. The two are never promoted into each other, and a count
+without a provenance is refused — see
+[docs/request-telemetry.md](./request-telemetry.md).
 
 ## When the controller is unavailable
 
@@ -170,6 +173,32 @@ if err != nil {
 _ = client.Report(ctx, routed, reply.Attempt(1))
 ```
 
+### A failed call is an attempt too
+
+`Chat` returns the error and nothing else. When the failed call must also be
+reported — a timeout after the request was dispatched, for example — use
+`ChatAttempt`, which returns the attempt to report next to the error:
+
+```go
+reply, attempt, err := client.ChatAttempt(ctx, routed, body)
+if err != nil {
+    // attempt says how far the call got:
+    //   FAILED_BEFORE_FIRST_TOKEN — the request never left the agent
+    //   AMBIGUOUS                  — it did, and nothing says whether the
+    //                                provider served it
+    //   CANCELLED                  — the caller abandoned it
+    //
+    // A failed report never replaces the proxy error: ReportAttempt returns
+    // both, so the caller learns why the call failed and that the telemetry
+    // did not land.
+    return client.ReportAttempt(ctx, routed, attempt, err)
+}
+_ = client.Report(ctx, routed, reply.Attempt(1))
+```
+
+The attempt carries no attempt number: only the caller knows which attempt of
+the request this is.
+
 The exchange on the wire, controller first:
 
 ```sh
@@ -191,8 +220,11 @@ then the proxy with that alias, then:
 curl -fsS -X POST http://127.0.0.1:8080/v1/usage \
   -H "Authorization: Bearer $QUOTA_ROUTER_AUTH__TOKEN" \
   -d '{"request_id":"4c1f…","attempt":1,"provider":"commandcode","model":"free-coding",
-       "input_tokens":1200,"output_tokens":34,"provenance":"reported",
-       "source":"agent.usage_report","outcome":"SUCCESS","decision_id":"dec-…"}'
+       "task_class":"coding","route_source":"controller",
+       "input_tokens":1200,"input_provenance":"proxy_reported",
+       "output_tokens":34,"output_provenance":"proxy_reported",
+       "source":"agent.usage_report","outcome":"SUCCESS","latency_ms":1900,
+       "decision_id":"dec-…"}'
 ```
 
 `model` is the routing alias, not the provider's model id: it is what the agent
@@ -211,6 +243,11 @@ A `Report` that fails on transport is ambiguous: the row may or may not have bee
 stored. Redelivery is safe because `(request_id, attempt)` deduplicates, so retry
 with the same ids rather than minting new ones — a fresh `request_id` would store
 a second row for the same attempt.
+
+The same is true of the *call* that failed. A timeout after the request was
+dispatched is reported as `AMBIGUOUS`: the provider may well have served it, and
+the failure says nothing about that. A failure before the request was written
+never reached the provider and is reported as `FAILED_BEFORE_FIRST_TOKEN`.
 
 ## Testing your integration
 
