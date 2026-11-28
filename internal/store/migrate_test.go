@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/pressly/goose/v3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestBrokenMigrationRollsBack is the rollback path: a migration whose second
@@ -19,13 +21,9 @@ func TestBrokenMigrationRollsBack(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	s, err := Open(Config{Path: filepath.Join(dir, "test.db"), BusyTimeout: 5e9}, testLog())
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	require.NoError(t, err, "Open")
 	defer s.Close()
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	require.NoError(t, s.Migrate(ctx), "Migrate")
 
 	// A copy of the real migrations plus one that creates a table and then fails.
 	mig := t.TempDir()
@@ -45,37 +43,25 @@ DROP TABLE half_applied;
 `)
 	provider, err := goose.NewProvider(goose.DialectSQLite3, s.db, os.DirFS(mig),
 		goose.WithDisableGlobalRegistry(true))
-	if err != nil {
-		t.Fatalf("NewProvider: %v", err)
-	}
-	if _, err := provider.Up(ctx); err == nil {
-		t.Fatal("a broken migration was applied without error")
-	}
+	require.NoError(t, err, "NewProvider")
+	_, err = provider.Up(ctx)
+	require.Error(t, err, "a broken migration was applied without error")
 
 	// The failed migration's first statement must have rolled back with it.
 	var name string
-	if err := s.db.QueryRow("SELECT name FROM sqlite_master WHERE name='half_applied'").Scan(&name); err == nil {
-		t.Fatal("half_applied survived: the failed migration was not rolled back")
-	}
+	err = s.db.QueryRow("SELECT name FROM sqlite_master WHERE name='half_applied'").Scan(&name)
+	assert.Error(t, err, "half_applied survived: the failed migration was not rolled back")
 	var applied int
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 7 AND is_applied = 1").Scan(&applied); err != nil {
-		t.Fatalf("count versions: %v", err)
-	}
-	if applied != 0 {
-		t.Fatal("the failed version is recorded as applied")
-	}
+	require.NoError(t, s.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 7 AND is_applied = 1").Scan(&applied),
+		"count versions")
+	assert.Equal(t, 0, applied, "the failed version is recorded as applied")
 	// The versions that already committed must still be intact and usable:
 	// startup can report where it stopped.
 	v, err := s.Version(ctx)
-	if err != nil {
-		t.Fatalf("Version: %v", err)
-	}
-	if v != 6 {
-		t.Fatalf("version = %d after a failed migration, want 6", v)
-	}
-	if err := s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Reported, ObservedAt: time.Now()}); err != nil {
-		t.Fatalf("the database is not usable after a rolled-back migration: %v", err)
-	}
+	require.NoError(t, err, "Version")
+	assert.Equal(t, int64(6), v, "version after a failed migration")
+	require.NoError(t, s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "p", Provenance: Reported, ObservedAt: time.Now()}),
+		"the database is not usable after a rolled-back migration")
 }
 
 // TestMigrateReportsAFailureClearly asserts startup gets a real cause, not a
@@ -84,31 +70,25 @@ func TestMigrateReportsAFailureClearly(t *testing.T) {
 	dir := t.TempDir()
 	// A directory where the database file should be: SQLite cannot open it.
 	bad := filepath.Join(dir, "adir")
-	if err := os.Mkdir(bad, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.Mkdir(bad, 0o700), "mkdir")
 	s, err := Open(Config{Path: bad, BusyTimeout: 5e9}, testLog())
 	if err == nil {
 		s.Close()
-		t.Fatal("Open succeeded on a directory")
+		require.Fail(t, "Open succeeded on a directory")
 	}
-	if !errors.Is(err, ErrIO) && !errors.Is(err, ErrBusy) {
-		t.Fatalf("error = %v, want a classified storage error naming the path", err)
-	}
+	assert.True(t,
+		errors.Is(err, ErrIO) || errors.Is(err, ErrBusy),
+		"error = %v, want a classified storage error naming the path", err)
 }
 
 func readMigration(t *testing.T, name string) string {
 	t.Helper()
 	b, err := fs.ReadFile(migrationsFS, "migrations/"+name)
-	if err != nil {
-		t.Fatalf("read %s: %v", name, err)
-	}
+	require.NoError(t, err, "read %s", name)
 	return string(b)
 }
 
 func apply(t *testing.T, dir, name, body string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-		t.Fatalf("write %s: %v", name, err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600), "write %s", name)
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,6 +19,8 @@ import (
 	"github.com/gazon1/quota-router/internal/routing"
 	"github.com/gazon1/quota-router/internal/server"
 	"github.com/gazon1/quota-router/internal/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAgentContract is the #20 contract test: route, call the proxy directly
@@ -38,73 +39,48 @@ func TestAgentContract(t *testing.T) {
 		Capabilities: &routing.RequiredCapabilities{ToolCalling: true},
 		TaskClass:    routing.TaskCoding,
 	})
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if got.Alias != "cc-coding" {
-		t.Fatalf("alias = %q, want cc-coding", got.Alias)
-	}
-	if got.Provider != "commandcode" {
-		t.Fatalf("provider = %q, want commandcode", got.Provider)
-	}
-	if got.DecisionID == "" || got.RequestID == "" {
-		t.Fatalf("correlation ids missing: %+v", got)
-	}
+	require.NoError(t, err, "Route")
+	assert.Equal(t, "cc-coding", got.Alias)
+	assert.Equal(t, "commandcode", got.Provider)
+	assert.NotEmpty(t, got.DecisionID, "correlation ids missing")
+	assert.NotEmpty(t, got.RequestID, "correlation ids missing")
 	// The controller persisted that exact decision, so the ids join up.
-	if id := h.decisionID(t); id != got.DecisionID {
-		t.Fatalf("persisted decision id = %q, want %q", id, got.DecisionID)
-	}
+	assert.Equal(t, got.DecisionID, h.decisionID(t), "persisted decision id")
 
 	const prompt = "the-secret-prompt-marker"
 	reply, err := h.client.Chat(ctx, got, []byte(`{"model":"ignored-by-agent","messages":[{"role":"user","content":"`+prompt+`"}]}`))
-	if err != nil {
-		t.Fatalf("Chat: %v", err)
-	}
-	if reply.Status != http.StatusOK || reply.Outcome != agent.OutcomeSuccess {
-		t.Fatalf("reply = %d %s", reply.Status, reply.Outcome)
-	}
+	require.NoError(t, err, "Chat")
+	assert.Equal(t, http.StatusOK, reply.Status)
+	assert.Equal(t, agent.OutcomeSuccess, reply.Outcome)
 	// The proxy saw the routed alias and the same correlation id, and the
 	// controller never saw the prompt.
 	call := h.proxy.last()
-	if call.model != "cc-coding" {
-		t.Fatalf("proxy model = %q, want the routed alias cc-coding", call.model)
-	}
+	assert.Equal(t, "cc-coding", call.model, "want the routed alias cc-coding")
 	// This asserts what ProxyRequest sets, not that LiteLLM honours the header:
 	// on the pinned image it neither echoes nor forwards X-Request-Id, which is
 	// why correlation relies on request_id/attempt rather than this header.
-	if call.requestID != got.RequestID {
-		t.Fatalf("proxy X-Request-Id = %q, want %q", call.requestID, got.RequestID)
-	}
+	assert.Equal(t, got.RequestID, call.requestID)
 	for _, body := range h.controllerBodies() {
-		if strings.Contains(body, prompt) {
-			t.Fatalf("the controller received prompt content: %s", body)
-		}
+		assert.NotContains(t, body, prompt, "the controller received prompt content")
 	}
 
-	if err := h.client.Report(ctx, got, reply.Attempt(1)); err != nil {
-		t.Fatalf("Report: %v", err)
-	}
+	require.NoError(t, h.client.Report(ctx, got, reply.Attempt(1)), "Report")
 	row := h.usageRow(t)
-	if row.RequestID != got.RequestID || row.DecisionID != got.DecisionID {
-		t.Fatalf("usage row correlation = %+v, want request %q decision %q", row, got.RequestID, got.DecisionID)
-	}
-	if row.Provider != "commandcode" || row.Model != "cc-coding" {
-		t.Fatalf("usage row route = %q/%q", row.Provider, row.Model)
-	}
-	if row.InputTokens == nil || *row.InputTokens != 1200 || row.OutputTokens == nil || *row.OutputTokens != 34 {
-		t.Fatalf("usage row tokens = %+v, want the reported 1200/34", row)
-	}
-	if row.Outcome != store.OutcomeSuccess || row.Provenance != store.Reported || row.Source != agent.Source {
-		t.Fatalf("usage row provenance = %q/%q/%q", row.Outcome, row.Provenance, row.Source)
-	}
+	assert.Equal(t, got.RequestID, row.RequestID, "usage row correlation")
+	assert.Equal(t, got.DecisionID, row.DecisionID, "usage row correlation")
+	assert.Equal(t, "commandcode", row.Provider, "usage row route")
+	assert.Equal(t, "cc-coding", row.Model, "usage row route")
+	require.NotNil(t, row.InputTokens)
+	assert.Equal(t, 1200, *row.InputTokens, "want the reported 1200/34")
+	require.NotNil(t, row.OutputTokens)
+	assert.Equal(t, 34, *row.OutputTokens, "want the reported 1200/34")
+	assert.Equal(t, store.OutcomeSuccess, row.Outcome, "usage row provenance")
+	assert.Equal(t, store.Reported, row.Provenance, "usage row provenance")
+	assert.Equal(t, agent.Source, row.Source, "usage row provenance")
 
 	// A repeated report writes nothing and still succeeds (idempotent).
-	if err := h.client.Report(ctx, got, reply.Attempt(1)); err != nil {
-		t.Fatalf("repeated Report: %v", err)
-	}
-	if n := h.usageCount(t); n != 1 {
-		t.Fatalf("usage rows = %d after a repeated report, want 1", n)
-	}
+	require.NoError(t, h.client.Report(ctx, got, reply.Attempt(1)), "repeated Report")
+	assert.Equal(t, 1, h.usageCount(t), "usage rows after a repeated report")
 }
 
 // TestAgentNoRouteIsNotAnOutage proves a policy answer is not turned into a
@@ -120,9 +96,8 @@ func TestAgentNoRouteIsNotAnOutage(t *testing.T) {
 		SessionID:    "session-1",
 		Capabilities: &routing.RequiredCapabilities{},
 	})
-	if err == nil || !strings.Contains(err.Error(), agent.ErrNoRoute.Error()) {
-		t.Fatalf("err = %v, want %v", err, agent.ErrNoRoute)
-	}
+	require.Error(t, err)
+	assert.ErrorContains(t, err, agent.ErrNoRoute.Error())
 }
 
 // TestAgentControllerDownFailsClosedAndManual is the documented outage rule:
@@ -139,46 +114,36 @@ func TestAgentControllerDownFailsClosedAndManual(t *testing.T) {
 
 	down := *h.client
 	down.ControllerURL = "http://127.0.0.1:1" // nothing listens here
-	if _, err := down.Route(context.Background(), req); err == nil || !strings.Contains(err.Error(), agent.ErrControllerUnavailable.Error()) {
-		t.Fatalf("err = %v, want %v", err, agent.ErrControllerUnavailable)
-	}
+	_, err := down.Route(context.Background(), req)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, agent.ErrControllerUnavailable.Error())
 
 	down.Manual = agent.ManualRoute{Alias: "cc-coding", Provider: "commandcode"}
 	got, err := down.Route(context.Background(), req)
-	if err != nil {
-		t.Fatalf("manual Route: %v", err)
-	}
-	if !got.Manual || got.Alias != "cc-coding" || got.DecisionID != "" {
-		t.Fatalf("manual route = %+v, want a visible manual route with no decision id", got)
-	}
+	require.NoError(t, err, "manual Route")
+	assert.True(t, got.Manual, "want a visible manual route with no decision id")
+	assert.Equal(t, "cc-coding", got.Alias, "want a visible manual route with no decision id")
+	assert.Equal(t, "", got.DecisionID, "want a visible manual route with no decision id")
 
 	// A manual route still reports, and the row names no decision. A cancelled
 	// attempt carries no counts: missing is not zero.
-	if err := h.client.Report(context.Background(), got, agent.Attempt{Number: 1, Outcome: agent.OutcomeCancelled}); err != nil {
-		t.Fatalf("Report: %v", err)
-	}
+	require.NoError(t, h.client.Report(context.Background(), got, agent.Attempt{Number: 1, Outcome: agent.OutcomeCancelled}), "Report")
 	row := h.usageRow(t)
-	if row.DecisionID != "" || row.Outcome != store.OutcomeCancelled {
-		t.Fatalf("manual usage row = %+v, want no decision id and CANCELLED", row)
-	}
-	if row.InputTokens != nil || row.OutputTokens != nil {
-		t.Fatalf("cancelled attempt stored token counts %+v", row)
-	}
+	assert.Equal(t, "", row.DecisionID, "want no decision id and CANCELLED")
+	assert.Equal(t, store.OutcomeCancelled, row.Outcome, "want no decision id and CANCELLED")
+	assert.Nil(t, row.InputTokens, "cancelled attempt stored token counts")
+	assert.Nil(t, row.OutputTokens, "cancelled attempt stored token counts")
 }
 
 // TestAgentRejectsInvalidRequest keeps validation at the contract boundary, so a
 // malformed request never reaches the controller.
 func TestAgentRejectsInvalidRequest(t *testing.T) {
 	h := newHarness(t)
-	if _, err := h.client.Route(context.Background(), routing.RouteRequest{Version: 2, SessionID: "s", Capabilities: &routing.RequiredCapabilities{}}); err == nil {
-		t.Fatal("version 2 was accepted")
-	}
-	if _, err := h.client.Route(context.Background(), routing.RouteRequest{Version: 1, SessionID: "s"}); err == nil {
-		t.Fatal("a request without capabilities was accepted")
-	}
-	if len(h.controllerBodies()) != 0 {
-		t.Fatalf("an invalid request reached the controller: %v", h.controllerBodies())
-	}
+	_, err := h.client.Route(context.Background(), routing.RouteRequest{Version: 2, SessionID: "s", Capabilities: &routing.RequiredCapabilities{}})
+	assert.Error(t, err, "version 2 was accepted")
+	_, err = h.client.Route(context.Background(), routing.RouteRequest{Version: 1, SessionID: "s"})
+	assert.Error(t, err, "a request without capabilities was accepted")
+	assert.Empty(t, h.controllerBodies(), "an invalid request reached the controller")
 }
 
 // TestProxyRequestRejectsNonObjectBodies is a regression test: "null" unmarshals
@@ -191,22 +156,17 @@ func TestProxyRequestRejectsNonObjectBodies(t *testing.T) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					t.Fatalf("body %q panicked: %v", body, r)
+					t.Errorf("body %q panicked: %v", body, r)
 				}
 			}()
-			if _, err := h.client.ProxyRequest(context.Background(), routed, []byte(body)); err == nil {
-				t.Fatalf("body %q was accepted", body)
-			}
+			_, err := h.client.ProxyRequest(context.Background(), routed, []byte(body))
+			assert.Error(t, err, "body %q was accepted", body)
 		}()
 	}
 	// The valid empty object still works: nothing about the fix may narrow it.
 	req, err := h.client.ProxyRequest(context.Background(), routed, []byte(`{}`))
-	if err != nil {
-		t.Fatalf("empty object rejected: %v", err)
-	}
-	if got := req.Header.Get("X-Request-Id"); got != "" {
-		t.Fatalf("X-Request-Id = %q on an unrouted request", got)
-	}
+	require.NoError(t, err, "empty object rejected")
+	assert.Empty(t, req.Header.Get("X-Request-Id"), "on an unrouted request")
 }
 
 // TestManualFallbackIgnoresCancellation is a regression test: a cancelled or
@@ -250,15 +210,9 @@ func TestManualFallbackIgnoresCancellation(t *testing.T) {
 			ctx, cancel := tc.ctx()
 			defer cancel()
 			got, err := c.Route(ctx, req)
-			if err == nil {
-				t.Fatalf("route succeeded with manual %+v; a %s must not fall back", got, tc.name)
-			}
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("err = %v, want errors.Is(_, %v)", err, tc.want)
-			}
-			if errors.Is(err, agent.ErrControllerUnavailable) {
-				t.Fatalf("err = %v also claims the controller was unavailable", err)
-			}
+			require.Error(t, err, "route succeeded with manual %+v; a %s must not fall back", got, tc.name)
+			assert.ErrorIs(t, err, tc.want)
+			assert.NotErrorIs(t, err, agent.ErrControllerUnavailable, "err also claims the controller was unavailable")
 		})
 	}
 
@@ -266,12 +220,9 @@ func TestManualFallbackIgnoresCancellation(t *testing.T) {
 	down := *h.client
 	down.ControllerURL = "http://127.0.0.1:1"
 	got, err := down.Route(context.Background(), req)
-	if err != nil {
-		t.Fatalf("connection failure did not fall back: %v", err)
-	}
-	if !got.Manual || got.Alias != "cc-coding" {
-		t.Fatalf("route = %+v, want the manual route", got)
-	}
+	require.NoError(t, err, "connection failure did not fall back")
+	assert.True(t, got.Manual, "want the manual route")
+	assert.Equal(t, "cc-coding", got.Alias, "want the manual route")
 }
 
 // TestRouteRejectsDecisionWithoutProvider: an alias with no provider cannot be
@@ -289,9 +240,8 @@ func TestRouteRejectsDecisionWithoutProvider(t *testing.T) {
 		SessionID:    "session-1",
 		Capabilities: &routing.RequiredCapabilities{},
 	})
-	if err == nil || !strings.Contains(err.Error(), "without a provider") {
-		t.Fatalf("err = %v, want a missing-provider error", err)
-	}
+	require.Error(t, err, "want a missing-provider error")
+	assert.ErrorContains(t, err, "without a provider")
 }
 
 // --- harness ---------------------------------------------------------------
@@ -336,13 +286,9 @@ func newHarness(t *testing.T) *harness {
 
 	path := filepath.Join(t.TempDir(), "test.db")
 	st, err := store.Open(store.Config{Path: path, BusyTimeout: 5 * time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
+	require.NoError(t, err, "store.Open")
 	t.Cleanup(func() { st.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	require.NoError(t, st.Migrate(ctx), "Migrate")
 
 	h := &harness{
 		store: st,
@@ -430,35 +376,28 @@ func (h *harness) seed(t *testing.T, provider string, state store.QuotaState, re
 	limit := 100.0
 	used := limit - remaining
 	reset := time.Now().Add(time.Hour).UTC()
-	if err := h.store.SaveQuotaSnapshot(context.Background(), store.QuotaSnapshot{
+	require.NoError(t, h.store.SaveQuotaSnapshot(context.Background(), store.QuotaSnapshot{
 		Provider: provider, State: state, Source: "test", Confidence: store.Reported,
 		ObservedAt: time.Now().UTC(),
 		Windows:    []store.QuotaWindow{{Window: "5h", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
-	}); err != nil {
-		t.Fatalf("SaveQuotaSnapshot: %v", err)
-	}
-	if err := h.store.SaveProviderHealth(context.Background(), store.HealthRecord{
+	}), "SaveQuotaSnapshot")
+	require.NoError(t, h.store.SaveProviderHealth(context.Background(), store.HealthRecord{
 		Provider: provider, State: store.Healthy, ObservedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("SaveProviderHealth: %v", err)
-	}
+	}), "SaveProviderHealth")
 }
 
 func (h *harness) decisionID(t *testing.T) string {
 	t.Helper()
 	recs, err := h.store.LatestRoutingDecisions(context.Background(), 1)
-	if err != nil || len(recs) == 0 {
-		t.Fatalf("LatestRoutingDecisions: %v (%d)", err, len(recs))
-	}
+	require.NoError(t, err, "LatestRoutingDecisions")
+	require.NotEmpty(t, recs, "LatestRoutingDecisions")
 	return recs[0].DecisionID
 }
 
 func (h *harness) usageRow(t *testing.T) store.UsageRecord {
 	t.Helper()
 	rows := h.usageRows(t)
-	if len(rows) == 0 {
-		t.Fatal("no usage row was stored")
-	}
+	require.NotEmpty(t, rows, "no usage row was stored")
 	return rows[len(rows)-1]
 }
 
@@ -472,22 +411,16 @@ func (h *harness) usageCount(t *testing.T) int {
 func (h *harness) usageRows(t *testing.T) []store.UsageRecord {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+h.path+"?mode=ro")
-	if err != nil {
-		t.Fatalf("open read-only: %v", err)
-	}
+	require.NoError(t, err, "open read-only")
 	defer db.Close()
 	rows, err := db.Query(`SELECT request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id FROM usage_records ORDER BY id`)
-	if err != nil {
-		t.Fatalf("query usage_records: %v", err)
-	}
+	require.NoError(t, err, "query usage_records")
 	defer rows.Close()
 	var out []store.UsageRecord
 	for rows.Next() {
 		var u store.UsageRecord
 		var reqID, model, prov, source, outcome, decisionID *string
-		if err := rows.Scan(&reqID, &u.Attempt, &u.Provider, &model, &u.InputTokens, &u.OutputTokens, &prov, &source, &outcome, &decisionID); err != nil {
-			t.Fatalf("scan usage row: %v", err)
-		}
+		require.NoError(t, rows.Scan(&reqID, &u.Attempt, &u.Provider, &model, &u.InputTokens, &u.OutputTokens, &prov, &source, &outcome, &decisionID), "scan usage row")
 		u.RequestID = deref(reqID)
 		u.Model = deref(model)
 		u.Provenance = store.Confidence(deref(prov))
@@ -496,9 +429,7 @@ func (h *harness) usageRows(t *testing.T) []store.UsageRecord {
 		u.DecisionID = deref(decisionID)
 		out = append(out, u)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate usage rows: %v", err)
-	}
+	require.NoError(t, rows.Err(), "iterate usage rows")
 	return out
 }
 

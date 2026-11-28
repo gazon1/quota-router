@@ -5,6 +5,9 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var now = time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
@@ -31,9 +34,10 @@ func TestDeriveStateBoundaries(t *testing.T) {
 		{"zero remaining without limit is still exhausted", []Window{Window{Remaining: f(0)}}, Exhausted},
 	}
 	for _, tc := range tests {
-		if got, _ := Derive(tc.windows, 0.1); got != tc.want {
-			t.Errorf("%s: Derive() = %s, want %s", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := Derive(tc.windows, 0.1)
+			assert.Equal(t, tc.want, got)
+		})
 	}
 }
 
@@ -42,64 +46,62 @@ func TestDeriveWorstWindowWins(t *testing.T) {
 		remaining(100, 100, now.Add(time.Hour)),
 		{Name: "weekly", Limit: f(200), Remaining: f(0), ResetsAt: now.Add(7 * 24 * time.Hour)},
 	}
-	if got, _ := Derive(windows, 0.1); got != Exhausted {
-		t.Fatalf("Derive() = %s, want EXHAUSTED: one exhausted window must not be averaged away", got)
-	}
+	got, _ := Derive(windows, 0.1)
+	assert.Equal(t, Exhausted, got, "one exhausted window must not be averaged away")
 
 	low := []Window{remaining(100, 100, now.Add(time.Hour)), remaining(5, 100, now.Add(7*24*time.Hour))}
-	if got, _ := Derive(low, 0.1); got != LowQuota {
-		t.Fatalf("Derive() = %s, want LOW_QUOTA", got)
-	}
+	got, _ = Derive(low, 0.1)
+	assert.Equal(t, LowQuota, got)
 }
 
 func TestDeriveNeverInventsQuota(t *testing.T) {
-	if got, reason := Derive(nil, 0.1); got != QuotaUnknown || reason != MalformedResponse {
-		t.Fatalf("Derive(nil) = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
-	}
+	got, reason := Derive(nil, 0.1)
+	assert.Equal(t, QuotaUnknown, got)
+	assert.Equal(t, MalformedResponse, reason)
+
 	// A positive remaining without a limit cannot be classified.
-	if got, _ := Derive([]Window{{Remaining: f(50)}}, 0.1); got != QuotaUnknown {
-		t.Fatalf("Derive(remaining only) = %s, want UNKNOWN", got)
-	}
+	got, _ = Derive([]Window{{Remaining: f(50)}}, 0.1)
+	assert.Equal(t, QuotaUnknown, got)
+
 	// Absent remaining must not read as zero, and not as available.
-	if got, _ := Derive([]Window{{Limit: f(100)}}, 0.1); got != QuotaUnknown {
-		t.Fatalf("Derive(missing remaining) = %s, want UNKNOWN", got)
-	}
+	got, _ = Derive([]Window{{Limit: f(100)}}, 0.1)
+	assert.Equal(t, QuotaUnknown, got)
+
 	// Zero-or-less limit is not a fraction basis.
-	if got, _ := Derive([]Window{Window{Limit: f(0), Remaining: f(1)}}, 0.1); got != QuotaUnknown {
-		t.Fatalf("Derive(zero limit) = %s, want UNKNOWN", got)
-	}
+	got, _ = Derive([]Window{Window{Limit: f(0), Remaining: f(1)}}, 0.1)
+	assert.Equal(t, QuotaUnknown, got)
 }
 
 func TestObservedRecordsConfidenceAndProvenance(t *testing.T) {
 	full := Observed("minimax", "token_plan/remains", now, []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
-	if state, reason := full.State(); state != Available || reason != "" || full.Confidence != ConfidenceHigh {
-		t.Fatalf("Observed(full) = %s/%s %+v, want AVAILABLE/HIGH", state, reason, full)
-	}
+	state, reason := full.State()
+	assert.Equal(t, Available, state)
+	assert.Empty(t, reason)
+	assert.Equal(t, ConfidenceHigh, full.Confidence)
 
 	// A window missing used/reset is usable but lowers confidence.
 	sparse := Observed("minimax", "token_plan/remains", now, []Window{{Limit: f(100), Remaining: f(90)}}, 0.1)
-	if state, _ := sparse.State(); state != Available || sparse.Confidence != ConfidenceLow {
-		t.Fatalf("Observed(sparse) = %+v, want AVAILABLE/LOW", sparse)
-	}
+	state, _ = sparse.State()
+	assert.Equal(t, Available, state)
+	assert.Equal(t, ConfidenceLow, sparse.Confidence)
 
 	sparse.Provenance = map[string]string{"remaining": "weekly.remaining_credits"}
 	encoded, err := json.Marshal(sparse)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	if !json.Valid(encoded) {
-		t.Fatalf("Marshal() produced invalid JSON: %s", encoded)
-	}
+	require.NoError(t, err)
+	assert.True(t, json.Valid(encoded))
 }
 
 func TestFailedCarriesNoValues(t *testing.T) {
 	s := Failed("commandcode", "none", now, UnsupportedNoQuotaAPI)
-	if state, reason := s.State(); state != QuotaUnknown || reason != UnsupportedNoQuotaAPI || s.Windows != nil || s.Confidence != ConfidenceNone {
-		t.Fatalf("Failed() = %+v, want UNKNOWN with no windows", s)
-	}
-	if got, reason := s.StateAt(now, time.Hour); got != QuotaUnknown || reason != UnsupportedNoQuotaAPI {
-		t.Fatalf("StateAt() = %s/%s, want UNKNOWN/%s", got, reason, UnsupportedNoQuotaAPI)
-	}
+	state, reason := s.State()
+	assert.Equal(t, QuotaUnknown, state)
+	assert.Equal(t, UnsupportedNoQuotaAPI, reason)
+	assert.Nil(t, s.Windows)
+	assert.Equal(t, ConfidenceNone, s.Confidence)
+
+	state, reason = s.StateAt(now, time.Hour)
+	assert.Equal(t, QuotaUnknown, state)
+	assert.Equal(t, UnsupportedNoQuotaAPI, reason)
 }
 
 func TestEachUnknownReasonSurvivesReport(t *testing.T) {
@@ -107,16 +109,19 @@ func TestEachUnknownReasonSurvivesReport(t *testing.T) {
 		UnsupportedNoQuotaAPI, TransientFetchFailure, StaleObservation,
 		MalformedResponse, AuthFailure, NotYetObserved,
 	} {
-		s := Failed("p", "src", now, reason)
-		if got, gotReason := s.StateAt(now, time.Hour); got != QuotaUnknown || gotReason != reason {
-			t.Errorf("StateAt() = %s/%s, want UNKNOWN/%s", got, gotReason, reason)
-		}
-		// A failure recorded without a timestamp keeps its own reason rather
-		// than reporting NOT_YET_OBSERVED and losing the diagnosis.
-		zero := Failed("p", "src", time.Time{}, reason)
-		if got, gotReason := zero.StateAt(now, time.Hour); got != QuotaUnknown || gotReason != reason {
-			t.Errorf("StateAt(zero timestamp) = %s/%s, want UNKNOWN/%s", got, gotReason, reason)
-		}
+		t.Run(string(reason), func(t *testing.T) {
+			s := Failed("p", "src", now, reason)
+			got, gotReason := s.StateAt(now, time.Hour)
+			assert.Equal(t, QuotaUnknown, got)
+			assert.Equal(t, reason, gotReason)
+
+			// A failure recorded without a timestamp keeps its own reason rather
+			// than reporting NOT_YET_OBSERVED and losing the diagnosis.
+			zero := Failed("p", "src", time.Time{}, reason)
+			got, gotReason = zero.StateAt(now, time.Hour)
+			assert.Equal(t, QuotaUnknown, got)
+			assert.Equal(t, reason, gotReason)
+		})
 	}
 }
 
@@ -138,21 +143,21 @@ func TestStateAtRejectsUntrustworthyObservations(t *testing.T) {
 		{"unset max age fails closed", fresh, now, 0},
 	}
 	for _, tc := range tests {
-		if got, _ := tc.snap.StateAt(tc.at, tc.age); got != QuotaUnknown {
-			t.Errorf("%s: StateAt() = %s, want UNKNOWN", tc.name, got)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := tc.snap.StateAt(tc.at, tc.age)
+			assert.Equal(t, QuotaUnknown, got)
+		})
 	}
 
-	if got, reason := fresh.StateAt(now, time.Hour); got != Available || reason != "" {
-		t.Fatalf("StateAt(fresh) = %s/%s, want AVAILABLE", got, reason)
-	}
+	got, reason := fresh.StateAt(now, time.Hour)
+	assert.Equal(t, Available, got)
+	assert.Empty(t, reason)
 }
 
 func TestSmallClockSkewIsTolerated(t *testing.T) {
 	s := Observed("p", "src", now.Add(30*time.Second), []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
-	if got, _ := s.StateAt(now, time.Hour); got != Available {
-		t.Fatalf("StateAt(skew 30s) = %s, want AVAILABLE", got)
-	}
+	got, _ := s.StateAt(now, time.Hour)
+	assert.Equal(t, Available, got)
 }
 
 // A provider response can carry a NaN or an infinity through a numeric field an
@@ -170,9 +175,11 @@ func TestNonFiniteValuesNeverBecomeQuota(t *testing.T) {
 		{"Inf limit", Window{Limit: &inf, Remaining: f(50)}},
 	}
 	for _, tc := range tests {
-		if got, reason := Derive([]Window{tc.win}, 0.1); got != QuotaUnknown || reason != MalformedResponse {
-			t.Errorf("%s: Derive() = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", tc.name, got, reason)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got, reason := Derive([]Window{tc.win}, 0.1)
+			assert.Equal(t, QuotaUnknown, got)
+			assert.Equal(t, MalformedResponse, reason)
+		})
 	}
 
 	// Used never establishes quota, so a broken one must not claim a complete
@@ -180,12 +187,9 @@ func TestNonFiniteValuesNeverBecomeQuota(t *testing.T) {
 	broken := Observed("p", "src", now, []Window{{
 		Limit: f(100), Remaining: f(90), Used: f(math.NaN()), ResetsAt: now.Add(time.Hour),
 	}}, 0.1)
-	if state, _ := broken.State(); state != Available {
-		t.Fatalf("State() = %s, want AVAILABLE: Used does not establish quota", state)
-	}
-	if broken.Confidence != ConfidenceLow {
-		t.Fatalf("Confidence = %s, want LOW: a NaN Used is not complete accounting", broken.Confidence)
-	}
+	state, _ := broken.State()
+	assert.Equal(t, Available, state, "Used does not establish quota")
+	assert.Equal(t, ConfidenceLow, broken.Confidence, "a NaN Used is not complete accounting")
 }
 
 // The snapshot owns its values: mutating the caller's windows afterwards must
@@ -198,12 +202,9 @@ func TestObservedIsImmuneToCallerMutation(t *testing.T) {
 	s.Windows[0].ResetsAt = now.In(loc) // exercise the copy, not the caller's value
 
 	rem = 0
-	if state, _ := s.State(); state != Available {
-		t.Fatalf("State() = %s, want AVAILABLE", state)
-	}
-	if *s.Windows[0].Remaining != 90 {
-		t.Fatalf("Windows[0].Remaining = %v, want 90: the snapshot shares the caller's pointer", *s.Windows[0].Remaining)
-	}
+	state, _ := s.State()
+	assert.Equal(t, Available, state)
+	assert.Equal(t, 90.0, *s.Windows[0].Remaining, "the snapshot shares the caller's pointer")
 }
 
 // State is derived on every read, so a snapshot edited after construction cannot
@@ -212,17 +213,14 @@ func TestObservedIsImmuneToCallerMutation(t *testing.T) {
 func TestStateFollowsWindowsAfterMutation(t *testing.T) {
 	s := Observed("p", "src", now, []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
 	*s.Windows[0].Remaining = 0
-	if state, _ := s.State(); state != Exhausted {
-		t.Fatalf("State() = %s, want EXHAUSTED after the window was exhausted", state)
-	}
+	state, _ := s.State()
+	assert.Equal(t, Exhausted, state, "after the window was exhausted")
 
 	// A hand-built snapshot with no windows establishes nothing.
-	if state, _ := (Snapshot{ObservedAt: now}).State(); state != QuotaUnknown {
-		t.Fatalf("State() = %s for an empty snapshot, want UNKNOWN", state)
-	}
-	if state, _ := (Snapshot{ObservedAt: now, Windows: []Window{remaining(90, 100, now.Add(time.Hour))}}).StateAt(now, time.Hour); state != Available {
-		t.Fatalf("StateAt() = %s, want AVAILABLE derived from the windows", state)
-	}
+	state, _ = (Snapshot{ObservedAt: now}).State()
+	assert.Equal(t, QuotaUnknown, state)
+	state, _ = (Snapshot{ObservedAt: now, Windows: []Window{remaining(90, 100, now.Add(time.Hour))}}).StateAt(now, time.Hour)
+	assert.Equal(t, Available, state, "derived from the windows")
 }
 
 func TestUnusableWindowMakesWholeSnapshotUnknown(t *testing.T) {
@@ -233,45 +231,34 @@ func TestUnusableWindowMakesWholeSnapshotUnknown(t *testing.T) {
 		remaining(5, 100, now.Add(time.Hour)),
 		{Name: "weekly", Limit: f(200)},
 	}
-	if got, reason := Derive(windows, 0.1); got != QuotaUnknown || reason != MalformedResponse {
-		t.Fatalf("Derive(low + missing) = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
-	}
+	got, reason := Derive(windows, 0.1)
+	assert.Equal(t, QuotaUnknown, got)
+	assert.Equal(t, MalformedResponse, reason)
 
 	exhausted := []Window{
 		{Name: "5h", Limit: f(100), Remaining: f(0)},
 		{Name: "weekly"}, // no remaining at all
 	}
-	if got, _ := Derive(exhausted, 0.1); got != QuotaUnknown {
-		t.Fatalf("Derive(exhausted + missing) = %s, want UNKNOWN", got)
-	}
+	got, _ = Derive(exhausted, 0.1)
+	assert.Equal(t, QuotaUnknown, got)
 }
 
 func TestResetTimesAreNormalizedToUTC(t *testing.T) {
 	loc := time.FixedZone("MSK", 3*60*60)
 	s := Observed("p", "src", now, []Window{remaining(90, 100, now.In(loc))}, 0.1)
-	if s.Windows[0].ResetsAt.Location() != time.UTC {
-		t.Fatalf("ResetsAt location = %v, want UTC", s.Windows[0].ResetsAt.Location())
-	}
+	assert.Equal(t, time.UTC, s.Windows[0].ResetsAt.Location())
 }
 
 func TestUsageAndHealthAreIndependentOfQuota(t *testing.T) {
 	usage := Usage{Provider: "p", Origin: LocallyObserved, Requests: new(int64), InputTokens: nil}
 	*usage.Requests = 42
-	if usage.Origin != LocallyObserved {
-		t.Fatalf("Origin = %s", usage.Origin)
-	}
+	assert.Equal(t, LocallyObserved, usage.Origin)
 
 	// A healthy provider with an active cooldown still carries no quota claim.
 	state := ProviderState{Provider: "p", Health: Healthy, ObservedAt: now, CooldownUntil: now.Add(time.Minute)}
-	if !state.CooldownActive(now) {
-		t.Fatal("CooldownActive() = false, want true")
-	}
-	if state.Health != Healthy {
-		t.Fatal("cooldown must not change health")
-	}
-	if (ProviderState{CooldownUntil: now}).CooldownActive(now) {
-		t.Fatal("CooldownActive() = true for zero CooldownUntil")
-	}
+	assert.True(t, state.CooldownActive(now))
+	assert.Equal(t, Healthy, state.Health, "cooldown must not change health")
+	assert.False(t, (ProviderState{CooldownUntil: now}).CooldownActive(now))
 }
 
 // A raw provider error converted to a reason string would carry a credential
@@ -279,46 +266,43 @@ func TestUsageAndHealthAreIndependentOfQuota(t *testing.T) {
 func TestUnknownReasonVocabularyIsEnforced(t *testing.T) {
 	leak := UnknownReason("dial tcp https://user:secret@provider:443 failed")
 	s := Failed("p", "src", now, leak)
-	if state, reason := s.State(); state != QuotaUnknown || reason != MalformedResponse {
-		t.Fatalf("State() = %s/%s, want UNKNOWN/MALFORMED_RESPONSE for an undeclared reason", state, reason)
-	}
-	if state, reason := s.StateAt(now, time.Hour); state != QuotaUnknown || reason == leak {
-		t.Fatalf("StateAt() = %s/%s, leaked the raw error", state, reason)
-	}
+	state, reason := s.State()
+	assert.Equal(t, QuotaUnknown, state)
+	assert.Equal(t, MalformedResponse, reason, "for an undeclared reason")
+
+	state, reason = s.StateAt(now, time.Hour)
+	assert.Equal(t, QuotaUnknown, state)
+	assert.NotEqual(t, leak, reason, "leaked the raw error")
 
 	// The declared set still passes through untouched.
 	for _, reason := range []UnknownReason{UnsupportedNoQuotaAPI, TransientFetchFailure, MalformedResponse} {
-		if got := Failed("p", "src", now, reason); func() UnknownReason { _, r := got.State(); return r }() != reason {
-			t.Errorf("Failed(%s) did not keep its declared reason", reason)
-		}
+		got := Failed("p", "src", now, reason)
+		_, r := got.State()
+		assert.Equal(t, reason, r, "Failed(%s) did not keep its declared reason", reason)
 	}
 }
 
 func TestHealthReasonVocabularyIsEnforced(t *testing.T) {
 	leak := HealthReason("401 https://user:secret@provider/v1: invalid key sk-cp-abc")
 	st := NewProviderState("p", Degraded, leak, now)
-	if st.Reason() != ReasonServerError {
-		t.Fatalf("Reason() = %q, want PROVIDER_ERROR for an undeclared reason", st.Reason())
-	}
+	assert.Equal(t, ReasonServerError, st.Reason(), "for an undeclared reason")
 
 	st = NewProviderState("p", Degraded, ReasonRateLimited, now)
-	if st.Reason() != ReasonRateLimited {
-		t.Fatalf("Reason() = %q, want RATE_LIMITED", st.Reason())
-	}
+	assert.Equal(t, ReasonRateLimited, st.Reason())
 
 	// Health is a string too: a value outside its vocabulary cannot become a
 	// provider state either.
 	st = NewProviderState("p", Health("AVAILABLE"), ReasonNone, now)
-	if st.Health != HealthUnknown {
-		t.Fatalf("Health = %q, want UNKNOWN for an undeclared health state", st.Health)
-	}
+	assert.Equal(t, HealthUnknown, st.Health, "for an undeclared health state")
 }
 
 func TestExplicitFailureReasonSurvivesAnyMaxAge(t *testing.T) {
 	s := Failed("p", "src", now, AuthFailure)
 	for _, age := range []time.Duration{time.Hour, 0, -time.Second} {
-		if state, reason := s.StateAt(now, age); state != QuotaUnknown || reason != AuthFailure {
-			t.Errorf("StateAt(maxAge=%s) = %s/%s, want UNKNOWN/AUTHENTICATION_OR_PERMISSION_FAILURE", age, state, reason)
-		}
+		t.Run(age.String(), func(t *testing.T) {
+			state, reason := s.StateAt(now, age)
+			assert.Equal(t, QuotaUnknown, state)
+			assert.Equal(t, AuthFailure, reason)
+		})
 	}
 }

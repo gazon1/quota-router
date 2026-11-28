@@ -1,0 +1,7 @@
+litellm:
+  base_url: https://litellm.example.com
+  model_aliases:
+    fast: minimax/MiniMax-M2.7
+providers:
+  minimax:
+    base_url: https://api.minimax.io/v1

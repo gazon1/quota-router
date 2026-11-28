@@ -1,0 +1,10 @@
+litellm:
+  model_aliases:
+    a1: p1/m1
+    b1: p2/m1
+routing:
+  providers:
+    p1:
+      priority: 1
+      models:
+        a1: 1

@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gazon1/quota-router/internal/store"
 )
 
@@ -62,12 +65,8 @@ func TestUsageRequiresToken(t *testing.T) {
 			sink := &memSink{}
 			srv := New(nil, Options{Usage: sink, AuthToken: tc.token})
 			w := post(t, srv, tc.send, `{"provider":"minimax"}`)
-			if w.Code != tc.want {
-				t.Fatalf("status = %d, want %d", w.Code, tc.want)
-			}
-			if len(sink.records) != 0 {
-				t.Fatalf("stored %d records for a rejected report", len(sink.records))
-			}
+			assert.Equal(t, tc.want, w.Code)
+			assert.Empty(t, sink.records, "stored %d records for a rejected report", len(sink.records))
 		})
 	}
 }
@@ -88,26 +87,18 @@ func TestUsageAcceptsProviderReportedAttempt(t *testing.T) {
 		"outcome": "PARTIAL_STREAM",
 		"decision_id": "dec-9"
 	}`)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body)
-	}
-	if len(sink.records) != 1 {
-		t.Fatalf("records = %d, want 1", len(sink.records))
-	}
+	assert.Equal(t, http.StatusAccepted, w.Code, "body: %s", w.Body)
+	require.Len(t, sink.records, 1)
 	got := sink.records[0]
-	if got.RequestID != "req-1" || got.Attempt != 2 || got.DecisionID != "dec-9" {
-		t.Fatalf("identity = %q/%d/%q, want req-1/2/dec-9", got.RequestID, got.Attempt, got.DecisionID)
-	}
-	if got.Provenance != store.Reported || got.Outcome != store.OutcomePartialStream {
-		t.Fatalf("provenance/outcome = %s/%s, want reported/PARTIAL_STREAM", got.Provenance, got.Outcome)
-	}
+	assert.Equal(t, "req-1", got.RequestID)
+	assert.Equal(t, 2, got.Attempt)
+	assert.Equal(t, "dec-9", got.DecisionID)
+	assert.Equal(t, store.Reported, got.Provenance)
+	assert.Equal(t, store.OutcomePartialStream, got.Outcome)
 	// A reported zero must survive as zero, not become "missing".
-	if got.OutputTokens == nil || *got.OutputTokens != 0 {
-		t.Fatalf("output_tokens = %v, want a reported 0", got.OutputTokens)
-	}
-	if got.ObservedAt.IsZero() {
-		t.Fatal("observed_at was left unset: the arrival time must be recorded")
-	}
+	require.NotNil(t, got.OutputTokens, "output_tokens = %v, want a reported 0", got.OutputTokens)
+	assert.Equal(t, 0, *got.OutputTokens)
+	assert.False(t, got.ObservedAt.IsZero(), "observed_at was left unset: the arrival time must be recorded")
 }
 
 // Missing usage is unknown, never zero, and a missing outcome is UNKNOWN.
@@ -116,19 +107,13 @@ func TestUsageKeepsMissingValuesUnknown(t *testing.T) {
 	srv := New(nil, Options{Usage: sink, AuthToken: testToken})
 
 	w := post(t, srv, testToken, `{"provider":"minimax","provenance":"estimated","source":"agent"}`)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body)
-	}
+	assert.Equal(t, http.StatusAccepted, w.Code, "body: %s", w.Body)
+	require.Len(t, sink.records, 1)
 	got := sink.records[0]
-	if got.InputTokens != nil || got.OutputTokens != nil {
-		t.Fatalf("tokens = %v/%v, want both unknown", got.InputTokens, got.OutputTokens)
-	}
-	if got.Outcome != store.OutcomeUnknown {
-		t.Fatalf("outcome = %q, want UNKNOWN when the reporter did not say", got.Outcome)
-	}
-	if got.Attempt != 0 {
-		t.Fatalf("attempt = %d, want 0 (the store maps it to the first attempt)", got.Attempt)
-	}
+	assert.Nil(t, got.InputTokens, "tokens = %v/%v, want both unknown", got.InputTokens, got.OutputTokens)
+	assert.Nil(t, got.OutputTokens, "tokens = %v/%v, want both unknown", got.InputTokens, got.OutputTokens)
+	assert.Equal(t, store.OutcomeUnknown, got.Outcome, "outcome = %q, want UNKNOWN when the reporter did not say", got.Outcome)
+	assert.Equal(t, 0, got.Attempt, "attempt = %d, want 0 (the store maps it to the first attempt)", got.Attempt)
 }
 
 // A caller sending a prompt or a conversation body must fail loudly instead of
@@ -138,12 +123,8 @@ func TestUsageRejectsUnknownFields(t *testing.T) {
 	srv := New(nil, Options{Usage: sink, AuthToken: testToken})
 
 	w := post(t, srv, testToken, `{"provider":"minimax","provenance":"reported","source":"agent","messages":[{"role":"user","content":"hi"}]}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", w.Code)
-	}
-	if len(sink.records) != 0 {
-		t.Fatal("a report carrying unknown fields was stored")
-	}
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Empty(t, sink.records, "a report carrying unknown fields was stored")
 }
 
 func TestUsageRejectsInvalidValues(t *testing.T) {
@@ -159,12 +140,9 @@ func TestUsageRejectsInvalidValues(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sink := &memSink{}
 			srv := New(nil, Options{Usage: sink, AuthToken: testToken})
-			if w := post(t, srv, testToken, tc.body); w.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400", w.Code)
-			}
-			if len(sink.records) != 0 {
-				t.Fatal("an invalid report was stored")
-			}
+			w := post(t, srv, testToken, tc.body)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Empty(t, sink.records, "an invalid report was stored")
 		})
 	}
 }
@@ -173,53 +151,38 @@ func TestUsageRejectsOversizedBody(t *testing.T) {
 	srv := New(nil, Options{Usage: &memSink{}, AuthToken: testToken})
 	big := `{"provider":"p","provenance":"reported","source":"agent","request_id":"` +
 		strings.Repeat("x", maxUsageBody) + `"}`
-	if w := post(t, srv, testToken, big); w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413", w.Code)
-	}
+	w := post(t, srv, testToken, big)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 }
 
 // A busy database is retryable, and the caller must be told that rather than
 // being given a generic failure it would not retry.
 func TestUsageReportsBusyAsRetryable(t *testing.T) {
 	srv := New(nil, Options{Usage: &memSink{err: fmt.Errorf("write: %w", store.ErrBusy)}, AuthToken: testToken})
-	if w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", w.Code)
-	}
+	w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 
 	srv = New(nil, Options{Usage: &memSink{err: errors.New("boom")}, AuthToken: testToken})
-	w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`)
-	if w.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", w.Code)
-	}
+	w = post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	// The internal cause must not be echoed to the caller.
-	if strings.Contains(w.Body.String(), "boom") {
-		t.Fatalf("response leaks the internal error: %s", w.Body)
-	}
+	assert.NotContains(t, w.Body.String(), "boom", "response leaks the internal error: %s", w.Body)
 }
 
 func TestUsageConflictOnConflictingEventReuse(t *testing.T) {
 	srv := New(nil, Options{Usage: &memSink{err: store.ErrUsageConflict}, AuthToken: testToken})
 	w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409: %s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusConflict, w.Code, "body: %s", w.Body.String())
 	var body errorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Error.Code != errorCodeConflict {
-		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeConflict)
-	}
-	if body.Error.Retryable {
-		t.Fatal("retryable = true, want false for a conflicting reuse")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errorCodeConflict, body.Error.Code)
+	assert.False(t, body.Error.Retryable, "retryable = true, want false for a conflicting reuse")
 }
 
 func TestUsageIsUnavailableWithoutASink(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken})
-	if w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", w.Code)
-	}
+	w := post(t, srv, testToken, `{"provider":"p","provenance":"reported","source":"agent"}`)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 }
 
 // The response is a status, not an echo: a report is not reflected back, so no
@@ -228,10 +191,7 @@ func TestUsageResponseHasNoContent(t *testing.T) {
 	srv := New(nil, Options{Usage: &memSink{}, AuthToken: testToken})
 	w := post(t, srv, testToken, `{"provider":"minimax","provenance":"reported","source":"agent","request_id":"req-7"}`)
 	var body map[string]string
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("body %q is not JSON: %v", w.Body, err)
-	}
-	if len(body) != 1 || body["status"] != "recorded" {
-		t.Fatalf("body = %v, want only a status", body)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "body %q is not JSON", w.Body)
+	assert.Len(t, body, 1, "body = %v, want only a status", body)
+	assert.Equal(t, "recorded", body["status"], "body = %v, want only a status", body)
 }

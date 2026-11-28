@@ -1,42 +1,23 @@
 package config
 
 import (
-	"reflect"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadRoutingProviders(t *testing.T) {
 	cleanEnv(t)
-	t.Setenv(ConfigFileEnv, writeConfig(t, `
-litellm:
-  model_aliases:
-    fast: minimax/MiniMax-M2.7
-    coding:
-      model: commandcode/stealth/glyph-cluster:free
-routing:
-  providers:
-    commandcode:
-      priority: 1
-      models:
-        coding: 1
-    minimax:
-      priority: 2
-      models:
-        fast: 1
-`))
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "routing/providers.yaml")))
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
+	require.NoError(t, err)
 	want := map[string]ProviderRouting{
 		"commandcode": {Priority: 1, Models: map[string]int{"coding": 1}},
 		"minimax":     {Priority: 2, Models: map[string]int{"fast": 1}},
 	}
-	if !reflect.DeepEqual(cfg.Routing.Providers, want) {
-		t.Fatalf("Routing.Providers = %+v, want %+v", cfg.Routing.Providers, want)
-	}
+	assert.Equal(t, want, cfg.Routing.Providers)
 }
 
 func TestLoadRoutingProvidersFromEnv(t *testing.T) {
@@ -49,251 +30,97 @@ func TestLoadRoutingProvidersFromEnv(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__MODELS__FAST", "1")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Routing.Providers["commandcode"].Priority != 1 {
-		t.Fatalf("commandcode priority = %d, want 1", cfg.Routing.Providers["commandcode"].Priority)
-	}
-	if cfg.Routing.Providers["minimax"].Models["fast"] != 1 {
-		t.Fatalf("minimax fast priority = %d, want 1", cfg.Routing.Providers["minimax"].Models["fast"])
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, cfg.Routing.Providers["commandcode"].Priority)
+	assert.Equal(t, 1, cfg.Routing.Providers["minimax"].Models["fast"])
 }
 
 func TestValidateRoutingRejectsInvalidConfig(t *testing.T) {
-	base := `
-litellm:
-  model_aliases:
-    a1:
-      model: p1/m1
-    a2:
-      model: p1/m2
-    b1:
-      model: p2/m1
-`
 	for _, tt := range []struct {
 		name    string
-		routing string
+		fixture string
 		want    string
 	}{
 		{
-			name: "duplicate provider priority",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1, a2: 2}
-    p2:
-      priority: 1
-      models: {b1: 1}
-`,
-			want: "duplicates",
+			name:    "duplicate provider priority",
+			fixture: "routing/duplicate-provider-priority.yaml",
+			want:    "duplicates",
 		},
 		{
-			name: "duplicate model priority within provider",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1, a2: 1}
-    p2:
-      priority: 2
-      models: {b1: 1}
-`,
-			want: "duplicates",
+			name:    "duplicate model priority within provider",
+			fixture: "routing/duplicate-model-priority.yaml",
+			want:    "duplicates",
 		},
 		{
-			name: "unknown alias",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1, a2: 2, missing: 3}
-    p2:
-      priority: 2
-      models: {b1: 1}
-`,
-			want: "unknown catalogue alias",
+			name:    "unknown alias",
+			fixture: "routing/unknown-alias.yaml",
+			want:    "unknown catalogue alias",
 		},
 		{
-			name: "alias under wrong provider",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1, a2: 2, b1: 3}
-    p2:
-      priority: 2
-      models: {b1: 1}
-`,
-			want: "belongs to provider",
+			name:    "alias under wrong provider",
+			fixture: "routing/alias-under-wrong-provider.yaml",
+			want:    "belongs to provider",
 		},
 		{
-			name: "missing enabled alias",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1}
-    p2:
-      priority: 2
-      models: {b1: 1}
-`,
-			want: "missing enabled catalogue alias",
+			name:    "missing enabled alias",
+			fixture: "routing/missing-enabled-alias.yaml",
+			want:    "missing enabled catalogue alias",
 		},
 		{
-			name: "missing provider",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1, a2: 2}
-`,
-			want: "missing provider",
+			name:    "missing provider",
+			fixture: "routing/missing-provider.yaml",
+			want:    "missing provider",
 		},
 		{
-			name: "unknown provider with no enabled aliases",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1, a2: 2}
-    p2:
-      priority: 2
-      models: {b1: 1}
-    p3:
-      priority: 3
-      models: {ghost: 1}
-`,
-			want: "no enabled catalogue aliases",
+			name:    "unknown provider with no enabled aliases",
+			fixture: "routing/unknown-provider-no-aliases.yaml",
+			want:    "no enabled catalogue aliases",
 		},
 		{
-			name: "non-positive provider priority",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 0
-      models: {a1: 1, a2: 2}
-    p2:
-      priority: 2
-      models: {b1: 1}
-`,
-			want: "priority must be a positive integer",
+			name:    "non-positive provider priority",
+			fixture: "routing/non-positive-provider-priority.yaml",
+			want:    "priority must be a positive integer",
 		},
 		{
-			name: "non-positive model priority",
-			routing: `
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 0, a2: 2}
-    p2:
-      priority: 2
-      models: {b1: 1}
-`,
-			want: "positive integer",
+			name:    "non-positive model priority",
+			fixture: "routing/non-positive-model-priority.yaml",
+			want:    "positive integer",
 		},
 		{
-			name: "disabled alias referenced",
-			routing: `
-litellm:
-  model_aliases:
-    a1:
-      model: p1/m1
-    a2:
-      model: p1/m2
-      enabled: false
-    b1:
-      model: p2/m1
-routing:
-  providers:
-    p1:
-      priority: 1
-      models: {a1: 1, a2: 2}
-    p2:
-      priority: 2
-      models: {b1: 1}
-`,
-			want: "disabled catalogue alias",
+			name:    "disabled alias referenced",
+			fixture: "routing/disabled-alias-referenced.yaml",
+			want:    "disabled catalogue alias",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cleanEnv(t)
-			body := base + tt.routing
-			if strings.Contains(tt.routing, "litellm:") {
-				body = tt.routing
-			}
-			t.Setenv(ConfigFileEnv, writeConfig(t, body))
+			t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, tt.fixture)))
 
 			_, err := Load()
-			if err == nil {
-				t.Fatalf("expected error containing %q", tt.want)
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error %q missing %q", err, tt.want)
-			}
+			require.Error(t, err, "expected error containing %q", tt.want)
+			assert.ErrorContains(t, err, tt.want)
 		})
 	}
 }
 
 func TestValidateRoutingAllowsDisabledAliasOmitted(t *testing.T) {
 	cleanEnv(t)
-	t.Setenv(ConfigFileEnv, writeConfig(t, `
-litellm:
-  model_aliases:
-    a1:
-      model: p1/m1
-    a2:
-      model: p1/m2
-      enabled: false
-routing:
-  providers:
-    p1:
-      priority: 1
-      models:
-        a1: 1
-`))
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "routing/disabled-alias-omitted.yaml")))
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if _, ok := cfg.Routing.Providers["p1"].Models["a2"]; ok {
-		t.Fatal("disabled alias should not be required in routing order")
-	}
+	require.NoError(t, err)
+	_, ok := cfg.Routing.Providers["p1"].Models["a2"]
+	assert.False(t, ok, "disabled alias should not be required in routing order")
 }
 
 func TestValidateRoutingRequiresCompleteCoverageWhenConfigured(t *testing.T) {
 	cleanEnv(t)
-	t.Setenv(ConfigFileEnv, writeConfig(t, `
-litellm:
-  model_aliases:
-    a1: p1/m1
-    b1: p2/m1
-routing:
-  providers:
-    p1:
-      priority: 1
-      models:
-        a1: 1
-`))
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "routing/incomplete-provider-coverage.yaml")))
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected missing provider error")
-	}
-	if !strings.Contains(err.Error(), "missing provider") || !strings.Contains(err.Error(), "p2") {
-		t.Fatalf("error %q missing provider p2", err)
-	}
+	require.Error(t, err, "expected missing provider error")
+	assert.ErrorContains(t, err, "missing provider")
+	assert.ErrorContains(t, err, "p2")
 }
 
 func TestLoadRoutingProviderModelFromEnvHyphenatedAlias(t *testing.T) {
@@ -307,12 +134,8 @@ func TestLoadRoutingProviderModelFromEnvHyphenatedAlias(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__MODELS__FAST", "1")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got := cfg.Routing.Providers["commandcode"].Models["free-coding"]; got != 1 {
-		t.Fatalf("commandcode free-coding priority = %d, want 1; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, cfg.Routing.Providers["commandcode"].Models["free-coding"], "models=%v", cfg.Routing.Providers["commandcode"].Models)
 }
 
 func TestLoadRoutingProviderModelFromEnvUnderscoreAliasNormalized(t *testing.T) {
@@ -327,47 +150,22 @@ func TestLoadRoutingProviderModelFromEnvUnderscoreAliasNormalized(t *testing.T) 
 	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__MINIMAX__MODELS__FAST", "1")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got := cfg.Routing.Providers["commandcode"].Models["free-coding"]; got != 1 {
-		t.Fatalf("commandcode free-coding priority = %d, want 1; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
-	}
-	if _, ok := cfg.Routing.Providers["commandcode"].Models["free_coding"]; ok {
-		t.Fatalf("underscore key should have been normalized; models=%v", cfg.Routing.Providers["commandcode"].Models)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, cfg.Routing.Providers["commandcode"].Models["free-coding"], "models=%v", cfg.Routing.Providers["commandcode"].Models)
+	_, ok := cfg.Routing.Providers["commandcode"].Models["free_coding"]
+	assert.False(t, ok, "underscore key should have been normalized; models=%v", cfg.Routing.Providers["commandcode"].Models)
 }
 
 func TestLoadRoutingProviderModelEnvNoAmbiguousNormalize(t *testing.T) {
 	cleanEnv(t)
 	// Both forms exist as catalogue aliases - no silent normalization.
-	t.Setenv(ConfigFileEnv, writeConfig(t, `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-    free_coding:
-      model: commandcode/other:free
-routing:
-  providers:
-    commandcode:
-      priority: 1
-      models:
-        free-coding: 1
-        free_coding: 2
-`))
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "routing/hyphen-and-underscore-aliases.yaml")))
 	// Env override targets the underscore alias literally via exact key.
 	t.Setenv("QUOTA_ROUTER_ROUTING__PROVIDERS__COMMANDCODE__MODELS__FREE_CODING", "3")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
+	require.NoError(t, err)
 	// free_coding is a real alias, so env sets it directly; free-coding stays 1.
-	if got := cfg.Routing.Providers["commandcode"].Models["free_coding"]; got != 3 {
-		t.Fatalf("free_coding priority = %d, want 3; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
-	}
-	if got := cfg.Routing.Providers["commandcode"].Models["free-coding"]; got != 1 {
-		t.Fatalf("free-coding priority = %d, want 1; models=%v", got, cfg.Routing.Providers["commandcode"].Models)
-	}
+	assert.Equal(t, 3, cfg.Routing.Providers["commandcode"].Models["free_coding"], "models=%v", cfg.Routing.Providers["commandcode"].Models)
+	assert.Equal(t, 1, cfg.Routing.Providers["commandcode"].Models["free-coding"], "models=%v", cfg.Routing.Providers["commandcode"].Models)
 }

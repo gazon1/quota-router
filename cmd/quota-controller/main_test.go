@@ -18,6 +18,8 @@ import (
 
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestMain keeps every test database inside a temporary directory: run() opens
@@ -38,9 +40,7 @@ func TestRunConfigError(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	code := run(context.Background(), log, new(slog.LevelVar))
-	if code != 1 {
-		t.Fatalf("run() = %d, want 1", code)
-	}
+	assert.Equal(t, 1, code)
 }
 
 func TestRunAppliesConfiguredLogLevel(t *testing.T) {
@@ -55,9 +55,7 @@ func TestRunAppliesConfiguredLogLevel(t *testing.T) {
 	log := newLogger(&buf, level)
 
 	log.Debug("before")
-	if !strings.Contains(buf.String(), "before") {
-		t.Fatal("the handler does not follow the LevelVar at all")
-	}
+	require.Contains(t, buf.String(), "before", "the handler does not follow the LevelVar at all")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
@@ -67,24 +65,16 @@ func TestRunAppliesConfiguredLogLevel(t *testing.T) {
 
 	// The level is set right after config.Load, before the listener starts.
 	waitForTCP(t, addr, 2*time.Second)
-	if level.Level() != slog.LevelError {
-		t.Fatalf("level = %s, want error from the configuration", level.Level())
-	}
+	assert.Equal(t, slog.LevelError, level.Level(), "the level from the configuration")
 
 	buf.Reset()
 	log.Debug("still dropped")
 	log.Error("kept")
 	got := buf.String()
-	if strings.Contains(got, "still dropped") {
-		t.Fatalf("the handler ignored the configured level: %q", got)
-	}
-	if !strings.Contains(got, "kept") {
-		t.Fatalf("the error record was dropped too, got %q", got)
-	}
+	assert.NotContains(t, got, "still dropped", "the handler ignored the configured level")
+	assert.Contains(t, got, "kept", "the error record was dropped too")
 	cancel()
-	if code := <-done; code != 0 {
-		t.Fatalf("run() = %d, want 0", code)
-	}
+	assert.Equal(t, 0, <-done, "run()")
 }
 
 // synchronizedBuffer is a bytes.Buffer safe for the server goroutine's writes.
@@ -122,9 +112,7 @@ func TestRunRefusesUnservedAlias(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", freeAddr(t))
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if code := run(context.Background(), log, new(slog.LevelVar)); code != 1 {
-		t.Fatalf("run() = %d, want 1 for an alias LiteLLM does not serve", code)
-	}
+	assert.Equal(t, 1, run(context.Background(), log, new(slog.LevelVar)), "run() for an alias LiteLLM does not serve")
 }
 
 // TestRunServesWhileCatalogueUnavailable keeps the design rule from #6: the two
@@ -147,18 +135,14 @@ func TestRunServesWhileCatalogueUnavailable(t *testing.T) {
 
 	waitForTCP(t, addr, 5*time.Second) // it started despite the unreachable proxy
 	cancel()
-	if code := <-done; code != 0 {
-		t.Fatalf("run() = %d, want 0 when the catalogue is merely unavailable", code)
-	}
+	assert.Equal(t, 0, <-done, "run() when the catalogue is merely unavailable")
 }
 
 // modelList serves the given answer as LiteLLM's GET /v1/models.
 func modelList(t *testing.T, status int, body string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			t.Errorf("path = %q, want /v1/models", r.URL.Path)
-		}
+		assert.Equal(t, "/v1/models", r.URL.Path)
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
@@ -168,18 +152,14 @@ func modelList(t *testing.T, status int, body string) *httptest.Server {
 
 func TestRunListenError(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	defer ln.Close()
 
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", ln.Addr().String())
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	code := run(context.Background(), log, new(slog.LevelVar))
-	if code != 1 {
-		t.Fatalf("run() = %d, want 1", code)
-	}
+	assert.Equal(t, 1, code)
 }
 
 func TestRunGracefulShutdownOnCancel(t *testing.T) {
@@ -201,11 +181,9 @@ func TestRunGracefulShutdownOnCancel(t *testing.T) {
 
 	select {
 	case code := <-done:
-		if code != 0 {
-			t.Fatalf("run() = %d, want 0", code)
-		}
+		assert.Equal(t, 0, code, "run()")
 	case <-time.After(5 * time.Second):
-		t.Fatal("run() did not exit after cancellation")
+		require.Fail(t, "run() did not exit after cancellation")
 	}
 }
 
@@ -253,7 +231,7 @@ func TestRunShutdownTimeout(t *testing.T) {
 	select {
 	case <-blocked:
 	case <-time.After(2 * time.Second):
-		t.Fatal("handler did not receive /block request")
+		require.Fail(t, "handler did not receive /block request")
 	}
 
 	cancel()
@@ -261,18 +239,16 @@ func TestRunShutdownTimeout(t *testing.T) {
 	select {
 	case code := <-done:
 		close(release)
-		if code != 1 {
-			t.Fatalf("run() = %d, want 1 on shutdown timeout", code)
-		}
+		assert.Equal(t, 1, code, "run() on shutdown timeout")
 	case <-time.After(3 * time.Second):
 		close(release)
-		t.Fatal("run() did not exit after shutdown timeout")
+		require.Fail(t, "run() did not exit after shutdown timeout")
 	}
 
 	select {
 	case <-respCh:
 	case <-time.After(2 * time.Second):
-		t.Fatal("blocked request did not complete")
+		require.Fail(t, "blocked request did not complete")
 	}
 }
 
@@ -289,13 +265,9 @@ func runWithHandler(ctx context.Context, log *slog.Logger, handler http.Handler)
 func freeAddr(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	require.NoError(t, err, "listen")
 	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
+	require.NoError(t, ln.Close(), "close listener")
 	return addr
 }
 
@@ -313,7 +285,7 @@ func waitForHTTP(t *testing.T, url string, timeout time.Duration) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("server at %s did not become ready within %s", url, timeout)
+	require.Fail(t, "the server did not become ready", "server at %s did not become ready within %s", url, timeout)
 }
 
 func waitForTCP(t *testing.T, addr string, timeout time.Duration) {
@@ -327,7 +299,7 @@ func waitForTCP(t *testing.T, addr string, timeout time.Duration) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("server at %s did not accept connections within %s", addr, timeout)
+	require.Fail(t, "the server did not accept connections", "server at %s did not accept connections within %s", addr, timeout)
 }
 
 // TestPrunerRunsWhileServing proves retention is not a startup-only step: a
@@ -338,53 +310,49 @@ func TestPrunerRunsWhileServing(t *testing.T) {
 	path := filepath.Join(dir, "test.db")
 
 	st, err := store.Open(store.Config{Path: path, BusyTimeout: 5 * time.Second}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	require.NoError(t, err, "Open")
+	require.NoError(t, st.Migrate(context.Background()), "Migrate")
 	old := time.Now().Add(-2 * time.Hour)
 	for i := 0; i < 3; i++ {
-		if err := st.SaveUsageRecord(context.Background(), store.UsageRecord{
+		require.NoError(t, st.SaveUsageRecord(context.Background(), store.UsageRecord{
 			Source: "test", Provider: "p", Provenance: store.Estimated, ObservedAt: old,
-		}); err != nil {
-			t.Fatalf("SaveUsageRecord: %v", err)
-		}
+		}), "SaveUsageRecord")
 	}
 	// Retention of one hour, so the ticker has exactly the seeded rows to remove.
 	ctx := context.Background()
 	stop := startPruner(ctx, slog.New(slog.NewTextHandler(io.Discard, nil)), st, config.Retention{UsageRecords: time.Hour}, 20*time.Millisecond)
 
 	// The ticker must delete the expired rows without touching anything else.
+	pruned := false
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if n, err := countUsageRows(path); err == nil && n == 0 {
+			pruned = true
 			break
 		}
 		if time.Now().After(deadline) {
-			stop()
-			st.Close()
-			t.Fatal("expired usage rows survived 3s: the pruner never ran")
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// A fresh row must survive the same ticker.
-	if err := st.SaveUsageRecord(ctx, store.UsageRecord{
-		Source: "test", Provider: "p", Provenance: store.Estimated, ObservedAt: time.Now(),
-	}); err != nil {
-		t.Fatalf("SaveUsageRecord: %v", err)
-	}
-	time.Sleep(60 * time.Millisecond)
-	if n, err := countUsageRows(path); err != nil || n != 1 {
+	if !pruned {
 		stop()
 		st.Close()
-		t.Fatalf("rows = %d (err %v) after the tick, want the 1 fresh row", n, err)
+		require.Fail(t, "expired usage rows survived 3s: the pruner never ran")
+	}
+	// A fresh row must survive the same ticker.
+	require.NoError(t, st.SaveUsageRecord(ctx, store.UsageRecord{
+		Source: "test", Provider: "p", Provenance: store.Estimated, ObservedAt: time.Now(),
+	}), "SaveUsageRecord")
+	time.Sleep(60 * time.Millisecond)
+	n, err := countUsageRows(path)
+	if err != nil || n != 1 {
+		stop()
+		st.Close()
+		require.Fail(t, "unexpected row count after the tick", "rows = %d (err %v) after the tick, want the 1 fresh row", n, err)
 	}
 	stop() // must wait for an in-flight tick before the store closes
-	if err := st.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
+	require.NoError(t, st.Close(), "Close")
 }
 
 // countUsageRows reads the usage table through its own connection, so the test
@@ -405,17 +373,11 @@ func countUsageRows(path string) (int, error) {
 // TestRetentionIsFatalOnlyWhenFull pins the policy: a transient cleanup failure
 // must not stop a controller that can otherwise serve, but a full database must.
 func TestRetentionIsFatalOnlyWhenFull(t *testing.T) {
-	if !retentionBlocksStartup(store.ErrFull) {
-		t.Error("a full database must block startup: writes cannot grow")
-	}
+	assert.True(t, retentionBlocksStartup(store.ErrFull), "a full database must block startup: writes cannot grow")
 	for _, err := range []error{store.ErrBusy, store.ErrIO, errTest} {
-		if retentionBlocksStartup(err) {
-			t.Errorf("%v blocks startup; it is transient and the controller can serve", err)
-		}
+		assert.False(t, retentionBlocksStartup(err), "%v blocks startup; it is transient and the controller can serve", err)
 	}
-	if retentionBlocksStartup(nil) {
-		t.Error("nil blocks startup")
-	}
+	assert.False(t, retentionBlocksStartup(nil), "nil blocks startup")
 }
 
 var errTest = errors.New("wrapped transient failure")
@@ -450,44 +412,41 @@ func TestRunPollsConfiguredProvider(t *testing.T) {
 
 	// The first poll is immediate, so the state must appear without waiting for
 	// an interval to elapse.
+	var attempt, success time.Time
+	var pollErr error
+	polled := false
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		attempt, success, err := pollState(path, "minimax")
-		if err == nil && !attempt.IsZero() && !success.IsZero() {
+		attempt, success, pollErr = pollState(path, "minimax")
+		if pollErr == nil && !attempt.IsZero() && !success.IsZero() {
+			polled = true
 			break
 		}
 		if time.Now().After(deadline) {
-			cancel()
-			<-done
-			t.Fatalf("poll state = %s/%s (err %v), want both timestamps", attempt, success, err)
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if !polled {
+		cancel()
+		<-done
+		require.Fail(t, "the poll state was not recorded", "poll state = %s/%s (err %v), want both timestamps", attempt, success, pollErr)
 	}
 
 	cancel()
 	select {
 	case code := <-done:
-		if code != 0 {
-			t.Fatalf("run() = %d, want 0", code)
-		}
+		assert.Equal(t, 0, code, "run()")
 	case <-time.After(5 * time.Second):
-		t.Fatal("run() did not exit: the poller outlived the shutdown")
+		require.Fail(t, "run() did not exit: the poller outlived the shutdown")
 	}
 
 	// The persisted observation is quota the provider reported, with windows.
 	snapshots, err := latestSnapshots(path)
-	if err != nil {
-		t.Fatalf("read snapshots: %v", err)
-	}
-	if len(snapshots) != 1 {
-		t.Fatalf("snapshots = %d, want 1 for one provider", len(snapshots))
-	}
-	if got := snapshots[0].state; got != "AVAILABLE" {
-		t.Fatalf("state = %q, want AVAILABLE from the reported 80%% windows", got)
-	}
-	if got := snapshots[0].windows; got != 2 {
-		t.Fatalf("windows = %d, want the 5h and weekly windows persisted", got)
-	}
+	require.NoError(t, err, "read snapshots")
+	require.Len(t, snapshots, 1, "one snapshot for one provider")
+	assert.Equal(t, "AVAILABLE", snapshots[0].state, "from the reported 80% windows")
+	assert.Equal(t, 2, snapshots[0].windows, "the 5h and weekly windows persisted")
 }
 
 // An unset api_key would otherwise start a controller that polls nothing.
@@ -505,25 +464,17 @@ func TestPollingTargetsRejectsUnsupportedAndIncomplete(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := pollingTargets(tc.cfg)
-			if err == nil {
-				t.Fatalf("expected a rejection naming %q", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error %q missing %q", err, tc.want)
-			}
+			require.Error(t, err, "expected a rejection naming %q", tc.want)
+			assert.ErrorContains(t, err, tc.want)
 		})
 	}
 
-	if _, err := pollingTargets(config.Config{}); err != nil {
-		t.Fatalf("an unconfigured controller must start idle, got %v", err)
-	}
+	_, err := pollingTargets(config.Config{})
+	require.NoError(t, err, "an unconfigured controller must start idle")
 	targets, err := pollingTargets(config.Config{Providers: map[string]config.Provider{"minimax": full}})
-	if err != nil {
-		t.Fatalf("pollingTargets: %v", err)
-	}
-	if len(targets) != 1 || targets[0].Name != "minimax" {
-		t.Fatalf("targets = %+v, want one named minimax", targets)
-	}
+	require.NoError(t, err, "pollingTargets")
+	require.Len(t, targets, 1)
+	assert.Equal(t, "minimax", targets[0].Name)
 }
 
 // pollState reads the poll bookkeeping through its own connection, so the test

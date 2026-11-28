@@ -96,12 +96,11 @@ func filterHealth(cs []candidate, state SelectState) ([]candidate, []RejectedCan
 			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health unknown", Transient: true})
 			continue
 		}
-		if h.ObservedAt.IsZero() {
+		switch quota.ClassifyHealth(h.ObservedAt, state.Now, state.HealthMaxAge) {
+		case quota.HealthNotObserved:
 			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health not observed", Transient: true})
 			continue
-		}
-		age := state.Now.Sub(h.ObservedAt.UTC())
-		if age < 0 || age > state.HealthMaxAge {
+		case quota.HealthStale:
 			elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "provider_health", Reason: "provider health stale", Transient: true})
 			continue
 		}

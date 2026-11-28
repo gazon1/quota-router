@@ -1,6 +1,10 @@
 package settings
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
 
 func TestCatalogueCandidatesConservative(t *testing.T) {
 	c := Catalogue{ModelAliases: map[string]Model{
@@ -10,9 +14,8 @@ func TestCatalogueCandidatesConservative(t *testing.T) {
 		"off": {Model: "p/o", Enabled: boolPtr(false), Capabilities: Capabilities{Streaming: CapabilitySupported}},
 	}}
 	got := c.Candidates(Requirements{Streaming: true, Tasks: []string{"coding"}})
-	if len(got) != 1 || got[0] != "ok" {
-		t.Fatalf("Candidates = %v, want [ok]", got)
-	}
+	assert.Len(t, got, 1)
+	assert.Equal(t, "ok", got[0])
 }
 
 func TestSatisfiedByIsConservative(t *testing.T) {
@@ -20,14 +23,10 @@ func TestSatisfiedByIsConservative(t *testing.T) {
 	for _, req := range []Requirements{
 		{Streaming: true}, {ToolCalling: true}, {StructuredOutput: true}, {Tasks: []string{"coding"}},
 	} {
-		if req.SatisfiedBy(unknown) {
-			t.Fatalf("%+v was satisfied by a model that never claimed it", req)
-		}
+		assert.False(t, req.SatisfiedBy(unknown), "%+v was satisfied by a model that never claimed it", req)
 	}
 	// Enabled is opt-out, so a model without the field is usable.
-	if !unknown.IsEnabled() {
-		t.Error("a model without the enabled field must be enabled")
-	}
+	assert.True(t, unknown.IsEnabled(), "a model without the enabled field must be enabled")
 }
 
 func boolPtr(v bool) *bool { return &v }

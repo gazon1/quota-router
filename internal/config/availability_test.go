@@ -2,9 +2,11 @@ package config
 
 import (
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUnavailableValidation(t *testing.T) {
@@ -84,20 +86,12 @@ func TestUnavailableValidation(t *testing.T) {
 
 			_, err := Load()
 			if tt.want == "" {
-				if err != nil {
-					t.Fatalf("Load() error = %v, want none", err)
-				}
+				require.NoError(t, err)
 				return
 			}
-			if err == nil {
-				t.Fatal("Load() error = nil, want validation error")
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error = %v, want one naming %q", err, tt.want)
-			}
-			if !strings.Contains(err.Error(), "litellm.model_aliases.free-coding.unavailable") {
-				t.Fatalf("error = %v, want it to name the unavailable setting path", err)
-			}
+			require.Error(t, err, "Load() error = nil, want validation error")
+			assert.ErrorContains(t, err, tt.want)
+			assert.ErrorContains(t, err, "litellm.model_aliases.free-coding.unavailable", "want it to name the unavailable setting path")
 		})
 	}
 }
@@ -122,29 +116,25 @@ litellm:
             end: "14:30"
 `))
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
+	require.NoError(t, err)
 	u := cfg.LiteLLM.ModelAliases["free-coding"].Unavailable
-	if u == nil || u.Timezone != "Asia/Yerevan" || len(u.Windows) != 2 {
-		t.Fatalf("Unavailable = %+v, want the configured zone and two windows", u)
-	}
-	if w := u.Windows[0]; w.Days[1] != "sunday" || w.Start != "02:00" || w.End != "06:00" {
-		t.Fatalf("first window = %+v", w)
-	}
+	require.NotNil(t, u)
+	assert.Equal(t, "Asia/Yerevan", u.Timezone)
+	assert.Len(t, u.Windows, 2)
+	w := u.Windows[0]
+	require.Len(t, w.Days, 2)
+	assert.Equal(t, "sunday", w.Days[1])
+	assert.Equal(t, "02:00", w.Start)
+	assert.Equal(t, "06:00", w.End)
 	// The schedule survives the conversion to the runtime catalogue, where
 	// routing reads it: Friday 16:00 in Yerevan is outside both windows, and
 	// Monday 14:00 is inside one.
 	runtime := cfg.Catalogue().ModelAliases["free-coding"].Unavailable
-	if runtime == nil {
-		t.Fatal("the runtime catalogue lost the unavailable schedule")
-	}
-	if _, ok := runtime.WindowAt(time.Date(2026, time.November, 27, 12, 0, 0, 0, time.UTC)); ok {
-		t.Fatal("friday 16:00 Yerevan must not be restricted")
-	}
-	if _, ok := runtime.WindowAt(time.Date(2026, time.December, 7, 10, 0, 0, 0, time.UTC)); !ok {
-		t.Fatal("monday 14:00 Yerevan (12:00-14:30) must be restricted")
-	}
+	require.NotNil(t, runtime, "the runtime catalogue lost the unavailable schedule")
+	_, ok := runtime.WindowAt(time.Date(2026, time.November, 27, 12, 0, 0, 0, time.UTC))
+	assert.False(t, ok, "friday 16:00 Yerevan must not be restricted")
+	_, ok = runtime.WindowAt(time.Date(2026, time.December, 7, 10, 0, 0, 0, time.UTC))
+	assert.True(t, ok, "monday 14:00 Yerevan (12:00-14:30) must be restricted")
 }
 
 func TestLoadRejectsInvalidUnavailable(t *testing.T) {
@@ -161,9 +151,8 @@ litellm:
             end: "02:00"
 `))
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "litellm.model_aliases.free-coding.unavailable") {
-		t.Fatalf("error = %v, want it to name the unavailable setting path", err)
-	}
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "litellm.model_aliases.free-coding.unavailable", "want it to name the unavailable setting path")
 }
 
 // The documented "file only" claim, asserted: an attempt to encode the nested
@@ -172,9 +161,9 @@ func TestLoadRejectsEnvEncodedWindows(t *testing.T) {
 	cleanEnv(t)
 	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST__MODEL", "minimax/MiniMax-M2.7")
 	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST__UNAVAILABLE__WINDOWS", "saturday 02:00-06:00")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "unavailable.windows") {
-		t.Fatalf("error = %v, want it to reject the environment-encoded window list", err)
-	}
+	_, err := Load()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "unavailable.windows", "want it to reject the environment-encoded window list")
 }
 
 // The setting goes through the existing koanf path, so a misspelled field inside
@@ -194,9 +183,8 @@ litellm:
             end: "02:00"
 `))
 	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "invalid keys: timezonee") {
-		t.Fatalf("error = %v, want the unknown setting rejected", err)
-	}
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "invalid keys: timezonee", "want the unknown setting rejected")
 }
 
 // A window ending at 23:59 does not cover 23:59 — end is exclusive — so it is not

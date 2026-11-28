@@ -2,9 +2,11 @@ package turn
 
 import (
 	"encoding/json"
-	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDecideFailsClosedForEveryInterruptionPoint(t *testing.T) {
@@ -25,9 +27,7 @@ func TestDecideFailsClosedForEveryInterruptionPoint(t *testing.T) {
 		{Stage(""), Surface},
 	}
 	for _, tc := range tests {
-		if got := Decide(tc.stage); got != tc.want {
-			t.Errorf("Decide(%q) = %s, want %s", tc.stage, got, tc.want)
-		}
+		assert.Equal(t, tc.want, Decide(tc.stage), "Decide(%q)", tc.stage)
 	}
 }
 
@@ -44,31 +44,19 @@ func TestCheckpointCarriesExecutedToolsInsteadOfReplayingThem(t *testing.T) {
 			PlannedResult("gh pr create"),
 		},
 	}
-	if err := cp.Validate(); err != nil {
-		t.Fatalf("Validate() = %v, want nil", err)
-	}
-	if got := cp.Executed(); got != 2 {
-		t.Fatalf("Executed() = %d, want 2: completed and failed calls both ran", got)
-	}
+	require.NoError(t, cp.Validate())
+	assert.Equal(t, 2, cp.Executed(), "completed and failed calls both ran")
 	// A failed call is still a second side effect if replayed, so the attempt
 	// that had one may only surface.
-	if got := Decide(AfterToolExecution); got != Surface {
-		t.Fatalf("Decide(AFTER_TOOL_EXECUTION) = %s, want SURFACE", got)
-	}
+	assert.Equal(t, Surface, Decide(AfterToolExecution))
 
 	// Recovery: the checkpoint is what crosses the boundary, so it must survive
 	// serialization intact, every field included.
 	raw, err := json.Marshal(cp)
-	if err != nil {
-		t.Fatalf("marshal checkpoint: %v", err)
-	}
+	require.NoError(t, err, "marshal checkpoint")
 	var back Checkpoint
-	if err := json.Unmarshal(raw, &back); err != nil {
-		t.Fatalf("unmarshal checkpoint: %v", err)
-	}
-	if !reflect.DeepEqual(back, cp) {
-		t.Fatalf("checkpoint did not survive the boundary:\n got %+v\nwant %+v", back, cp)
-	}
+	require.NoError(t, json.Unmarshal(raw, &back), "unmarshal checkpoint")
+	assert.Equal(t, cp, back, "the checkpoint did not survive the boundary")
 }
 
 func TestCheckpointRefusesARawErrorOrAWholeFile(t *testing.T) {
@@ -95,9 +83,9 @@ func TestCheckpointRefusesARawErrorOrAWholeFile(t *testing.T) {
 		}}},
 	}
 	for _, tc := range tests {
-		if err := tc.cp.Validate(); err == nil {
-			t.Errorf("%s: Validate() = nil, want an error", tc.name)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Error(t, tc.cp.Validate())
+		})
 	}
 }
 
@@ -105,36 +93,26 @@ func TestCompletedResultIsASummaryNotADump(t *testing.T) {
 	// 4096 runes is the cap; anything longer is a file, not a result.
 	dump := strings.Repeat("x", maxFieldRunes+1)
 	got := CompletedResult("read file", dump)
-	if n := len([]rune(got.Result)); n > maxFieldRunes {
-		t.Fatalf("CompletedResult kept %d runes, want at most %d", n, maxFieldRunes)
-	}
+	assert.LessOrEqual(t, len([]rune(got.Result)), maxFieldRunes, "CompletedResult kept too many runes")
 	cp := Checkpoint{ToolResults: []ToolResult{got}}
-	if err := cp.Validate(); err != nil {
-		t.Fatalf("Validate() rejected a truncated result: %v", err)
-	}
+	require.NoError(t, cp.Validate(), "Validate() rejected a truncated result")
 
 	// A multi-byte character must not be cut in half by the cap.
 	wide := strings.Repeat("ж", maxFieldRunes+10)
 	got = CompletedResult("read file", wide)
-	if !strings.HasSuffix(got.Result, "…[truncated]") || strings.Contains(got.Result, "\uFFFD") {
-		t.Fatalf("CompletedResult cut a character in half: %q", got.Result[maxFieldRunes-2:])
-	}
+	assert.True(t,
+		strings.HasSuffix(got.Result, "…[truncated]") && !strings.Contains(got.Result, "�"),
+		"CompletedResult cut a character in half: %q", got.Result[maxFieldRunes-2:])
 	// Exactly at the cap is allowed and untouched.
 	atCap := CompletedResult("read file", strings.Repeat("y", maxFieldRunes))
-	if atCap.Result != strings.Repeat("y", maxFieldRunes) {
-		t.Fatal("CompletedResult truncated a result that was exactly within the cap")
-	}
+	assert.Equal(t, strings.Repeat("y", maxFieldRunes), atCap.Result, "CompletedResult truncated a result that was exactly within the cap")
 }
 
 func TestFailedResultReplacesAnUndeclaredFailure(t *testing.T) {
 	// Same discipline as quota.Failed: a caller can pass a raw error string, so
 	// anything undeclared becomes a safe code instead of being stored.
-	if got := FailedResult("fetch quota", ToolFailure("sk-live-abc")); got.Result != string(ToolErrored) {
-		t.Fatalf("FailedResult stored %q, want %q", got.Result, ToolErrored)
-	}
-	if got := FailedResult("fetch quota", ToolDenied); got.Result != string(ToolDenied) {
-		t.Fatalf("FailedResult replaced a declared failure: %q", got.Result)
-	}
+	assert.Equal(t, string(ToolErrored), FailedResult("fetch quota", ToolFailure("sk-live-abc")).Result)
+	assert.Equal(t, string(ToolDenied), FailedResult("fetch quota", ToolDenied).Result, "a declared failure was replaced")
 }
 
 func TestLargeContextMigrationPaysForItsRebuild(t *testing.T) {
@@ -145,15 +123,11 @@ func TestLargeContextMigrationPaysForItsRebuild(t *testing.T) {
 	sameTurn := "minimax/MiniMax-M2"
 
 	full := Migration{Model: sameTurn, Rebuild: Rebuild{Kind: FullTranscript, InputTokens: 240_000}, AuthorizedBy: "agent"}
-	if full.Allowed(budget) {
-		t.Fatal("a 240k-token full replay was allowed within a 100k budget")
-	}
+	assert.False(t, full.Allowed(budget), "a 240k-token full replay was allowed within a 100k budget")
 	// A checkpoint rebuild of the same turn fits, so the refusal above is about
 	// what the rebuild costs, not about migration being unavailable at all.
 	compact := Migration{Model: sameTurn, Rebuild: Rebuild{Kind: FromCheckpoint, InputTokens: 6_000}}
-	if !compact.Allowed(budget) {
-		t.Fatal("the checkpoint rebuild of the same turn was refused")
-	}
+	assert.True(t, compact.Allowed(budget), "the checkpoint rebuild of the same turn was refused")
 
 	// The estimate now lives inside the rebuild it prices, so it cannot be
 	// lent to a different one by a field mix-up. Whether the number is right is
@@ -165,18 +139,12 @@ func TestFullReplayNeedsAnExplicitDecision(t *testing.T) {
 	// decision, not something that happens by filling in a struct.
 	budget := Budget{MaxInputTokens: 100_000}
 	replay := Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FullTranscript, InputTokens: 90_000}}
-	if replay.Allowed(budget) {
-		t.Fatal("a full replay without a named decision was allowed")
-	}
+	assert.False(t, replay.Allowed(budget), "a full replay without a named decision was allowed")
 	// Whitespace is not a name: it authorizes nothing.
 	replay.AuthorizedBy = "   "
-	if replay.Allowed(budget) {
-		t.Fatal("a blank authorization was accepted")
-	}
+	assert.False(t, replay.Allowed(budget), "a blank authorization was accepted")
 	replay.AuthorizedBy = "policy: owner-approved-large-context"
-	if !replay.Allowed(budget) {
-		t.Fatal("a budgeted, explicitly authorized full replay was refused")
-	}
+	assert.True(t, replay.Allowed(budget), "a budgeted, explicitly authorized full replay was refused")
 }
 
 func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
@@ -201,9 +169,9 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		{"goal is a whole file", Checkpoint{Goal: strings.Repeat("line\n", maxFieldRunes)}},
 	}
 	for _, tc := range tests {
-		if err := tc.cp.Validate(); err == nil {
-			t.Errorf("%s: Validate() = nil, want an error", tc.name)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Error(t, tc.cp.Validate())
+		})
 	}
 
 	// A plain reference and a plain summary stay allowed: the guard is narrow on
@@ -218,9 +186,7 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 			CompletedResult("go test ./...", "81 passed"),
 		},
 	}
-	if err := ok.Validate(); err != nil {
-		t.Fatalf("Validate() rejected a legitimate checkpoint: %v", err)
-	}
+	require.NoError(t, ok.Validate(), "Validate() rejected a legitimate checkpoint")
 
 	// Plain prose must survive, including long ordinary words after "Bearer" and
 	// headers or parameters with no value: a guard that rejects everything is a
@@ -231,9 +197,7 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		"Bearer none, request authentication was skipped",
 		"password= empty is not a credential",
 	} {
-		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
-			t.Fatalf("Validate() rejected plain prose %q: %v", prose, err)
-		}
+		assert.NoError(t, (Checkpoint{Goal: prose}).Validate(), "Validate() rejected plain prose %q", prose)
 	}
 	// The RFC spelling fails closed: a summary that needs to mention it rephrases
 	// ("bearer auth is handled by middleware") instead of quoting it, and that
@@ -243,15 +207,11 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		"Bearer credentials are required for this endpoint",
 		"request failed: Bearer abcdefghijklmnop was rejected",
 	} {
-		if err := (Checkpoint{Goal: quoted}).Validate(); err == nil {
-			t.Errorf("Validate() let %q through", quoted)
-		}
+		assert.Error(t, (Checkpoint{Goal: quoted}).Validate(), "Validate() let %q through", quoted)
 	}
 	// The scheme is case-insensitive, so lowercase does not escape either.
 	for _, quoted := range []string{"request failed: bearer abcdefghijklmnop was rejected", "bearer sk-live-1", "first Bearer abc; second Bearer xyz"} {
-		if err := (Checkpoint{Goal: quoted}).Validate(); err == nil {
-			t.Errorf("Validate() let lowercase %q through", quoted)
-		}
+		assert.Error(t, (Checkpoint{Goal: quoted}).Validate(), "Validate() let lowercase %q through", quoted)
 	}
 	// The documented cost: the word is reserved, so prose that needs it is
 	// rephrased ("the owner of this report", "may be absent"). A placeholder is
@@ -261,13 +221,9 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		"auth may be absent from config",
 		"auth is handled by middleware",
 	} {
-		if err := (Checkpoint{Goal: prose}).Validate(); err != nil {
-			t.Errorf("Validate() rejected prose %q: %v", prose, err)
-		}
+		assert.NoError(t, (Checkpoint{Goal: prose}).Validate(), "Validate() rejected prose %q", prose)
 	}
-	if err := (Checkpoint{Goal: "the bearer of this report"}).Validate(); err == nil {
-		t.Fatal("Validate() let a value after the reserved word through")
-	}
+	assert.Error(t, (Checkpoint{Goal: "the bearer of this report"}).Validate(), "Validate() let a value after the reserved word through")
 
 	// But a real token, a bare JWT, and a credentialed URL in prose are caught.
 	for _, raw := range []string{
@@ -289,9 +245,7 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		"request failed: bearer\tsk-live-abcdef123",
 		"bearer\nsk-live-1",
 	} {
-		if err := (Checkpoint{Goal: raw}).Validate(); err == nil {
-			t.Errorf("Validate() let %q through", raw)
-		}
+		assert.Error(t, (Checkpoint{Goal: raw}).Validate(), "Validate() let %q through", raw)
 	}
 
 	// Ordinary values that only look suspicious stay legitimate: a token count,
@@ -302,9 +256,7 @@ func TestValidateGuardsEveryFieldNotJustToolResults(t *testing.T) {
 		"https://github.com/gazon1/quota-router/pull/58",
 		"migration completed in 3.2s",
 	} {
-		if err := (Checkpoint{Goal: fine}).Validate(); err != nil {
-			t.Errorf("Validate() rejected a legitimate value %q: %v", fine, err)
-		}
+		assert.NoError(t, (Checkpoint{Goal: fine}).Validate(), "Validate() rejected a legitimate value %q", fine)
 	}
 }
 
@@ -325,12 +277,12 @@ func TestMigrationRefusedWithoutAnAccountableCost(t *testing.T) {
 		{"finite tokens, but nobody set a budget", Migration{Model: "minimax/MiniMax-M2", Rebuild: Rebuild{Kind: FromCheckpoint, InputTokens: 4_000}}, false},
 	}
 	for _, tc := range tests {
-		b := budget
-		if tc.name == "finite tokens, but nobody set a budget" {
-			b = Budget{}
-		}
-		if got := tc.m.Allowed(b); got != tc.want {
-			t.Errorf("%s: Allowed() = %v, want %v", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			b := budget
+			if tc.name == "finite tokens, but nobody set a budget" {
+				b = Budget{}
+			}
+			assert.Equal(t, tc.want, tc.m.Allowed(b))
+		})
 	}
 }

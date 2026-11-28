@@ -11,35 +11,28 @@ package agent_test
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/gazon1/quota-router/internal/agent"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestUsageFieldsOnPinnedLiteLLM proves Reply.Attempt (and therefore Report)
 // finds the token counts in a response the pinned image actually produced.
 func TestUsageFieldsOnPinnedLiteLLM(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("testdata", "litellm_v1.110.0_chat_completion.json"))
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
+	require.NoError(t, err, "read fixture")
 	// The bytes must come from the proxy, not from this test's own expectation:
 	// a fixture rewritten by hand would quietly stop proving anything.
-	if !strings.Contains(string(raw), `"object":"chat.completion"`) {
-		t.Fatal("fixture is not a LiteLLM chat completion")
-	}
+	assert.Contains(t, string(raw), `"object":"chat.completion"`, "fixture is not a LiteLLM chat completion")
 
 	usage := agent.ParseUsage(raw)
-	if usage == nil {
-		t.Fatal("usage object not found: prompt_tokens/completion_tokens moved")
-	}
-	if usage.InputTokens == nil || *usage.InputTokens != 11 {
-		t.Fatalf("input tokens = %v, want 11 (prompt_tokens)", usage.InputTokens)
-	}
-	if usage.OutputTokens == nil || *usage.OutputTokens != 7 {
-		t.Fatalf("output tokens = %v, want 7 (completion_tokens)", usage.OutputTokens)
-	}
+	require.NotNil(t, usage, "usage object not found: prompt_tokens/completion_tokens moved")
+	require.NotNil(t, usage.InputTokens)
+	assert.Equal(t, 11, *usage.InputTokens, "want 11 (prompt_tokens)")
+	require.NotNil(t, usage.OutputTokens)
+	assert.Equal(t, 7, *usage.OutputTokens, "want 7 (completion_tokens)")
 }
 
 // TestUsageFieldsAbsentIsNotZero keeps "the proxy reported no usage" distinct
@@ -51,15 +44,15 @@ func TestUsageFieldsAbsentIsNotZero(t *testing.T) {
 		`{"id":"x","usage":{}}`,
 		`not json at all`,
 	} {
-		if usage := agent.ParseUsage([]byte(body)); usage != nil {
-			if usage.InputTokens != nil || usage.OutputTokens != nil {
-				t.Fatalf("body %q produced a count instead of a missing one: %+v", body, usage)
-			}
+		usage := agent.ParseUsage([]byte(body))
+		if usage != nil {
+			assert.Nil(t, usage.InputTokens, "body %q produced a count instead of a missing one", body)
+			assert.Nil(t, usage.OutputTokens, "body %q produced a count instead of a missing one", body)
 		}
 	}
 	// A reported zero is a reported value, not a missing one.
 	usage := agent.ParseUsage([]byte(`{"usage":{"prompt_tokens":0,"completion_tokens":0}}`))
-	if usage == nil || usage.InputTokens == nil || *usage.InputTokens != 0 {
-		t.Fatalf("a reported zero was dropped: %+v", usage)
-	}
+	require.NotNil(t, usage, "a reported zero was dropped")
+	require.NotNil(t, usage.InputTokens)
+	assert.Equal(t, 0, *usage.InputTokens, "a reported zero was dropped")
 }

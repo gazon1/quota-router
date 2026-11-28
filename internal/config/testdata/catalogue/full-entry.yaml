@@ -1,0 +1,15 @@
+litellm:
+  base_url: http://127.0.0.1:4000
+  model_aliases:
+    fast: minimax/MiniMax-M2.7
+    coding:
+      model: commandcode/stealth/glyph-cluster:free
+      enabled: false
+      context_limit: 256000
+      capabilities:
+        streaming: supported
+        tool_calling: supported
+        structured_output: unsupported
+      tasks: [coding]
+    coding2:
+      model: commandcode/stealth/glyph-cluster:free
