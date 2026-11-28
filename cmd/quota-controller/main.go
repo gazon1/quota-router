@@ -22,6 +22,18 @@ import (
 )
 
 func main() {
+	// A subcommand is not a configuration error, so it is dispatched before the
+	// logger and the config load: `init-config` is how an operator creates the
+	// file the daemon later reads.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "init-config":
+			os.Exit(initConfig(os.Args[2:], os.Stdout, os.Stderr))
+		case "-h", "--help", "help":
+			fmt.Fprint(os.Stdout, helpText())
+			os.Exit(0)
+		}
+	}
 	level := new(slog.LevelVar)
 	os.Exit(run(context.Background(), newLogger(os.Stdout, level), level))
 }

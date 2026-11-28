@@ -926,3 +926,73 @@ func TestSelectWithoutCandidatePinsNothing(t *testing.T) {
 }
 
 var _ = bytes.NewBuffer
+
+// A configured unavailability window reaches the HTTP boundary like any other
+// hard constraint: every route inside one is the existing 409, and an override
+// naming one is rejected rather than honored.
+func TestSelectHonorsUnavailableWindow(t *testing.T) {
+	window := func() *config.Unavailable {
+		// The store stamps observations with time.Now(), so this test cannot pass
+		// an instant the way the selector tests do. Two windows cover the whole
+		// day: end is exclusive, so 00:00-23:59 alone leaves 23:59:00-23:59:59
+		// eligible and the assertion would fail for one minute a day.
+		return &config.Unavailable{
+			Timezone: "UTC",
+			Windows: []config.UnavailableWindow{
+				{Days: []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}, Start: "00:00", End: "23:59"},
+				{Days: []string{"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}, Start: "23:59", End: "00:00"},
+			},
+		}
+	}
+	cfg := testRoutingConfig()
+	for alias, m := range cfg.LiteLLM.ModelAliases {
+		m.Unavailable = window()
+		cfg.LiteLLM.ModelAliases[alias] = m
+	}
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+	srv.decisions = st
+	srv.selector = routing.Selector{Config: cfg}
+
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409 while every route is in its window", w.Code, w.Body.String())
+	}
+	var body struct {
+		Decision routing.Decision `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if r, ok := findRejectedAlias(body.Decision, "cc-coding"); !ok || r.Stage != "model_availability" {
+		t.Fatalf("rejection = %+v ok=%v, want a model_availability explanation", r, ok)
+	}
+
+	// The override names an otherwise valid alias and must still be refused.
+	w = postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{},"override":{"model_alias":"mm-fast"}}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("override status=%d body=%s, want 409", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Decision.OverrideApplied {
+		t.Fatal("override was applied to a model inside its unavailable window")
+	}
+	if len(st.affinity) != 0 {
+		t.Fatalf("affinity = %+v, want nothing pinned without a route", st.affinity)
+	}
+}
+
+func findRejectedAlias(d routing.Decision, alias string) (routing.RejectedCandidate, bool) {
+	for _, r := range d.Rejected {
+		if r.Alias == alias {
+			return r, true
+		}
+	}
+	return routing.RejectedCandidate{}, false
+}

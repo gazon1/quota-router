@@ -165,6 +165,14 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	d.addEliminations(&candidates, elim)
 	d.recordStage("capabilities", candidates, elim, "")
 
+	// A configured local-time window is a hard constraint like a capability, so
+	// it is applied here — before the pin is resolved and before any preference
+	// ranking. Affinity and manual override both read this candidate set, so
+	// neither can reach a model inside an active window.
+	candidates, elim = filterAvailability(candidates, state)
+	d.addEliminations(&candidates, elim)
+	d.recordStage("model_availability", candidates, elim, "")
+
 	// The pin is resolved here, after the durable stages and before the
 	// transient ones. A route excluded only by a missing, stale or temporarily
 	// cooled observation is still the session's route, and this is the point
@@ -409,6 +417,32 @@ func capabilityReason(req config.Requirements, m config.Model) string {
 		return "capability requirements not satisfied"
 	}
 	return "missing required capabilities: " + strings.Join(missing, ", ")
+}
+
+// filterAvailability excludes a model inside its configured recurring
+// unavailable window. The window is the operator's explicit "do not send traffic
+// here now", evaluated at the decision's own instant, so a model is ineligible
+// for exactly as long as it holds and needs no background job to come back: the
+// next decision reads the clock again.
+//
+// The rejection is durable for affinity's purposes. Holding a session on a model
+// that policy says must not receive traffic would send the whole conversation
+// into the very window the schedule exists to avoid.
+func filterAvailability(cs []candidate, state SelectState) ([]candidate, []RejectedCandidate) {
+	var elim []RejectedCandidate
+	for _, c := range cs {
+		w, ok := c.Model.Unavailable.WindowAt(state.Now)
+		if !ok {
+			continue
+		}
+		elim = append(elim, RejectedCandidate{
+			Alias:    c.Alias,
+			Provider: c.Provider,
+			Stage:    "model_availability",
+			Reason:   fmt.Sprintf("model unavailable by configured schedule (%s %s): %s", c.Model.Unavailable.Timezone, w, state.Now.UTC().Format(time.RFC3339)),
+		})
+	}
+	return cs, elim
 }
 
 func filterHealth(cs []candidate, cfg config.Config, state SelectState) ([]candidate, []RejectedCandidate) {
@@ -930,6 +964,14 @@ func configFingerprint(cfg config.Config) string {
 		tasks := append([]string(nil), m.Tasks...)
 		sort.Strings(tasks)
 		write("tasks", strings.Join(tasks, ","))
+		if u := m.Unavailable; u != nil {
+			write("unavailable", u.Timezone, fmt.Sprintf("%d", len(u.Windows)))
+			for _, w := range u.Windows {
+				days := append([]string(nil), w.Days...)
+				sort.Strings(days)
+				write("window", strings.Join(days, ","), w.Start, w.End)
+			}
+		}
 	}
 
 	providerKeys := make([]string, 0, len(cfg.Routing.Providers))

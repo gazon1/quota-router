@@ -35,8 +35,10 @@ requests. The override is:
 
 - **Explicit** — it appears in the request and must be recorded in the decision.
 - **Bounded by hard constraints** — it cannot silently bypass capability
-  constraints, select an unconfigured/disabled model, or bypass quota/health
-  policy. Selection (#17) rejects an override target that is ineligible.
+  constraints, select an unconfigured/disabled model, bypass quota/health
+  policy, or reach a model inside its configured `unavailable` window
+  ([schedule](./model-catalogue.md#recurring-unavailability-windows)).
+  Selection (#17) rejects an override target that is ineligible.
 - **Auditable** — decision explanations include that an override was requested
   and whether it was applied or rejected.
 
