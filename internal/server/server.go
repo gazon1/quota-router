@@ -27,12 +27,16 @@ type DecisionStore interface {
 	LatestRoutingDecisions(ctx context.Context, limit int) ([]store.RoutingDecisionRecord, error)
 }
 
-// StateStore reads the latest quota and provider health observations and the
-// session-to-route pins. Affinity lives here rather than behind a second seam
-// because it is routing state the selection path reads and writes, like quota.
+// StateStore reads the latest persisted poll cycle per provider — snapshot, health
+// and freshness anchor — plus the session-to-route pins. Affinity lives here rather
+// than behind a second seam because it is routing state the selection path reads
+// and writes, like quota.
 type StateStore interface {
-	LatestQuotaSnapshot(ctx context.Context) ([]store.QuotaSnapshot, error)
-	LatestProviderHealth(ctx context.Context) ([]store.HealthRecord, error)
+	// PollCycles returns the latest poll cycle per provider — snapshot, health
+	// and freshness anchor — read in one transaction, for callers that read
+	// several providers at once. Same zero value as an absent cycle: readers fail
+	// closed on it.
+	PollCycles(ctx context.Context) (map[string]store.PollCycle, error)
 	SessionAffinity(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error)
 	SaveSessionAffinity(ctx context.Context, a store.SessionAffinity) error
 	DeleteSessionAffinity(ctx context.Context, sessionID string) error
@@ -322,19 +326,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
 		return
 	}
-	snaps, err := s.store.LatestQuotaSnapshot(r.Context())
+	cycles, err := s.store.PollCycles(r.Context())
 	if err != nil {
-		s.log.ErrorContext(r.Context(), "read status quota", "error", err)
+		s.log.ErrorContext(r.Context(), "read status cycles", "error", err)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
 		return
 	}
-	healths, err := s.store.LatestProviderHealth(r.Context())
-	if err != nil {
-		s.log.ErrorContext(r.Context(), "read status health", "error", err)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
-		return
-	}
-	s.writeJSON(w, http.StatusOK, statusResponse{Providers: s.statusProviders(snaps, healths)})
+	s.writeJSON(w, http.StatusOK, statusResponse{Providers: s.statusProviders(cycles)})
 }
 
 // statusResponse is the GET /v1/status payload: one entry per provider the
@@ -382,20 +380,16 @@ type statusHealth struct {
 }
 
 // statusProviders builds the status rows. Observed providers come first in the
-// map iteration order of the reads; the union with configured catalogue providers
+// map iteration order of the cycles; the union with configured catalogue providers
 // keeps a freshly started controller from reporting an empty status before its
-// first poll.
-func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.HealthRecord) []statusProvider {
-	byQuota := make(map[string]store.QuotaSnapshot, len(snaps))
-	for _, sn := range snaps {
-		byQuota[sn.Provider] = sn
-	}
-	byHealth := make(map[string]store.HealthRecord, len(healths))
-	for _, h := range healths {
-		byHealth[h.Provider] = h
-	}
-	names := make([]string, 0, len(byQuota)+len(byHealth))
-	seen := make(map[string]bool, len(byQuota)+len(byHealth))
+// first poll. The per-provider quota is judged at now against the freshness bound
+// anchored to the last poll attempt, so a row that was fresh when written reads
+// as stale once polling has not run within the bound.
+func (s *Server) statusProviders(cycles map[string]store.PollCycle) []statusProvider {
+	byQuota := make(map[string]store.QuotaSnapshot, len(cycles))
+	byHealth := make(map[string]store.HealthRecord, len(cycles))
+	names := make([]string, 0, len(cycles))
+	seen := make(map[string]bool, len(cycles))
 	add := func(n string) {
 		if n == "" || seen[n] {
 			return
@@ -403,11 +397,10 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 		seen[n] = true
 		names = append(names, n)
 	}
-	for n := range byQuota {
-		add(n)
-	}
-	for n := range byHealth {
-		add(n)
+	for provider, c := range cycles {
+		byQuota[provider] = c.Snapshot
+		byHealth[provider] = c.Health
+		add(provider)
 	}
 	for _, m := range s.selector.Catalogue.ModelAliases {
 		add(m.Provider())
@@ -416,11 +409,12 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 
 	out := make([]statusProvider, 0, len(names))
 	now := time.Now().UTC()
+	bound := staleAfter(s.cfg.Polling.Interval)
 	for _, n := range names {
 		p := statusProvider{Provider: n}
 		if snap, ok := byQuota[n]; ok {
-			q := application.QuotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-			state, reason := q.StateAt(now, staleAfter(s.cfg.Polling.Interval))
+			q := s.quotaAt(snap, cycles[n].AttemptAt, now, bound)
+			state, reason := q.StateAt(now, bound)
 			p.Quota = &statusQuota{
 				State:         string(state),
 				UnknownReason: string(reason),
@@ -431,12 +425,12 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 			}
 		}
 		if h, ok := byHealth[n]; ok {
-			ps := application.ProviderStateFromStore(h)
+			ps := providerStateFromStore(h)
 			health := ps.Health
 			// Status reads apply the same freshness bound as the selector: an
 			// observation that is absent or older than the bound is not
 			// actionable, so the provider must not be reported healthy.
-			if ps.ObservedAt.IsZero() || now.Sub(ps.ObservedAt) > staleAfter(s.cfg.Polling.Interval) {
+			if ps.ObservedAt.IsZero() || now.Sub(ps.ObservedAt) > bound {
 				health = quota.HealthUnknown
 			}
 			cooldown := ""
@@ -481,6 +475,109 @@ func staleAfter(interval time.Duration) time.Duration {
 		return 90 * time.Second
 	}
 	return 3 * interval
+}
+
+// quotaAt maps one persisted quota row onto the actionable domain snapshot at
+// now, applying the freshness bound. The bound is anchored to the last poll
+// attempt behind the row, not only to the observation: a row written while quota
+// was fresh reads as stale once that attempt is past the bound, which is what a
+// process crash or a polling stop leaves behind. A row whose poll state is
+// missing is treated exactly like an expired one: no durably anchored attempt
+// backs it, so it stays stale instead of becoming current. A future anchor is not
+// fresh either: it cannot prove an observation happened, so clock skew or a bad
+// write must not turn into actionable quota.
+func (s *Server) quotaAt(snap store.QuotaSnapshot, anchor time.Time, now time.Time, maxAge time.Duration) quota.Snapshot {
+	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
+	if anchor.IsZero() {
+		q.Stale = true
+		return q
+	}
+	if age := now.Sub(anchor); age < 0 || age > maxAge {
+		q.Stale = true
+	}
+	return q
+}
+
+// quotaSnapshotFromStore converts one persisted quota row for status use. An
+// unknown row keeps the closed reason it failed with; a stale-observation row
+// that still carries windows is re-opened as a last-known-good copy marked stale,
+// so the diagnostic stays observable without ever becoming actionable.
+func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Snapshot {
+	windows := make([]quota.Window, 0, len(s.Windows))
+	for _, w := range s.Windows {
+		win := quota.Window{Name: w.Window, Limit: w.Limit, Used: w.Used, Remaining: w.Remaining}
+		if w.ResetAt != nil {
+			win.ResetsAt = *w.ResetAt
+		}
+		windows = append(windows, win)
+	}
+	if s.State == store.QuotaUnknown {
+		reason := quotaUnknownReasonFromStore(s.UnknownReason)
+		snap := quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
+		if reason == quota.StaleObservation && len(windows) > 0 {
+			snap = quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
+			snap.Stale = true
+		}
+		return snap
+	}
+	snap := quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
+	return snap
+}
+
+// quotaUnknownReasonFromStore maps a stored unknown reason onto the actionable
+// one. A nil reason is treated as a malformed response: nothing was reported, so
+// the closed reason must not be guessed at.
+func quotaUnknownReasonFromStore(r *store.UnknownReason) quota.UnknownReason {
+	if r == nil {
+		return quota.MalformedResponse
+	}
+	switch *r {
+	case store.ReasonUnsupported:
+		return quota.UnsupportedNoQuotaAPI
+	case store.ReasonFetchFailed:
+		return quota.TransientFetchFailure
+	case store.ReasonStale:
+		return quota.StaleObservation
+	case store.ReasonMalformed:
+		return quota.MalformedResponse
+	case store.ReasonAuth:
+		return quota.AuthFailure
+	case store.ReasonNotObserved:
+		return quota.NotYetObserved
+	default:
+		return quota.MalformedResponse
+	}
+}
+
+// providerStateFromStore converts one persisted provider health row onto the
+// actionable provider state. A stored error may be a legacy free-form
+// description; it is mapped onto the closed reason set rather than echoed.
+func providerStateFromStore(h store.HealthRecord) quota.ProviderState {
+	state := quota.Health(strings.ToUpper(string(h.State)))
+	reason := quota.ReasonNone
+	switch strings.ToUpper(h.Error) {
+	case string(quota.ReasonAuthFailed):
+		reason = quota.ReasonAuthFailed
+	case string(quota.ReasonTimeout):
+		reason = quota.ReasonTimeout
+	case string(quota.ReasonRateLimited):
+		reason = quota.ReasonRateLimited
+	case string(quota.ReasonServerError):
+		reason = quota.ReasonServerError
+	case string(quota.ReasonUnreachable):
+		reason = quota.ReasonUnreachable
+	case string(quota.ReasonNotProbed):
+		reason = quota.ReasonNotProbed
+	case "":
+		reason = quota.ReasonNone
+	default:
+		reason = quota.ReasonServerError
+	}
+	st := quota.NewProviderState(h.Provider, state, reason, h.ObservedAt)
+	if h.CooldownUntil != nil {
+		st.CooldownUntil = *h.CooldownUntil
+	}
+	return st
 }
 
 // Session release ends one agent session's route use: the pin is deleted, so the

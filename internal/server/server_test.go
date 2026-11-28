@@ -93,11 +93,14 @@ type fakeStore struct {
 	snaps       []store.QuotaSnapshot
 	health      []store.HealthRecord
 	decisions   []store.RoutingDecisionRecord
-	snapErr     error
-	healthErr   error
 	saveErr     error
 	affinity    map[string]store.SessionAffinity
 	affinityErr error
+	// lastAttempt is the per-provider freshness anchor the status and selection
+	// reads compare the persisted observation against.
+	lastAttempt map[string]time.Time
+	// pollErr fails the batch cycle read the status and selection paths use.
+	pollErr error
 }
 
 func (f *fakeStore) SessionAffinity(_ context.Context, sessionID string) (store.SessionAffinity, bool, error) {
@@ -133,21 +136,27 @@ func (f *fakeStore) DeleteSessionAffinity(_ context.Context, sessionID string) e
 	return nil
 }
 
-func (f *fakeStore) LatestQuotaSnapshot(context.Context) ([]store.QuotaSnapshot, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.snapErr != nil {
-		return nil, f.snapErr
+// PollCycles maps the fake store's snapshot, health and last-attempt rows onto
+// the batch cycle read the status and selection paths use. A provider without a
+// snapshot row is absent from the map, like an absent poll cycle: nothing may be
+// fresh without one.
+func (f *fakeStore) PollCycles(_ context.Context) (map[string]store.PollCycle, error) {
+	if f.pollErr != nil {
+		return nil, f.pollErr
 	}
-	return append([]store.QuotaSnapshot(nil), f.snaps...), nil
-}
-func (f *fakeStore) LatestProviderHealth(context.Context) ([]store.HealthRecord, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.healthErr != nil {
-		return nil, f.healthErr
+	out := map[string]store.PollCycle{}
+	for _, sn := range f.snaps {
+		c := out[sn.Provider]
+		c.Snapshot = sn
+		c.AttemptAt = f.lastAttempt[sn.Provider]
+		out[sn.Provider] = c
 	}
-	return append([]store.HealthRecord(nil), f.health...), nil
+	for _, h := range f.health {
+		c := out[h.Provider]
+		c.Health = h
+		out[h.Provider] = c
+	}
+	return out, nil
 }
 func (f *fakeStore) SaveRoutingDecision(_ context.Context, r store.RoutingDecisionRecord) error {
 	f.mu.Lock()
@@ -239,6 +248,10 @@ func TestSelectEndpoint(t *testing.T) {
 	st := &fakeStore{
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
@@ -295,6 +308,37 @@ func TestSelectEndpointNoEligible(t *testing.T) {
 	}
 }
 
+// A quota row persisted before polling stopped or the process crashed must not
+// be routed on: the freshness bound is anchored to the last poll attempt, and a
+// stale row is rejected before a candidate can be selected.
+func TestSelectEndpointDoesNotRouteOnStalePollStateQuota(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:       []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+		health:      []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+		lastAttempt: map[string]time.Time{"commandcode": time.Now().UTC().Add(-2 * time.Hour)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
+
+	body := `{"version":1,"session_id":"s1","capabilities":{"tool_calling":true},"task_class":"coding"}`
+	w := postSelect(t, srv, testRoutingToken, body)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409 when a persisted poll is stale", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Decision routing.Decision `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Decision.SelectedAlias != "" {
+		t.Fatalf("selected=%q, want none for a stale quota row", resp.Decision.SelectedAlias)
+	}
+	if len(resp.Decision.Rejected) == 0 {
+		t.Fatal("expected the stale quota row to be rejected")
+	}
+}
+
 func TestSelectEndpointInvalidVersion(t *testing.T) {
 	cfg := testRoutingConfig()
 	st := &fakeStore{
@@ -345,6 +389,10 @@ func TestDecisionsEndpoint(t *testing.T) {
 	st := &fakeStore{
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
@@ -374,12 +422,17 @@ func TestDecisionsEndpoint(t *testing.T) {
 
 func TestSelectEndpointStateLoadError(t *testing.T) {
 	cfg := testRoutingConfig()
-	st := &fakeStore{snapErr: context.DeadlineExceeded}
+	st := &fakeStore{pollErr: context.DeadlineExceeded}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	// A failed read must not leave a decision behind: nothing was decided, so
+	// nothing may be persisted as the session's successful choice.
+	if len(st.decisions) != 0 {
+		t.Fatalf("decisions=%d, want none when the selection state cannot be read", len(st.decisions))
 	}
 }
 
@@ -404,6 +457,9 @@ func TestSelectEndpointRequiresAuth(t *testing.T) {
 	st := &fakeStore{
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+		},
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
@@ -507,6 +563,9 @@ func TestStatusEndpoint(t *testing.T) {
 	st := &fakeStore{
 		snaps:  []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("minimax", store.Healthy)},
+		lastAttempt: map[string]time.Time{
+			"minimax": time.Now().UTC(),
+		},
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st})
 
@@ -544,6 +603,121 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 	if found.Health.State != "HEALTHY" {
 		t.Fatalf("health state = %q, want HEALTHY", found.Health.State)
+	}
+}
+
+// A persisted quota row from before a process crash or a polling stop reads as
+// stale at the status boundary: the freshness bound is anchored to the last poll
+// attempt, not only to the observation it left behind.
+func TestStatusEndpointStaleQuotaAfterPollingStopped(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:       []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health:      []store.HealthRecord{healthRec("minimax", store.Healthy)},
+		lastAttempt: map[string]time.Time{"minimax": time.Now().UTC().Add(-2 * time.Hour)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp statusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found *statusProvider
+	for i := range resp.Providers {
+		if resp.Providers[i].Provider == "minimax" {
+			found = &resp.Providers[i]
+		}
+	}
+	if found == nil || found.Quota == nil {
+		t.Fatalf("providers=%+v quota=%+v", resp.Providers, found)
+	}
+	if found.Quota.State != "UNKNOWN" {
+		t.Fatalf("quota state = %q, want UNKNOWN for a stale post-stop row", found.Quota.State)
+	}
+	if found.Quota.UnknownReason != "STALE_OBSERVATION" {
+		t.Fatalf("unknown reason = %q, want STALE_OBSERVATION", found.Quota.UnknownReason)
+	}
+	if got := len(found.Quota.Windows); got != 1 {
+		t.Fatalf("windows = %d, want the stale last-known window retained for diagnostics", got)
+	}
+}
+
+// A persisted quota row whose poll state is missing is treated like a stale
+// one: nothing durably anchored the observation, so it must not be routed on
+// and status must not read it as current quota.
+func TestSelectEndpointDoesNotRouteOnMissingPollState(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
+
+	body := `{"version":1,"session_id":"s1","capabilities":{"tool_calling":true},"task_class":"coding"}`
+	w := postSelect(t, srv, testRoutingToken, body)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409 when poll state is missing for a persisted quota row", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Decision routing.Decision `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Decision.SelectedAlias != "" {
+		t.Fatalf("selected=%q, want none when poll state is missing", resp.Decision.SelectedAlias)
+	}
+	if len(resp.Decision.Rejected) == 0 {
+		t.Fatal("expected the missing poll state to reject the persisted quota row")
+	}
+}
+
+// The status endpoint must not read a persisted quota row as current when no
+// poll ever anchored it: the row is stale, with its last-known window kept for
+// diagnostics.
+func TestStatusEndpointStaleQuotaWhenPollStateMissing(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:  []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("minimax", store.Healthy)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp statusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found *statusProvider
+	for i := range resp.Providers {
+		if resp.Providers[i].Provider == "minimax" {
+			found = &resp.Providers[i]
+		}
+	}
+	if found == nil || found.Quota == nil {
+		t.Fatalf("providers=%+v quota=%+v", resp.Providers, found)
+	}
+	if found.Quota.State != "UNKNOWN" {
+		t.Fatalf("quota state = %q, want UNKNOWN for a row without poll state", found.Quota.State)
+	}
+	if found.Quota.UnknownReason != "STALE_OBSERVATION" {
+		t.Fatalf("unknown reason = %q, want STALE_OBSERVATION", found.Quota.UnknownReason)
+	}
+	if got := len(found.Quota.Windows); got != 1 {
+		t.Fatalf("windows = %d, want the last-known window retained for diagnostics", got)
 	}
 }
 
@@ -586,6 +760,65 @@ func TestStatusEndpointStaleHealthNotHealthy(t *testing.T) {
 	}
 }
 
+// The freshness policy is applied in two steps: the read marks the row stale
+// when the poll anchor is missing or past the bound, and StateAt then derives the
+// actionable state from the observation itself, honouring an observation that is
+// older than the bound. Status and the selector must agree on every combination
+// of anchor and observation age, so the pair is pinned here.
+func TestFreshnessBoundCombinesAnchorAndObservation(t *testing.T) {
+	srv := New(nil, Options{Config: testRoutingConfig()})
+	now := time.Now().UTC()
+	bound := staleAfter(srv.cfg.Polling.Interval)
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := now.Add(time.Hour)
+	snap := store.QuotaSnapshot{
+		Provider:   "minimax",
+		State:      store.QuotaAvailable,
+		Source:     "test",
+		Confidence: store.Reported,
+		ObservedAt: now,
+		Windows: []store.QuotaWindow{{
+			Window: "5h", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset,
+		}},
+	}
+	snapWith := func(observedAt time.Time) store.QuotaSnapshot {
+		snap.ObservedAt = observedAt
+		return snap
+	}
+
+	cases := []struct {
+		name       string
+		anchor     time.Time
+		observedAt time.Time
+		wantStale  bool
+		wantState  store.QuotaState
+		wantReason string
+	}{
+		{"fresh anchor and fresh observation", now, now, false, store.QuotaAvailable, ""},
+		{"stale anchor marks the row stale", now.Add(-2 * time.Hour), now.Add(-2 * time.Hour), true, store.QuotaUnknown, "STALE_OBSERVATION"},
+		{"missing anchor marks the row stale", time.Time{}, now, true, store.QuotaUnknown, "STALE_OBSERVATION"},
+		{"stale observation is stale even with a fresh anchor", now, now.Add(-2 * time.Hour), false, store.QuotaUnknown, "STALE_OBSERVATION"},
+		{"future anchor and future observation are not fresh", now.Add(2 * time.Minute), now.Add(3 * time.Minute), true, store.QuotaUnknown, "STALE_OBSERVATION"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := srv.quotaAt(snapWith(tc.observedAt), tc.anchor, now, bound)
+			state, reason := q.StateAt(now, bound)
+			if q.Stale != tc.wantStale {
+				t.Fatalf("quotaAt stale = %t, want %t", q.Stale, tc.wantStale)
+			}
+			if got := string(state); got != string(tc.wantState) {
+				t.Fatalf("state = %s, want %s", got, tc.wantState)
+			}
+			if got := string(reason); got != tc.wantReason {
+				t.Fatalf("unknown reason = %q, want %q", got, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestStatusRequiresAuth(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
@@ -616,7 +849,7 @@ func TestStatusUnavailableWithoutStore(t *testing.T) {
 
 func TestStatusUnavailableOnStoreError(t *testing.T) {
 	cfg := testRoutingConfig()
-	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: &fakeStore{snapErr: context.DeadlineExceeded}})
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: &fakeStore{pollErr: context.DeadlineExceeded}})
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
 	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w := httptest.NewRecorder()
@@ -633,6 +866,9 @@ func TestRouteAliasEndpoint(t *testing.T) {
 	st := &fakeStore{
 		snaps:  []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("minimax", store.Healthy)},
+		lastAttempt: map[string]time.Time{
+			"minimax": time.Now().UTC(),
+		},
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
@@ -731,6 +967,10 @@ func TestSelectEndpointHonorsSessionRelease(t *testing.T) {
 		snaps:    []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health:   []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "mm-fast", time.Now().UTC())},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
@@ -782,6 +1022,10 @@ func TestSelectPinsAndKeepsTheRoute(t *testing.T) {
 	st := &fakeStore{
 		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	srv := affinityServer(t, st)
 
@@ -830,6 +1074,10 @@ func TestSelectExpiredPinReevaluatesAndRepins(t *testing.T) {
 		snaps:    []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health:   []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "mm-fast", now.Add(-2*sessionAffinityTTL))},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	srv := affinityServer(t, st)
 	// pin() computed its expiry from the old now, so it is already past.
@@ -856,6 +1104,10 @@ func TestSelectOverrideRepinsSession(t *testing.T) {
 		snaps:    []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health:   []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "cc-coding", now)},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	srv := affinityServer(t, st)
 

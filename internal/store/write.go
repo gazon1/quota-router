@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -25,45 +26,6 @@ import (
 const tsLayout = "2006-01-02T15:04:05.000000000Z"
 
 func ts(t time.Time) string { return t.UTC().Format(tsLayout) }
-
-// SaveQuotaSnapshot appends one snapshot with its windows.
-func (s *Store) SaveQuotaSnapshot(ctx context.Context, snap QuotaSnapshot) error {
-	if err := snap.Validate(); err != nil {
-		return fmt.Errorf("quota snapshot: %w", err)
-	}
-	var reason *string
-	if snap.UnknownReason != nil {
-		r := string(*snap.UnknownReason)
-		reason = &r
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO quota_snapshots (provider, state, unknown_reason, source, confidence, observed_at, error)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			snap.Provider, snap.State, reason, snap.Source, snap.Confidence, ts(snap.ObservedAt), nullString(snap.Error))
-		if err != nil {
-			return classify(err)
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return classify(err)
-		}
-		for _, w := range snap.Windows {
-			var resetAt *string
-			if w.ResetAt != nil {
-				r := ts(*w.ResetAt)
-				resetAt = &r
-			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO quota_windows (snapshot_id, window, unit, limit_value, used_value, remaining_value, reset_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				id, w.Window, nullString(w.Unit), w.Limit, w.Used, w.Remaining, resetAt); err != nil {
-				return classify(err)
-			}
-		}
-		return nil
-	})
-}
 
 // SaveUsageRecord appends one request attempt. A report for an attempt that is
 // already stored is ignored when the event content is identical, so a retried
@@ -192,51 +154,6 @@ func intFromNull(v *sql.NullInt64) *int {
 	return &n
 }
 
-// SaveProviderHealth appends one health observation.
-func (s *Store) SaveProviderHealth(ctx context.Context, h HealthRecord) error {
-	if err := h.Validate(); err != nil {
-		return fmt.Errorf("provider health: %w", err)
-	}
-	var cooldownUntil *string
-	if h.CooldownUntil != nil && !h.CooldownUntil.IsZero() {
-		v := ts(*h.CooldownUntil)
-		cooldownUntil = &v
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO provider_health (provider, state, observed_at, error, cooldown_until) VALUES (?, ?, ?, ?, ?)`,
-			h.Provider, h.State, ts(h.ObservedAt), nullString(h.Error), cooldownUntil)
-		return classify(err)
-	})
-}
-
-// SavePollState records when a provider was last polled and, when the attempt
-// established quota, when it last did. A zero successAt leaves the recorded
-// success alone: a failure must not erase when quota was last known good, and
-// the two timestamps are read independently.
-func (s *Store) SavePollState(ctx context.Context, provider string, attemptAt, successAt time.Time) error {
-	if provider == "" {
-		return errors.New("poll state: provider must not be empty")
-	}
-	if attemptAt.IsZero() {
-		return errors.New("poll state: attempt time must be set")
-	}
-	var success *string
-	if !successAt.IsZero() {
-		v := ts(successAt)
-		success = &v
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO poll_state (provider, last_attempt_at, last_success_at) VALUES (?, ?, ?)
-			 ON CONFLICT (provider) DO UPDATE SET
-			   last_attempt_at = excluded.last_attempt_at,
-			   last_success_at = COALESCE(excluded.last_success_at, poll_state.last_success_at)`,
-			provider, ts(attemptAt), success)
-		return classify(err)
-	})
-}
-
 // PollState reports when a provider was last polled and last succeeded. A zero
 // success time means no attempt has established quota yet.
 func (s *Store) PollState(ctx context.Context, provider string) (attemptAt, successAt time.Time, err error) {
@@ -259,6 +176,320 @@ func (s *Store) PollState(ctx context.Context, provider string) (attemptAt, succ
 		}
 	}
 	return attemptAt, successAt, nil
+}
+
+// PollStates returns the latest poll anchor per provider in one query: when
+// each provider was last durably polled. A provider without a row maps to the
+// zero time, which readers treat as stale, so callers that hold several
+// providers avoid one query per provider just to learn the same absence.
+func (s *Store) PollStates(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT provider, last_attempt_at FROM poll_state`)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var provider string
+		var at string
+		if err := rows.Scan(&provider, &at); err != nil {
+			return nil, classify(err)
+		}
+		t, err := parseTS(at)
+		if err != nil {
+			return nil, err
+		}
+		out[provider] = t
+	}
+	return out, rows.Err()
+}
+
+// PollCycle is one provider's latest poll cycle: the snapshot the poller
+// committed, the health observation that came with it and the attempt anchor
+// that backs the snapshot's freshness. A cycle is persisted in one transaction
+// and read back in one, so a snapshot can never be paired with an anchor or a
+// health observation from a different cycle. The three rows of a cycle share
+// one poll_cycle_id, which is how the read picks them: the latest committed
+// cycle of a provider, not three independently "newest" rows.
+type PollCycle struct {
+	Snapshot  QuotaSnapshot
+	Health    HealthRecord
+	AttemptAt time.Time
+}
+
+// PollCycles returns the latest poll cycle per provider in one query. The
+// snapshot, the health observation and the freshness anchor of a cycle are read
+// inside a single read transaction, so a cycle that SavePollResult committed
+// atomically is observed atomically here too: a reader cannot pair a snapshot
+// with an anchor from a later cycle, which is what would let an older snapshot
+// look fresh again. The snapshot and the health observation are the rows of the
+// cycle with the highest poll_cycle_id for the provider, and the anchor is that
+// cycle's poll_state row, so all three belong to one cycle. A provider without a
+// committed cycle is absent from the map, and readers treat absence as stale.
+func (s *Store) PollCycles(ctx context.Context) (map[string]PollCycle, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer tx.Rollback()
+
+	cycles := map[string]PollCycle{}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, provider, state, unknown_reason, source, confidence, observed_at, error
+		 FROM quota_snapshots s
+		 WHERE s.poll_cycle_id = (SELECT MAX(c.poll_cycle_id) FROM quota_snapshots c WHERE c.provider = s.provider)`)
+	if err != nil {
+		return nil, classify(err)
+	}
+	ids := map[string]int64{}
+	var order []string
+	for rows.Next() {
+		var (
+			id              int64
+			snap            QuotaSnapshot
+			reason, errText sql.NullString
+			observedAt      string
+		)
+		if err := rows.Scan(&id, &snap.Provider, &snap.State, &reason, &snap.Source, &snap.Confidence, &observedAt, &errText); err != nil {
+			rows.Close()
+			return nil, classify(err)
+		}
+		if snap.ObservedAt, err = parseTS(observedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if reason.Valid {
+			r := UnknownReason(reason.String)
+			snap.UnknownReason = &r
+		}
+		snap.Error = errText.String
+		cycles[snap.Provider] = PollCycle{Snapshot: snap}
+		ids[snap.Provider] = id
+		order = append(order, snap.Provider)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, classify(err)
+	}
+	rows.Close()
+	windowsBySnapshot := map[int64][]QuotaWindow{}
+	if len(order) > 0 {
+		args := make([]any, 0, len(order))
+		placeholders := make([]string, len(order))
+		for i, p := range order {
+			placeholders[i] = "?"
+			args = append(args, ids[p])
+		}
+		rows2, err := tx.QueryContext(ctx,
+			`SELECT snapshot_id, window, unit, limit_value, used_value, remaining_value, reset_at
+			 FROM quota_windows WHERE snapshot_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY snapshot_id, window`,
+			args...)
+		if err != nil {
+			return nil, classify(err)
+		}
+		for rows2.Next() {
+			var (
+				snapshotID int64
+				w          QuotaWindow
+				unit       sql.NullString
+				resetAt    sql.NullString
+			)
+			if err := rows2.Scan(&snapshotID, &w.Window, &unit, &w.Limit, &w.Used, &w.Remaining, &resetAt); err != nil {
+				rows2.Close()
+				return nil, classify(err)
+			}
+			w.Unit = unit.String
+			if resetAt.Valid {
+				t, err := parseTS(resetAt.String)
+				if err != nil {
+					rows2.Close()
+					return nil, err
+				}
+				w.ResetAt = &t
+			}
+			windowsBySnapshot[snapshotID] = append(windowsBySnapshot[snapshotID], w)
+		}
+		if err := rows2.Err(); err != nil {
+			rows2.Close()
+			return nil, classify(err)
+		}
+		rows2.Close()
+	}
+	for _, p := range order {
+		c := cycles[p]
+		c.Snapshot.Windows = windowsBySnapshot[ids[p]]
+		cycles[p] = c
+	}
+
+	pollRows, err := tx.QueryContext(ctx, `SELECT provider, last_attempt_at FROM poll_state`)
+	if err != nil {
+		return nil, classify(err)
+	}
+	for pollRows.Next() {
+		var provider string
+		var at string
+		if err := pollRows.Scan(&provider, &at); err != nil {
+			pollRows.Close()
+			return nil, classify(err)
+		}
+		t, err := parseTS(at)
+		if err != nil {
+			pollRows.Close()
+			return nil, err
+		}
+		if c, ok := cycles[provider]; ok {
+			c.AttemptAt = t
+			cycles[provider] = c
+		}
+	}
+	if err := pollRows.Err(); err != nil {
+		pollRows.Close()
+		return nil, classify(err)
+	}
+	pollRows.Close()
+
+	healthRows, err := tx.QueryContext(ctx,
+		`SELECT h.provider, h.state, h.observed_at, h.error, h.cooldown_until
+		 FROM provider_health h
+		 WHERE h.poll_cycle_id = (SELECT MAX(c.poll_cycle_id) FROM provider_health c WHERE c.provider = h.provider)`)
+	if err != nil {
+		return nil, classify(err)
+	}
+	for healthRows.Next() {
+		var (
+			h             HealthRecord
+			observed      string
+			errText       sql.NullString
+			cooldownUntil sql.NullString
+		)
+		if err := healthRows.Scan(&h.Provider, &h.State, &observed, &errText, &cooldownUntil); err != nil {
+			healthRows.Close()
+			return nil, classify(err)
+		}
+		if h.ObservedAt, err = parseTS(observed); err != nil {
+			healthRows.Close()
+			return nil, err
+		}
+		h.Error = errText.String
+		if cooldownUntil.Valid {
+			t, err := parseTS(cooldownUntil.String)
+			if err != nil {
+				healthRows.Close()
+				return nil, err
+			}
+			h.CooldownUntil = &t
+		}
+		if c, ok := cycles[h.Provider]; ok {
+			c.Health = h
+			cycles[h.Provider] = c
+		}
+	}
+	if err := healthRows.Err(); err != nil {
+		healthRows.Close()
+		return nil, classify(err)
+	}
+	healthRows.Close()
+
+	return cycles, nil
+}
+
+// SavePollResult persists one poll cycle — the snapshot, the health observation
+// and the poll-state anchor — inside a single transaction, so a cycle is never
+// observable half-written: either all three land, or none do and the cycle fails
+// without advancing the freshness anchor behind a snapshot that was not stored.
+// The snapshot, its health observation and the poll-state anchor of the cycle
+// share one poll_cycle_id, so a reader can always tell which cycle a row of each
+// kind belongs to instead of re-deriving recency per table. last_success_at never
+// moves backwards: a cycle that does not establish quota keeps the success time of
+// the cycle before it.
+func (s *Store) SavePollResult(ctx context.Context, provider string, snap QuotaSnapshot, health HealthRecord, attemptAt, successAt time.Time) error {
+	if provider == "" {
+		return errors.New("poll result: provider must not be empty")
+	}
+	if attemptAt.IsZero() {
+		return errors.New("poll result: attempt time must be set")
+	}
+	if !successAt.IsZero() && successAt.After(attemptAt) {
+		return fmt.Errorf("poll result: success time %s is after the attempt time %s", successAt.UTC(), attemptAt.UTC())
+	}
+	if err := snap.Validate(); err != nil {
+		return fmt.Errorf("quota snapshot: %w", err)
+	}
+	if err := health.Validate(); err != nil {
+		return fmt.Errorf("provider health: %w", err)
+	}
+	if snap.Provider != provider || health.Provider != provider {
+		return fmt.Errorf("poll result: provider mismatch: snapshot %q health %q cycle %q", snap.Provider, health.Provider, provider)
+	}
+	var reason *string
+	if snap.UnknownReason != nil {
+		r := string(*snap.UnknownReason)
+		reason = &r
+	}
+	var success *string
+	if !successAt.IsZero() {
+		v := ts(successAt)
+		success = &v
+	}
+	var cooldownUntil *string
+	if health.CooldownUntil != nil && !health.CooldownUntil.IsZero() {
+		v := ts(*health.CooldownUntil)
+		cooldownUntil = &v
+	}
+	return s.tx(ctx, func(tx *sql.Tx) error {
+		var cycleID int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(poll_cycle_id), 0) + 1 FROM quota_snapshots WHERE provider = ?`, provider,
+		).Scan(&cycleID); err != nil {
+			return classify(err)
+		}
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO quota_snapshots (provider, poll_cycle_id, state, unknown_reason, source, confidence, observed_at, error)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			snap.Provider, cycleID, snap.State, reason, snap.Source, snap.Confidence, ts(snap.ObservedAt), nullString(snap.Error))
+		if err != nil {
+			return classify(err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return classify(err)
+		}
+		for _, w := range snap.Windows {
+			var resetAt *string
+			if w.ResetAt != nil {
+				r := ts(*w.ResetAt)
+				resetAt = &r
+			}
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO quota_windows (snapshot_id, window, unit, limit_value, used_value, remaining_value, reset_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				id, w.Window, nullString(w.Unit), w.Limit, w.Used, w.Remaining, resetAt); err != nil {
+				return classify(err)
+			}
+		}
+		if err := health.Validate(); err != nil {
+			return fmt.Errorf("provider health: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO provider_health (provider, poll_cycle_id, state, observed_at, error, cooldown_until) VALUES (?, ?, ?, ?, ?, ?)`,
+			health.Provider, cycleID, health.State, ts(health.ObservedAt), nullString(health.Error), cooldownUntil); err != nil {
+			return classify(err)
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO poll_state (provider, poll_cycle_id, last_attempt_at, last_success_at) VALUES (?, ?, ?, ?)
+			 ON CONFLICT (provider) DO UPDATE SET
+			   poll_cycle_id = excluded.poll_cycle_id,
+			   last_attempt_at = excluded.last_attempt_at,
+			   last_success_at = CASE
+				   WHEN excluded.last_success_at IS NULL THEN poll_state.last_success_at
+				   WHEN poll_state.last_success_at IS NULL OR excluded.last_success_at > poll_state.last_success_at
+					   THEN excluded.last_success_at
+				   ELSE poll_state.last_success_at
+			   END`,
+			provider, cycleID, ts(attemptAt), success)
+		return classify(err)
+	})
 }
 
 // SaveControllerState stores one controller key. The latest write wins.

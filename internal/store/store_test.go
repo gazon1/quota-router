@@ -42,8 +42,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 6 {
-		t.Fatalf("version = %d, want 6", v)
+	if v != 7 {
+		t.Fatalf("version = %d, want 7", v)
 	}
 
 	// A restart must not re-apply or fail: this is the existing-database path.
@@ -117,8 +117,8 @@ func TestQuotaSnapshotRoundTripAcrossRestart(t *testing.T) {
 			ResetAt: &reset,
 		}},
 	}
-	if err := s.SaveQuotaSnapshot(ctx, snap); err != nil {
-		t.Fatalf("SaveQuotaSnapshot: %v", err)
+	if err := s.SavePollResult(ctx, snap.Provider, snap, HealthRecord{Provider: snap.Provider, State: Healthy, ObservedAt: snap.ObservedAt}, snap.ObservedAt, snap.ObservedAt); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
 	}
 	s.Close()
 
@@ -170,8 +170,8 @@ func TestLatestQuotaSnapshotPerProvider(t *testing.T) {
 		{Provider: "minimax", State: QuotaAvailable, Source: "a", Confidence: Reported, ObservedAt: time.Date(2026, 1, 1, 11, 0, 0, 0, time.UTC)},
 		{Provider: "command-code", State: QuotaExhausted, Source: "b", Confidence: Reported, ObservedAt: time.Date(2026, 1, 1, 10, 30, 0, 0, time.UTC)},
 	} {
-		if err := s.SaveQuotaSnapshot(ctx, snap); err != nil {
-			t.Fatalf("SaveQuotaSnapshot #%d: %v", i, err)
+		if err := s.SavePollResult(ctx, snap.Provider, snap, HealthRecord{Provider: snap.Provider, State: Healthy, ObservedAt: snap.ObservedAt}, snap.ObservedAt, snap.ObservedAt); err != nil {
+			t.Fatalf("SavePollResult #%d: %v", i, err)
 		}
 	}
 
@@ -200,12 +200,13 @@ func TestQuotaWindowValuesStayUnreportedWhenAbsent(t *testing.T) {
 
 	// A provider that reports only "remaining" must not have used/limit invented
 	// as zero: unreported is distinct from 0.
-	if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+	now := time.Now().UTC()
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
 		Provider: "minimax", State: QuotaAvailable, Source: "q", Confidence: Reported,
-		ObservedAt: time.Now(),
+		ObservedAt: now,
 		Windows:    []QuotaWindow{{Window: "5h", Remaining: floatPtr(0)}},
-	}); err != nil {
-		t.Fatalf("SaveQuotaSnapshot: %v", err)
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: now}, now, now); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
 	}
 
 	got, err := s.LatestQuotaSnapshot(ctx)
@@ -278,10 +279,13 @@ func TestHealthIsSeparateFromQuota(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openMigrated(t)
 
-	// A healthy provider proves reachability only; it must not create a quota row
-	// or imply AVAILABLE.
-	if err := s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: time.Now()}); err != nil {
-		t.Fatalf("SaveProviderHealth: %v", err)
+	// A healthy provider proves reachability only; it must not imply AVAILABLE,
+	// so a cycle that carried no usable quota keeps the quota row UNKNOWN.
+	reason := ReasonFetchFailed
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaUnknown, UnknownReason: &reason, Source: "s", Confidence: Reported, ObservedAt: time.Now(),
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: time.Now()}, time.Now().UTC(), time.Time{}); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
 	}
 	health, err := s.LatestProviderHealth(ctx)
 	if err != nil {
@@ -294,8 +298,8 @@ func TestHealthIsSeparateFromQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestQuotaSnapshot: %v", err)
 	}
-	if len(quota) != 0 {
-		t.Fatalf("quota rows = %d after a health write, want 0", len(quota))
+	if len(quota) != 1 || quota[0].State != QuotaUnknown {
+		t.Fatalf("quota = %+v, want one UNKNOWN row: a healthy provider must not imply AVAILABLE", quota)
 	}
 }
 
@@ -322,19 +326,26 @@ func TestSaveRejectsInvalidEnums(t *testing.T) {
 	s, _ := openMigrated(t)
 
 	reason := ReasonStale
+	at := time.Now().UTC()
 	for _, c := range []struct {
 		name string
 		err  error
 	}{
-		{"unknown state", s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
-			Provider: "p", State: "BOGUS", Source: "s", Confidence: Reported, ObservedAt: time.Now()})},
-		{"unknown without reason", s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
-			Provider: "p", State: QuotaUnknown, Source: "s", Confidence: Reported, ObservedAt: time.Now()})},
-		{"reason on a known state", s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
-			Provider: "p", State: QuotaAvailable, UnknownReason: &reason, Source: "s", Confidence: Reported, ObservedAt: time.Now()})},
-		{"bad confidence", s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
-			Provider: "p", State: QuotaAvailable, Source: "s", Confidence: "guess", ObservedAt: time.Now()})},
-		{"bad health", s.SaveProviderHealth(ctx, HealthRecord{Provider: "p", State: "SICK", ObservedAt: time.Now()})},
+		{"unknown state", s.SavePollResult(ctx, "p", QuotaSnapshot{
+			Provider: "p", State: "BOGUS", Source: "s", Confidence: Reported, ObservedAt: at},
+			HealthRecord{Provider: "p", State: Healthy, ObservedAt: at}, at, at)},
+		{"unknown without reason", s.SavePollResult(ctx, "p", QuotaSnapshot{
+			Provider: "p", State: QuotaUnknown, Source: "s", Confidence: Reported, ObservedAt: at},
+			HealthRecord{Provider: "p", State: Healthy, ObservedAt: at}, at, at)},
+		{"reason on a known state", s.SavePollResult(ctx, "p", QuotaSnapshot{
+			Provider: "p", State: QuotaAvailable, UnknownReason: &reason, Source: "s", Confidence: Reported, ObservedAt: at},
+			HealthRecord{Provider: "p", State: Healthy, ObservedAt: at}, at, at)},
+		{"bad confidence", s.SavePollResult(ctx, "p", QuotaSnapshot{
+			Provider: "p", State: QuotaAvailable, Source: "s", Confidence: "guess", ObservedAt: at},
+			HealthRecord{Provider: "p", State: Healthy, ObservedAt: at}, at, at)},
+		{"bad health", s.SavePollResult(ctx, "p", QuotaSnapshot{
+			Provider: "p", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: at},
+			HealthRecord{Provider: "p", State: "SICK", ObservedAt: at}, at, at)},
 	} {
 		if c.err == nil {
 			t.Errorf("%s: saved, want an error", c.name)
@@ -378,10 +389,11 @@ func TestConcurrentWritesAndReads(t *testing.T) {
 		go func(p int) {
 			defer wg.Done()
 			for i := 0; i < 25; i++ {
-				if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+				now := time.Now().UTC()
+				if err := s.SavePollResult(ctx, "provider-"+string(rune('a'+p)), QuotaSnapshot{
 					Provider: "provider-" + string(rune('a'+p)), State: QuotaAvailable, Source: "s",
-					Confidence: Reported, ObservedAt: time.Now(),
-				}); err != nil {
+					Confidence: Reported, ObservedAt: now,
+				}, HealthRecord{Provider: "provider-" + string(rune('a'+p)), State: Healthy, ObservedAt: now}, now, now); err != nil {
 					errs <- err
 					return
 				}
@@ -427,15 +439,12 @@ func TestPruneKeepsTheLatestStateItMustNotRemove(t *testing.T) {
 		if i == 2 {
 			provider = "command-code"
 		}
-		if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+		if err := s.SavePollResult(ctx, provider, QuotaSnapshot{
 			Provider: provider, State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: obs,
 			Windows: []QuotaWindow{{Window: "5h"}},
-		}); err != nil {
-			t.Fatalf("SaveQuotaSnapshot: %v", err)
+		}, HealthRecord{Provider: provider, State: Healthy, ObservedAt: obs}, obs, obs); err != nil {
+			t.Fatalf("SavePollResult: %v", err)
 		}
-	}
-	if err := s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: old}); err != nil {
-		t.Fatalf("SaveProviderHealth: %v", err)
 	}
 	if err := s.SaveUsageRecord(ctx, UsageRecord{Source: "test", Provider: "minimax", Provenance: Estimated, ObservedAt: old}); err != nil {
 		t.Fatalf("SaveUsageRecord: %v", err)
@@ -470,9 +479,11 @@ func TestPruneKeepsTheLatestStateItMustNotRemove(t *testing.T) {
 	if orphanWindows != 0 {
 		t.Fatalf("orphan quota_windows = %d, want 0", orphanWindows)
 	}
-	// Health keeps its newest row per provider; usage has no such rule.
-	if deleted["provider_health"] != 0 {
-		t.Fatalf("deleted provider_health = %d, want 0 (the newest per provider is kept)", deleted["provider_health"])
+	// Health keeps its newest row per provider; usage has no such rule. A cycle
+	// write also appends a health observation, so the stale pre-newest row is
+	// deleted and only the newest per provider survives.
+	if deleted["provider_health"] != 1 {
+		t.Fatalf("deleted provider_health = %d, want 1 (the stale observation before the newest is gone, the newest is kept)", deleted["provider_health"])
 	}
 	if deleted["usage_records"] != 1 {
 		t.Fatalf("deleted usage_records = %d, want 1", deleted["usage_records"])
@@ -712,15 +723,17 @@ func TestReadersAndRetentionAgreeOnTimestampTies(t *testing.T) {
 
 	// Two snapshots and two health rows for one provider at the same instant.
 	for _, state := range []QuotaState{QuotaAvailable, QuotaExhausted} {
-		if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+		if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
 			Provider: "minimax", State: state, Source: "s", Confidence: Reported, ObservedAt: at,
-		}); err != nil {
-			t.Fatalf("SaveQuotaSnapshot: %v", err)
+		}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: at}, at, at); err != nil {
+			t.Fatalf("SavePollResult: %v", err)
 		}
 	}
 	for _, state := range []HealthState{Healthy, Unavailable} {
-		if err := s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: state, ObservedAt: at}); err != nil {
-			t.Fatalf("SaveProviderHealth: %v", err)
+		if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+			Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: at,
+		}, HealthRecord{Provider: "minimax", State: state, ObservedAt: at}, at, at); err != nil {
+			t.Fatalf("SavePollResult: %v", err)
 		}
 	}
 
@@ -870,14 +883,14 @@ func TestSubMillisecondObservationsDoNotTie(t *testing.T) {
 	newer := base.Add(900 * time.Microsecond)
 
 	// The newer observation is written first, so the older one gets the higher id.
-	if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
 		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: newer,
-	}); err != nil {
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: newer}, newer, newer); err != nil {
 		t.Fatalf("newer: %v", err)
 	}
-	if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
 		Provider: "minimax", State: QuotaExhausted, Source: "s", Confidence: Reported, ObservedAt: base,
-	}); err != nil {
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: base}, base, base); err != nil {
 		t.Fatalf("older: %v", err)
 	}
 
@@ -1029,20 +1042,27 @@ func TestStoredErrorsMustBeSafeDescriptions(t *testing.T) {
 			Provider: "p", State: QuotaUnknown, UnknownReason: ptr(ReasonFetchFailed),
 			Source: "s", Confidence: Reported, ObservedAt: time.Now(), Error: e,
 		}
-		if err := s.SaveQuotaSnapshot(ctx, snap); err == nil {
+		if err := s.SavePollResult(ctx, "p", snap, HealthRecord{
+			Provider: "p", State: Unavailable, ObservedAt: time.Now(), Error: e,
+		}, time.Now().UTC(), time.Time{}); err == nil {
 			t.Errorf("quota snapshot stored error %q", e[:40])
 		}
-		if err := s.SaveProviderHealth(ctx, HealthRecord{
+		if err := s.SavePollResult(ctx, "p", QuotaSnapshot{
+			Provider: "p", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: time.Now(),
+		}, HealthRecord{
 			Provider: "p", State: Unavailable, ObservedAt: time.Now(), Error: e,
-		}); err == nil {
+		}, time.Now().UTC(), time.Time{}); err == nil {
 			t.Errorf("health stored error %q", e[:40])
 		}
 	}
 
 	// A short reason that names no credential is still accepted.
-	if err := s.SaveProviderHealth(ctx, HealthRecord{
-		Provider: "p", State: Degraded, ObservedAt: time.Now(), Error: "http 503 from quota endpoint",
-	}); err != nil {
+	now := time.Now().UTC()
+	if err := s.SavePollResult(ctx, "p", QuotaSnapshot{
+		Provider: "p", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: now,
+	}, HealthRecord{
+		Provider: "p", State: Degraded, ObservedAt: now, Error: "http 503 from quota endpoint",
+	}, now, now); err != nil {
 		t.Fatalf("safe description rejected: %v", err)
 	}
 }
@@ -1093,10 +1113,11 @@ func TestDiskFullIsReportedAndLeavesNoRows(t *testing.T) {
 	// window insert fails, the snapshot row must not survive alone.
 	var sawFull bool
 	for i := 0; i < 100 && !sawFull; i++ {
-		err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
-			Provider: "p", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: time.Now(),
+		now := time.Now().UTC()
+		err := s.SavePollResult(ctx, "p", QuotaSnapshot{
+			Provider: "p", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: now,
 			Windows: []QuotaWindow{{Window: "5h", Limit: floatPtr(1), Used: floatPtr(0)}},
-		})
+		}, HealthRecord{Provider: "p", State: Healthy, ObservedAt: now}, now, now)
 		switch {
 		case err == nil:
 		case errors.Is(err, ErrFull):
@@ -1215,8 +1236,8 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 6 {
-		t.Fatalf("version = %d, want 6", v)
+	if v != 7 {
+		t.Fatalf("version = %d, want 7", v)
 	}
 	var applied int
 	if err := first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied); err != nil {
@@ -1234,21 +1255,20 @@ func TestPruneSparesTheSameRowTheReadersReturn(t *testing.T) {
 
 	// A late write with an older observed_at: the row with the highest id is not
 	// the newest observation, so pruning by id would delete what routing reads.
-	if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
-		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: base.Add(2 * time.Hour),
-	}); err != nil {
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: base,
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: base}, base, base); err != nil {
+		t.Fatalf("stale write: %v", err)
+	}
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: base.Add(time.Hour),
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: base.Add(time.Hour)}, base.Add(time.Hour), base.Add(time.Hour)); err != nil {
 		t.Fatalf("newest: %v", err)
 	}
-	if err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
-		Provider: "minimax", State: QuotaLow, Source: "s", Confidence: Reported, ObservedAt: base,
-	}); err != nil {
-		t.Fatalf("late stale write: %v", err)
-	}
-	if err := s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: base.Add(2 * time.Hour)}); err != nil {
-		t.Fatalf("health newest: %v", err)
-	}
-	if err := s.SaveProviderHealth(ctx, HealthRecord{Provider: "minimax", State: Unavailable, ObservedAt: base}); err != nil {
-		t.Fatalf("health late write: %v", err)
+	if err := s.SavePollResult(ctx, "command-code", QuotaSnapshot{
+		Provider: "command-code", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: base.Add(2 * time.Hour),
+	}, HealthRecord{Provider: "command-code", State: Healthy, ObservedAt: base.Add(2 * time.Hour)}, base.Add(2*time.Hour), base.Add(2*time.Hour)); err != nil {
+		t.Fatalf("other provider: %v", err)
 	}
 
 	before, err := s.LatestQuotaSnapshot(ctx)
@@ -1269,14 +1289,14 @@ func TestPruneSparesTheSameRowTheReadersReturn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestQuotaSnapshot after prune: %v", err)
 	}
-	if len(after) != 1 || after[0].State != before[0].State || !after[0].ObservedAt.Equal(before[0].ObservedAt) {
+	if len(after) != len(before) || after[0].State != before[0].State || !after[0].ObservedAt.Equal(before[0].ObservedAt) {
 		t.Fatalf("routing read before %+v, after %+v: prune removed the row the reader returns", before, after)
 	}
 	healthAfter, err := s.LatestProviderHealth(ctx)
 	if err != nil {
 		t.Fatalf("LatestProviderHealth after prune: %v", err)
 	}
-	if len(healthAfter) != 1 || healthAfter[0].State != healthBefore[0].State {
+	if len(healthAfter) != len(healthBefore) || healthAfter[0].State != healthBefore[0].State {
 		t.Fatalf("health before %+v, after %+v: prune removed the row the reader returns", healthBefore, healthAfter)
 	}
 }
@@ -1291,8 +1311,8 @@ func TestFailedWriteLeavesThePreviousStateReadable(t *testing.T) {
 		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported,
 		ObservedAt: time.Now(), Windows: []QuotaWindow{{Window: "5h", Remaining: floatPtr(50)}},
 	}
-	if err := s.SaveQuotaSnapshot(ctx, good); err != nil {
-		t.Fatalf("SaveQuotaSnapshot: %v", err)
+	if err := s.SavePollResult(ctx, "minimax", good, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: good.ObservedAt}, good.ObservedAt, good.ObservedAt); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
 	}
 
 	// Fail the next write at the database: a broken foreign key target cannot be
@@ -1303,12 +1323,13 @@ func TestFailedWriteLeavesThePreviousStateReadable(t *testing.T) {
 	}
 	committed, sawFull := 1, false
 	for i := 0; i < 100 && !sawFull; i++ {
-		err := s.SaveQuotaSnapshot(ctx, QuotaSnapshot{
+		now := time.Now().UTC()
+		err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
 			Provider: "minimax", State: QuotaExhausted, Source: "s", Confidence: Reported,
 			ObservedAt: time.Now().Add(time.Duration(i+1) * time.Second),
 			Error:      strings.Repeat("x", maxError-1), // a full, accepted description
 			Windows:    []QuotaWindow{{Window: "5h", Remaining: floatPtr(0)}},
-		})
+		}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: time.Now()}, now, now)
 		switch {
 		case err == nil:
 			committed++
@@ -1397,12 +1418,16 @@ func TestPollStateTracksAttemptAndSuccessSeparately(t *testing.T) {
 	}
 
 	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
-	if err := s.SavePollState(ctx, "minimax", first, first); err != nil {
-		t.Fatalf("SavePollState: %v", err)
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: first,
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}, first, first); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
 	}
 	later := first.Add(time.Minute)
-	if err := s.SavePollState(ctx, "minimax", later, time.Time{}); err != nil {
-		t.Fatalf("SavePollState after a failure: %v", err)
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: later,
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: later}, later, time.Time{}); err != nil {
+		t.Fatalf("SavePollResult after a failure: %v", err)
 	}
 
 	attempt, success, err = s.PollState(ctx, "minimax")
@@ -1417,8 +1442,10 @@ func TestPollStateTracksAttemptAndSuccessSeparately(t *testing.T) {
 	}
 
 	// Providers do not share a row.
-	if err := s.SavePollState(ctx, "other", later, time.Time{}); err != nil {
-		t.Fatalf("SavePollState: %v", err)
+	if err := s.SavePollResult(ctx, "other", QuotaSnapshot{
+		Provider: "other", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: later,
+	}, HealthRecord{Provider: "other", State: Healthy, ObservedAt: later}, later, time.Time{}); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
 	}
 	if a, succ, err := s.PollState(ctx, "other"); err != nil || !a.Equal(later) || !succ.IsZero() {
 		t.Fatalf("other = %s/%s (err %v), want its own attempt and no success", a, succ, err)
@@ -1427,11 +1454,274 @@ func TestPollStateTracksAttemptAndSuccessSeparately(t *testing.T) {
 		t.Fatalf("minimax attempt = %s, want it untouched by another provider", a)
 	}
 
-	if err := s.SavePollState(ctx, "", later, later); err == nil {
-		t.Fatal("SavePollState accepted an empty provider")
+	if err := s.SavePollResult(ctx, "", QuotaSnapshot{
+		Provider: "p", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: later,
+	}, HealthRecord{Provider: "p", State: Healthy, ObservedAt: later}, later, later); err == nil {
+		t.Fatal("SavePollResult accepted an empty provider")
 	}
-	if err := s.SavePollState(ctx, "minimax", time.Time{}, later); err == nil {
-		t.Fatal("SavePollState accepted a zero attempt time")
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: later,
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: later}, time.Time{}, later); err == nil {
+		t.Fatal("SavePollResult accepted a zero attempt time")
+	}
+}
+
+// The batch poll-state read returns one anchor per provider for callers that
+// hold several, instead of one query per provider.
+func TestPollStatesReturnsAnchorsPerProvider(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	states, err := s.PollStates(ctx)
+	if err != nil {
+		t.Fatalf("PollStates: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("PollStates = %v, want no anchors before any poll", states)
+	}
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: first,
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}, first, first); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
+	}
+	if err := s.SavePollResult(ctx, "other", QuotaSnapshot{
+		Provider: "other", State: QuotaAvailable, Source: "s", Confidence: Reported, ObservedAt: first.Add(time.Minute),
+	}, HealthRecord{Provider: "other", State: Healthy, ObservedAt: first.Add(time.Minute)}, first.Add(time.Minute), time.Time{}); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
+	}
+
+	states, err = s.PollStates(ctx)
+	if err != nil {
+		t.Fatalf("PollStates: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("PollStates = %v, want one anchor per provider", states)
+	}
+	if got := states["minimax"]; !got.Equal(first) {
+		t.Fatalf("PollStates[minimax] = %s, want %s", got, first)
+	}
+	if got := states["other"]; !got.Equal(first.Add(time.Minute)) {
+		t.Fatalf("PollStates[other] = %s, want %s", got, first.Add(time.Minute))
+	}
+
+	// A provider without a poll-state row maps to the zero time, like an absent
+	// poll state: readers must fail closed on it.
+	if got := states["never-polled"]; !got.IsZero() {
+		t.Fatalf("PollStates[never-polled] = %s, want the zero time", got)
+	}
+}
+
+// SavePollResult commits one poll cycle — snapshot, health and the poll-state
+// anchor — as a single transaction: either all three land, or the cycle fails
+// and none of them change.
+func TestSavePollResultIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	snap := QuotaSnapshot{
+		Provider:   "minimax",
+		State:      QuotaAvailable,
+		Source:     "test",
+		Confidence: Reported,
+		ObservedAt: first,
+		Windows: []QuotaWindow{{
+			Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset,
+		}},
+	}
+	health := HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}
+
+	if err := s.SavePollResult(ctx, "minimax", snap, health, first, first); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(first) || !success.Equal(first) {
+		t.Fatalf("after a good cycle: PollState = %s/%s (err %v), want %s/%s", attempt, success, err, first, first)
+	}
+	if healths, err := s.LatestProviderHealth(ctx); err != nil || len(healths) != 1 || healths[0].Provider != "minimax" {
+		t.Fatalf("after a good cycle: healths = %+v (err %v)", healths, err)
+	}
+	if snaps, err := s.LatestQuotaSnapshot(ctx); err != nil || len(snaps) != 1 || snaps[0].Provider != "minimax" {
+		t.Fatalf("after a good cycle: snaps = %+v (err %v)", snaps, err)
+	}
+
+	// A failed cycle rolls back: a cancelled context fails the transaction after
+	// the snapshot, windows and health were staged, and nothing changes.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.SavePollResult(cctx, "minimax", snap, health, first.Add(time.Minute), time.Time{}); err == nil {
+		t.Fatal("SavePollResult with a cancelled context: want failure")
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(first) || !success.Equal(first) {
+		t.Fatalf("after a failed cycle: PollState = %s/%s (err %v), want the previous %s/%s", attempt, success, err, first, first)
+	}
+	if snaps, err := s.LatestQuotaSnapshot(ctx); err != nil || len(snaps) != 1 {
+		t.Fatalf("after a failed cycle: snaps = %+v (err %v), want the single committed row", snaps, err)
+	}
+
+	// Validation failures reject before any write, so no partial state lands.
+	badsnap := snap
+	badsnap.Provider = ""
+	if err := s.SavePollResult(ctx, "minimax", badsnap, health, first.Add(time.Minute), time.Time{}); err == nil {
+		t.Fatal("SavePollResult accepted a snapshot without a provider")
+	}
+	if err := s.SavePollResult(ctx, "minimax", snap, HealthRecord{Provider: "other", State: Healthy, ObservedAt: first}, first.Add(time.Minute), time.Time{}); err == nil {
+		t.Fatal("SavePollResult accepted mismatched providers")
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(first) || !success.Equal(first) {
+		t.Fatalf("after rejected cycles: PollState = %s/%s (err %v), want the previous %s/%s", attempt, success, err, first, first)
+	}
+}
+
+// The batch cycle read returns the snapshot, the health observation and the
+// freshness anchor of the same committed cycle, so a reader can never pair a
+// snapshot with an anchor from different cycles.
+func TestPollCyclesReturnsSnapshotHealthAndAnchorTogether(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	cycles, err := s.PollCycles(ctx)
+	if err != nil {
+		t.Fatalf("PollCycles: %v", err)
+	}
+	if len(cycles) != 0 {
+		t.Fatalf("PollCycles = %v, want no cycles before any poll", cycles)
+	}
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	snap := QuotaSnapshot{
+		Provider:   "minimax",
+		State:      QuotaAvailable,
+		Source:     "test",
+		Confidence: Reported,
+		ObservedAt: first,
+		Windows: []QuotaWindow{{
+			Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset,
+		}},
+	}
+	health := HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}
+	if err := s.SavePollResult(ctx, "minimax", snap, health, first, first); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
+	}
+
+	cycles, err = s.PollCycles(ctx)
+	if err != nil {
+		t.Fatalf("PollCycles: %v", err)
+	}
+	cycle, ok := cycles["minimax"]
+	if !ok {
+		t.Fatalf("PollCycles = %v, want a cycle for minimax", cycles)
+	}
+	if cycle.Snapshot.State != QuotaAvailable {
+		t.Fatalf("cycle snapshot state = %s, want AVAILABLE", cycle.Snapshot.State)
+	}
+	if len(cycle.Snapshot.Windows) != 1 || cycle.Snapshot.Windows[0].Window != "5h" {
+		t.Fatalf("cycle snapshot windows = %+v, want the single 5h window", cycle.Snapshot.Windows)
+	}
+	if cycle.AttemptAt != first {
+		t.Fatalf("cycle attempt_at = %s, want %s", cycle.AttemptAt, first)
+	}
+	if cycle.Health.State != Healthy {
+		t.Fatalf("cycle health state = %s, want HEALTHY", cycle.Health.State)
+	}
+	if got := cycle.Health.ObservedAt; !got.Equal(first) {
+		t.Fatalf("cycle health observed_at = %s, want %s", got, first)
+	}
+}
+
+// The latest cycle is one unit: a later cycle that committed a stale (cached)
+// observation must come back as that cycle's snapshot, health and anchor
+// together, so the freshness bound judges the stale observation and not the
+// older committed cycle's snapshot wearing the newer anchor.
+func TestPollCyclesKeepsSnapshotHealthAndAnchorInOneCycle(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "test", Confidence: Reported, ObservedAt: first,
+		Windows: []QuotaWindow{{Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}, first, first); err != nil {
+		t.Fatalf("SavePollResult cycle A: %v", err)
+	}
+	staleReason := ReasonStale
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaUnknown, UnknownReason: &staleReason, Source: "test", Confidence: Reported, ObservedAt: first.Add(-2 * time.Hour),
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: second}, second, time.Time{}); err != nil {
+		t.Fatalf("SavePollResult cycle B: %v", err)
+	}
+
+	cycles, err := s.PollCycles(ctx)
+	if err != nil {
+		t.Fatalf("PollCycles: %v", err)
+	}
+	cycle, ok := cycles["minimax"]
+	if !ok {
+		t.Fatalf("PollCycles = %v, want a cycle for minimax", cycles)
+	}
+	if cycle.Snapshot.State != QuotaUnknown {
+		t.Fatalf("cycle snapshot state = %s, want UNKNOWN for the stale cycle B", cycle.Snapshot.State)
+	}
+	if cycle.Snapshot.UnknownReason == nil || *cycle.Snapshot.UnknownReason != ReasonStale {
+		t.Fatalf("cycle snapshot unknown_reason = %v, want %s", cycle.Snapshot.UnknownReason, ReasonStale)
+	}
+	if !cycle.AttemptAt.Equal(second) {
+		t.Fatalf("cycle attempt_at = %s, want the anchor of cycle B at %s", cycle.AttemptAt, second)
+	}
+	if cycle.Health.State != Healthy {
+		t.Fatalf("cycle health state = %s, want HEALTHY of cycle B", cycle.Health.State)
+	}
+	if got := cycle.Health.ObservedAt; !got.Equal(second) {
+		t.Fatalf("cycle health observed_at = %s, want %s", got, second)
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(second) || !success.Equal(first) {
+		t.Fatalf("PollState = %s/%s (err %v), want the attempt of cycle B and the success of cycle A", attempt, success, err)
+	}
+}
+
+// A cycle that reports an older observation must not move the durable last
+// success backwards: the last success only ever moves forward.
+func TestSavePollResultKeepsLastSuccessFromMovingBackwards(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "test", Confidence: Reported, ObservedAt: first,
+		Windows: []QuotaWindow{{Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}, first, first); err != nil {
+		t.Fatalf("SavePollResult cycle A: %v", err)
+	}
+	// Cycle B attempts later but observes an older timestamp (a cached copy) and
+	// reports that older success: the stored last success must not regress.
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "test", Confidence: Reported, ObservedAt: first.Add(-time.Hour),
+		Windows: []QuotaWindow{{Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: second}, second, first.Add(-time.Hour)); err != nil {
+		t.Fatalf("SavePollResult cycle B: %v", err)
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(second) || !success.Equal(first) {
+		t.Fatalf("PollState = %s/%s (err %v), want the attempt of cycle B and the success of cycle A, not an older one", attempt, success, err)
 	}
 }
 

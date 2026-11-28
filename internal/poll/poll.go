@@ -29,13 +29,11 @@ type Source interface {
 
 // Sink persists what a poll observed. store.Store implements it.
 type Sink interface {
-	SaveQuotaSnapshot(ctx context.Context, snap store.QuotaSnapshot) error
-	SaveProviderHealth(ctx context.Context, h store.HealthRecord) error
-	// SavePollState records the attempt time and, when the attempt established
-	// quota, the success time. A zero success time must leave the recorded
-	// success untouched: the two timestamps are independent, and a failure does
-	// not erase when quota was last known good.
-	SavePollState(ctx context.Context, provider string, attemptAt, successAt time.Time) error
+	// SavePollResult persists one poll cycle — snapshot, health and the
+	// poll-state anchor — as a single transaction, so a cycle is never observed
+	// half-written and a failed cycle cannot leave a newer snapshot behind an
+	// anchor that was not advanced.
+	SavePollResult(ctx context.Context, provider string, snap store.QuotaSnapshot, health store.HealthRecord, attemptAt, successAt time.Time) error
 }
 
 // Target is one configured provider and the adapter that polls it. The name is
@@ -76,6 +74,23 @@ type Poller struct {
 	// scheduling is deterministic instead of sleep-driven.
 	wait   func(ctx context.Context, d time.Duration) bool
 	jitter func(time.Duration) time.Duration
+}
+
+// loopState owns the retry counters for one provider loop. Each loop owns its
+// own state, so providers polled concurrently never share a counter and never
+// mix one provider's attempts into another's history.
+type loopState struct {
+	// consecutiveFailures counts committed cycles that did not establish quota;
+	// the per-attempt debug log reports it, the retry count and the duration, so
+	// a provider outage is diagnosable from logs alone. It counts only cycles that
+	// were persisted: a failed write is logged with persist_ok=false and leaves
+	// the failure history of the last committed cycle alone.
+	consecutiveFailures int
+	// processLastSuccessAt is the newest committed cycle in this process that
+	// established quota; a restart starts the history over even though poll_state
+	// keeps the durable anchor. It is a loop diagnostic, not the durable last
+	// success a reader compares against.
+	processLastSuccessAt time.Time
 }
 
 // New builds a poller with the production defaults for retry.
@@ -121,8 +136,9 @@ func (p *Poller) Run(ctx context.Context) {
 // that took longer than expected — resumes with exactly one poll and no burst of
 // catch-up polls for the ticks that passed.
 func (p *Poller) loop(ctx context.Context, t Target) {
+	var st loopState
 	for {
-		p.poll(ctx, t)
+		p.poll(ctx, t, &st)
 		if !p.wait(ctx, p.Interval) {
 			return
 		}
@@ -130,12 +146,14 @@ func (p *Poller) loop(ctx context.Context, t Target) {
 }
 
 // poll performs one poll: an attempt, and retries while the adapter classified
-// the failure as transient. Every attempt is persisted, so last-attempt moves
-// even when the poll never succeeds, while last-success keeps its own value.
-func (p *Poller) poll(ctx context.Context, t Target) {
+// the failure as transient. Every attempt is persisted, so last_attempt_at moves
+// even when the poll never succeeds, while the loop's process-local last success
+// keeps its own value until a committed cycle establishes quota again.
+func (p *Poller) poll(ctx context.Context, t Target, st *loopState) {
 	for attempt := 1; ; attempt++ {
+		started := time.Now().UTC()
 		snap, state := t.Source.Fetch(ctx)
-		p.record(ctx, t.Name, snap, state)
+		p.record(ctx, t.Name, st, snap, state, attempt, started)
 
 		if attempt >= p.attempts() || !retryable(snap, state) {
 			return
@@ -148,32 +166,49 @@ func (p *Poller) poll(ctx context.Context, t Target) {
 
 // record persists one attempt. A cancelled context is not an observation: the
 // attempt was cut short by shutdown, so it must not be stored as a failure.
-func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapshot, state quota.ProviderState) {
+func (p *Poller) record(ctx context.Context, provider string, st *loopState, snap quota.Snapshot, state quota.ProviderState, attempt int, started time.Time) {
 	if ctx.Err() != nil {
 		return
 	}
 	at := time.Now().UTC()
-	// Success means the attempt produced an observation the provider stands
-	// behind, not that quota is AVAILABLE: an unusable or retained copy is not a
-	// success, and its state is still derived from the windows below.
-	success := snap.Confidence != quota.ConfidenceNone && !snap.Stale
+	// The observation the poller hands to the sink is mapped through StateAt
+	// here, so staleness relative to the freshness bound is part of the
+	// classification a success is measured against. Success means the attempt
+	// produced an observation the provider stands behind and that is still inside
+	// the bound — not that quota is AVAILABLE: an unusable or retained copy is
+	// not a success, and its state is the one derived from the windows.
+	persisted := observation(provider, snap, p.StaleAfter, at)
+	success := persisted.State != store.QuotaUnknown
 	var successAt time.Time
 	if success {
-		successAt = snap.ObservedAt
+		successAt = persisted.ObservedAt
+	}
+	var cycleErr error
+	if err := p.Sink.SavePollResult(ctx, provider, persisted, health(provider, state), at, successAt); err != nil {
+		cycleErr = err
+		p.Log.Error("persist poll result", "provider", provider, "error", cycleErr)
 	}
 
-	if err := p.Sink.SaveQuotaSnapshot(ctx, observation(provider, snap, p.StaleAfter, at)); err != nil {
-		p.Log.Error("persist quota snapshot", "provider", provider, "error", err)
-	}
-	if err := p.Sink.SaveProviderHealth(ctx, health(provider, state)); err != nil {
-		p.Log.Error("persist provider health", "provider", provider, "error", err)
-	}
-	if err := p.Sink.SavePollState(ctx, provider, at, successAt); err != nil {
-		p.Log.Error("persist poll state", "provider", provider, "error", err)
+	// A success only counts once the cycle committed: the observation has to be
+	// durably anchored before it becomes the provider's last success, so a failed
+	// persistence leaves the failure history of the last committed cycle alone.
+	if cycleErr == nil {
+		if success {
+			st.consecutiveFailures = 0
+			st.processLastSuccessAt = successAt
+		} else {
+			st.consecutiveFailures++
+		}
 	}
 
+	// started precedes the fetch and the persistence below, so the duration
+	// covers the whole attempt — provider response and sink writes — not just
+	// the provider call.
 	p.Log.Debug("polled provider", "provider", provider,
-		"health", state.Health, "reason", state.Reason(), "fresh", success)
+		"health", state.Health, "reason", state.Reason(), "fresh", success,
+		"attempt", attempt, "retries", attempt-1, "attempt_duration_ms", time.Since(started).Milliseconds(),
+		"consecutive_failures", st.consecutiveFailures, "process_last_success_at", st.processLastSuccessAt.UTC().Format(time.RFC3339Nano),
+		"last_attempt_at", at.UTC().Format(time.RFC3339Nano), "persist_ok", cycleErr == nil)
 }
 
 // attempts is the retry bound in the form the loop needs: at least one attempt.

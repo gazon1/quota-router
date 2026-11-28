@@ -148,6 +148,18 @@ func TestStateAtRejectsUntrustworthyObservations(t *testing.T) {
 	}
 }
 
+func TestStateAtFreshnessBoundaryIsInclusive(t *testing.T) {
+	atBound := Observed("p", "src", now.Add(-time.Hour), []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
+	if got, reason := atBound.StateAt(now, time.Hour); got != Available || reason != "" {
+		t.Fatalf("StateAt(at bound) = %s/%s, want AVAILABLE", got, reason)
+	}
+
+	oneSecondPast := Observed("p", "src", now.Add(-time.Hour-time.Second), []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
+	if got, reason := oneSecondPast.StateAt(now, time.Hour); got != QuotaUnknown || reason != StaleObservation {
+		t.Fatalf("StateAt(one second past bound) = %s/%s, want UNKNOWN/%s", got, reason, StaleObservation)
+	}
+}
+
 func TestSmallClockSkewIsTolerated(t *testing.T) {
 	s := Observed("p", "src", now.Add(30*time.Second), []Window{remaining(90, 100, now.Add(time.Hour))}, 0.1)
 	if got, _ := s.StateAt(now, time.Hour); got != Available {

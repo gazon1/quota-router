@@ -14,10 +14,13 @@ import (
 	"github.com/gazon1/quota-router/internal/store"
 )
 
-// StateReader reads quota and health observations the route use case needs.
+// StateReader reads the latest persisted poll cycle per provider — snapshot,
+// health and freshness anchor — for the route use case. Reading the cycle as one
+// unit keeps a snapshot from being paired with an anchor or a health observation
+// from different polling cycles, which is what would let an older snapshot look
+// fresh again. Same zero value as an absent cycle: readers fail closed on it.
 type StateReader interface {
-	LatestQuotaSnapshot(ctx context.Context) ([]store.QuotaSnapshot, error)
-	LatestProviderHealth(ctx context.Context) ([]store.HealthRecord, error)
+	PollCycles(ctx context.Context) (map[string]store.PollCycle, error)
 }
 
 // AffinityStore reads and writes session route pins.
@@ -109,13 +112,14 @@ func (s *RouteService) Release(ctx context.Context, sessionID string) (store.Ses
 	return pin, ok, nil
 }
 
-// loadSelectState reads what selection needs for one session: quota and health
-// observations plus that session's route pin, if it has a live one. An expired
-// pin is ignored here as well as in the selector, so the decision explanation
-// and the stored state agree on what the session is pinned to. Expired rows are
-// left for TTL/storage cleanup rather than deleted on the read path. Performance
-// tie-breaks are implemented in the selector but no observation store feeds them
-// yet; they stay unused rather than being loaded from nothing.
+// loadSelectState reads what selection needs for one session: the latest poll
+// cycle per provider — snapshot, health and freshness anchor — plus that
+// session's route pin, if it has a live one. An expired pin is ignored here as
+// well as in the selector, so the decision explanation and the stored state
+// agree on what the session is pinned to. Expired rows are left for TTL/storage
+// cleanup rather than deleted on the read path. Performance tie-breaks are
+// implemented in the selector but no observation store feeds them yet; they stay
+// unused rather than being loaded from nothing.
 func (s *RouteService) loadSelectState(ctx context.Context, sessionID string) (routing.SelectState, error) {
 	now := time.Now().UTC()
 	freshness := staleAfter(s.cfg.Polling.Interval)
@@ -129,19 +133,13 @@ func (s *RouteService) loadSelectState(ctx context.Context, sessionID string) (r
 	if s.state == nil {
 		return routing.SelectState{}, fmt.Errorf("routing state store unavailable")
 	}
-	snaps, err := s.state.LatestQuotaSnapshot(ctx)
+	cycles, err := s.state.PollCycles(ctx)
 	if err != nil {
 		return routing.SelectState{}, err
 	}
-	for _, snap := range snaps {
-		state.Quota[snap.Provider] = quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-	}
-	health, err := s.state.LatestProviderHealth(ctx)
-	if err != nil {
-		return routing.SelectState{}, err
-	}
-	for _, h := range health {
-		state.Health[h.Provider] = providerStateFromStore(h)
+	for provider, c := range cycles {
+		state.Quota[provider] = s.quotaAt(c.Snapshot, c.AttemptAt, now, freshness)
+		state.Health[provider] = providerStateFromStore(c.Health)
 	}
 	if s.affinity == nil {
 		return routing.SelectState{}, fmt.Errorf("routing state store unavailable")
@@ -154,6 +152,30 @@ func (s *RouteService) loadSelectState(ctx context.Context, sessionID string) (r
 		state.Affinity = &routing.Affinity{SessionID: pin.SessionID, Alias: pin.Alias, ExpiresAt: pin.ExpiresAt}
 	}
 	return state, nil
+}
+
+// quotaAt maps one persisted quota row onto the actionable domain snapshot at
+// now, applying the freshness bound. The bound is anchored to the last poll
+// attempt behind the row, not only to the observation: a row written while quota
+// was fresh reads as stale once that attempt is past the bound, which is what a
+// process crash or a polling stop leaves behind. A row whose poll state is
+// missing is treated exactly like an expired one: no durably anchored attempt
+// backs it, so it stays stale instead of becoming current.
+func (s *RouteService) quotaAt(snap store.QuotaSnapshot, anchor time.Time, now time.Time, maxAge time.Duration) quota.Snapshot {
+	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
+	if anchor.IsZero() {
+		// No durably anchored attempt backs the row, so no cycle ever committed
+		// for it: it must not be actionable.
+		q.Stale = true
+		return q
+	}
+	// A future anchor cannot prove freshness either — clock skew or a bad write
+	// may push an attempt into tomorrow — so only a past observation inside the
+	// bound is fresh quota.
+	if age := now.Sub(anchor); age < 0 || age > maxAge {
+		q.Stale = true
+	}
+	return q
 }
 
 // pinAffinity records the route the session is now on. The write is one upsert
@@ -209,10 +231,6 @@ func QuotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Sn
 }
 
 func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Snapshot {
-	if s.State == store.QuotaUnknown {
-		reason := quotaUnknownReasonFromStore(s.UnknownReason)
-		return quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
-	}
 	windows := make([]quota.Window, 0, len(s.Windows))
 	for _, w := range s.Windows {
 		win := quota.Window{Name: w.Window, Limit: w.Limit, Used: w.Used, Remaining: w.Remaining}
@@ -220,6 +238,15 @@ func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Sn
 			win.ResetsAt = *w.ResetAt
 		}
 		windows = append(windows, win)
+	}
+	if s.State == store.QuotaUnknown {
+		reason := quotaUnknownReasonFromStore(s.UnknownReason)
+		snap := quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
+		if reason == quota.StaleObservation && len(windows) > 0 {
+			snap = quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
+			snap.Stale = true
+		}
+		return snap
 	}
 	return quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
 }

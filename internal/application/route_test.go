@@ -14,24 +14,33 @@ import (
 )
 
 type fakeState struct {
-	snaps     []store.QuotaSnapshot
-	health    []store.HealthRecord
-	snapErr   error
-	healthErr error
+	snaps       []store.QuotaSnapshot
+	health      []store.HealthRecord
+	lastAttempt map[string]time.Time
+	pollErr     error
 }
 
-func (f *fakeState) LatestQuotaSnapshot(context.Context) ([]store.QuotaSnapshot, error) {
-	if f.snapErr != nil {
-		return nil, f.snapErr
+// PollCycles maps the fake store's snapshot, health and last-attempt rows onto
+// the batch cycle read the route use case performs. A provider without a
+// snapshot row is absent from the map, like an absent poll cycle: nothing may be
+// fresh without one.
+func (f *fakeState) PollCycles(context.Context) (map[string]store.PollCycle, error) {
+	if f.pollErr != nil {
+		return nil, f.pollErr
 	}
-	return f.snaps, nil
-}
-
-func (f *fakeState) LatestProviderHealth(context.Context) ([]store.HealthRecord, error) {
-	if f.healthErr != nil {
-		return nil, f.healthErr
+	out := map[string]store.PollCycle{}
+	for _, sn := range f.snaps {
+		c := out[sn.Provider]
+		c.Snapshot = sn
+		c.AttemptAt = f.lastAttempt[sn.Provider]
+		out[sn.Provider] = c
 	}
-	return f.health, nil
+	for _, h := range f.health {
+		c := out[h.Provider]
+		c.Health = h
+		out[h.Provider] = c
+	}
+	return out, nil
 }
 
 type fakeAffinity struct {
@@ -139,8 +148,15 @@ func routeReq(sessionID string) routing.RouteRequest {
 func newTestService() (*RouteService, *fakeState, *fakeAffinity, *fakeDecisions) {
 	cfg := testConfig()
 	state := &fakeState{
-		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
-		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		snaps: []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{
+			healthRec("commandcode", store.Healthy),
+			healthRec("minimax", store.Healthy),
+		},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
@@ -168,8 +184,15 @@ func TestRouteWithoutHTTPOrSQLite(t *testing.T) {
 func TestRoutePersistsDecisionBeforeAffinity(t *testing.T) {
 	cfg := testConfig()
 	state := &fakeState{
-		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
-		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+		snaps: []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{
+			healthRec("commandcode", store.Healthy),
+			healthRec("minimax", store.Healthy),
+		},
+		lastAttempt: map[string]time.Time{
+			"commandcode": time.Now().UTC(),
+			"minimax":     time.Now().UTC(),
+		},
 	}
 	order := &orderStore{fakeAffinity: &fakeAffinity{m: map[string]store.SessionAffinity{}}, fakeDecisions: &fakeDecisions{}}
 	svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, order, order)
@@ -235,8 +258,15 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 	cfg := testConfig()
 	state := &gateState{
 		fakeState: &fakeState{
-			snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
-			health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+			snaps: []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+			health: []store.HealthRecord{
+				healthRec("commandcode", store.Healthy),
+				healthRec("minimax", store.Healthy),
+			},
+			lastAttempt: map[string]time.Time{
+				"commandcode": time.Now().UTC(),
+				"minimax":     time.Now().UTC(),
+			},
 		},
 		read1: make(chan struct{}),
 		gate1: make(chan struct{}),
@@ -302,7 +332,7 @@ type gateState struct {
 	n     atomic.Int32
 }
 
-func (g *gateState) LatestQuotaSnapshot(ctx context.Context) ([]store.QuotaSnapshot, error) {
+func (g *gateState) PollCycles(ctx context.Context) (map[string]store.PollCycle, error) {
 	switch g.n.Add(1) {
 	case 1:
 		close(g.read1)
@@ -310,15 +340,22 @@ func (g *gateState) LatestQuotaSnapshot(ctx context.Context) ([]store.QuotaSnaps
 	case 2:
 		close(g.read2)
 	}
-	return g.fakeState.LatestQuotaSnapshot(ctx)
+	return g.fakeState.PollCycles(ctx)
 }
 
 func TestRouteDifferentSessionsConcurrent(t *testing.T) {
 	cfg := testConfig()
 	state := &gateState{
 		fakeState: &fakeState{
-			snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
-			health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
+			snaps: []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
+			health: []store.HealthRecord{
+				healthRec("commandcode", store.Healthy),
+				healthRec("minimax", store.Healthy),
+			},
+			lastAttempt: map[string]time.Time{
+				"commandcode": time.Now().UTC(),
+				"minimax":     time.Now().UTC(),
+			},
 		},
 		read1: make(chan struct{}),
 		gate1: make(chan struct{}),
@@ -374,6 +411,25 @@ func TestRouteRenewsAffinityTTL(t *testing.T) {
 		t.Fatalf("created_at changed: %v != %v", pin2.CreatedAt, pin1.CreatedAt)
 	}
 }
+
+// A future freshness anchor cannot prove freshness: clock skew or a bad write
+// must not turn into actionable quota.
+func TestRouteServiceQuotaAtFutureAnchorIsStale(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	now := time.Now().UTC()
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := now.Add(time.Hour)
+	q := svc.quotaAt(store.QuotaSnapshot{
+		Provider: "minimax", State: store.QuotaAvailable, Source: "test", Confidence: store.Reported, ObservedAt: now,
+		Windows: []store.QuotaWindow{{Window: "5h", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, now.Add(time.Minute), now, time.Hour)
+	if !q.Stale {
+		t.Fatalf("quotaAt stale = %t, want true for a future anchor", q.Stale)
+	}
+}
+
 func TestSessionLockIsPerSession(t *testing.T) {
 	var l sessionLocks
 	unlockA := l.lock("a")

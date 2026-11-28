@@ -1,10 +1,13 @@
 package poll
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,46 +19,54 @@ import (
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // recorder is a Sink that records what a poll persisted, so a test asserts on
-// what would have reached the database without one.
+// what would have reached the database without one. It implements the single
+// SavePollResult operation the Sink interface owns: a rejected write rolls the
+// whole cycle back, so nothing is recorded and the poll state is untouched.
 type recorder struct {
 	mu       sync.Mutex
 	snaps    []store.QuotaSnapshot
 	health   []store.HealthRecord
 	attempts map[string]time.Time
 	success  map[string]time.Time
-	// onSave runs before each snapshot write, so a test can block a poll.
-	onSave func()
+	// fail rejects sink writes, and failOp names one ("snapshot", "health" or
+	// "poll") or leaves it unset to reject all of them.
+	fail   bool
+	failOp string
 }
+
+const (
+	failSnapshot = "snapshot"
+	failHealth   = "health"
+	failPoll     = "poll"
+)
 
 func newRecorder() *recorder {
 	return &recorder{attempts: map[string]time.Time{}, success: map[string]time.Time{}}
 }
 
-func (r *recorder) SaveQuotaSnapshot(_ context.Context, s store.QuotaSnapshot) error {
-	if r.onSave != nil {
-		r.onSave()
+// SavePollResult persists one cycle atomically in the fake: any rejected write
+// rolls the cycle back, so nothing is recorded and the poll state is untouched.
+func (r *recorder) SavePollResult(_ context.Context, provider string, snap store.QuotaSnapshot, h store.HealthRecord, attemptAt, successAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.fail {
+		r.snaps = append(r.snaps, snap)
+		r.health = append(r.health, h)
+		r.attempts[provider] = attemptAt
+		if !successAt.IsZero() {
+			r.success[provider] = successAt
+		}
+		return nil
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.snaps = append(r.snaps, s)
-	return nil
-}
-
-func (r *recorder) SaveProviderHealth(_ context.Context, h store.HealthRecord) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.health = append(r.health, h)
-	return nil
-}
-
-func (r *recorder) SavePollState(_ context.Context, provider string, attemptAt, successAt time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.attempts[provider] = attemptAt
-	if !successAt.IsZero() {
-		r.success[provider] = successAt
+	switch r.failOp {
+	case "", failSnapshot:
+		return errors.New("simulated sink write failure: quota snapshot")
+	case failHealth:
+		return errors.New("simulated sink write failure: provider health")
+	case failPoll:
+		return errors.New("simulated sink write failure: poll state")
 	}
-	return nil
+	return errors.New("simulated sink write failure")
 }
 
 func (r *recorder) snapshots() []store.QuotaSnapshot {
@@ -186,6 +197,51 @@ func TestProviderIsolation(t *testing.T) {
 	<-done
 }
 
+// Retry counters belong to one provider loop, so concurrently polled providers
+// keep independent failure history instead of racing on or sharing one counter.
+func TestRetryCountersStayPerProvider(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rec := newRecorder()
+	p := New(time.Hour, 3*time.Hour, log, rec,
+		Target{Name: "alpha", Source: SourceFunc(func(context.Context) (quota.Snapshot, quota.ProviderState) {
+			a := transient()
+			return a.snap, a.state
+		})},
+		Target{Name: "beta", Source: SourceFunc(func(context.Context) (quota.Snapshot, quota.ProviderState) {
+			return good(), healthy()
+		})},
+	)
+	p.wait = func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil }
+	p.jitter = func(d time.Duration) time.Duration { return d }
+	p.Attempts = 1 // one attempt per poll, so each counter settles deterministically
+
+	ctx := context.Background()
+	var alphaSt, betaSt loopState
+	p.poll(ctx, p.Targets[0], &alphaSt) // alpha: transient failure
+	p.poll(ctx, p.Targets[1], &betaSt)  // beta: success
+	p.poll(ctx, p.Targets[0], &alphaSt) // alpha: second transient failure
+
+	alphaLine, betaLine := "", ""
+	for _, line := range strings.Split(buf.String(), "\n") {
+		switch {
+		case strings.Contains(line, "provider=alpha"):
+			alphaLine = line
+		case strings.Contains(line, "provider=beta"):
+			betaLine = line
+		}
+	}
+	if !strings.Contains(alphaLine, "consecutive_failures=2") {
+		t.Fatalf("alpha log %q: its own second transient failure must count as 2", alphaLine)
+	}
+	if !strings.Contains(alphaLine, "process_last_success_at=0001-01-01T00:00:00Z") {
+		t.Fatalf("alpha log %q: a provider that never succeeded must keep last success unset", alphaLine)
+	}
+	if !strings.Contains(betaLine, "consecutive_failures=0") {
+		t.Fatalf("beta log %q: want its own success to reset its counter", betaLine)
+	}
+}
+
 // A cancelled context stops the poller without leaking a goroutine that would
 // later write to a closed store.
 func TestStopsOnCancellation(t *testing.T) {
@@ -229,7 +285,7 @@ func TestTransientFailureIsRetriedAndCapped(t *testing.T) {
 	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p.poll(ctx, p.Targets[0])
+	p.poll(ctx, p.Targets[0], &loopState{})
 
 	if got := src.callCount(); got != defaultAttempts {
 		t.Fatalf("attempts = %d, want the cap of %d", got, defaultAttempts)
@@ -262,7 +318,7 @@ func TestPermanentFailureIsNotRetried(t *testing.T) {
 			src.answers = []answer{{snap: tc.snap, state: tc.state}}
 			p := newTestPoller(rec, Target{Name: "minimax", Source: src})
 
-			p.poll(context.Background(), p.Targets[0])
+			p.poll(context.Background(), p.Targets[0], &loopState{})
 			if got := src.callCount(); got != 1 {
 				t.Fatalf("attempts = %d, want 1: a permanent failure is not retried", got)
 			}
@@ -286,12 +342,12 @@ func TestAttemptAndSuccessTimestampsAreIndependent(t *testing.T) {
 	src.answers[1].state = quota.NewProviderState("minimax", quota.Unavailable, quota.ReasonTimeout, time.Now().UTC())
 	src.mu.Unlock()
 
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 	if got := rec.successAt("minimax"); !got.Equal(succeededAt) {
 		t.Fatalf("last success = %s, want the observation time %s", got, succeededAt)
 	}
 
-	p.poll(context.Background(), p.Targets[0]) // fails
+	p.poll(context.Background(), p.Targets[0], &loopState{}) // fails
 	if got := rec.successAt("minimax"); !got.Equal(succeededAt) {
 		t.Fatalf("a failure overwrote last success: %s, want %s", got, succeededAt)
 	}
@@ -310,7 +366,7 @@ func TestSuccessDoesNotImplyAvailable(t *testing.T) {
 		state: healthy(),
 	}}
 	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 
 	snaps := rec.snapshots()
 	if len(snaps) != 1 {
@@ -326,7 +382,7 @@ func TestSuccessDoesNotImplyAvailable(t *testing.T) {
 	src.answers = []answer{{snap: quota.Failed("minimax", "test", time.Now().UTC(), quota.MalformedResponse), state: healthy()}}
 	p = newTestPoller(rec, Target{Name: "minimax", Source: src})
 	p.Attempts = 1
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 	snaps = rec.snapshots()
 	if len(snaps) != 1 || snaps[0].State != store.QuotaUnknown {
 		t.Fatalf("state = %+v, want UNKNOWN for a body with no usable quota", snaps)
@@ -347,7 +403,7 @@ func TestStaleTransitionIsPersistedAsUnknown(t *testing.T) {
 	}}
 	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
 	p.StaleAfter = time.Hour
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 
 	snaps := rec.snapshots()
 	if len(snaps) != 1 {
@@ -361,6 +417,33 @@ func TestStaleTransitionIsPersistedAsUnknown(t *testing.T) {
 	}
 	if len(snaps[0].Windows) != 1 {
 		t.Fatalf("windows = %d, want the stale values kept for diagnostics", len(snaps[0].Windows))
+	}
+}
+
+// A stale observation — past the freshness bound or retained after a failed
+// refresh — is persisted as UNKNOWN and is not a success: it cannot become the
+// provider's last success or reset the failure history, because it proves nothing
+// about current quota.
+func TestStaleObservationIsNotASuccess(t *testing.T) {
+	rec := newRecorder()
+	src := &scripted{}
+	src.answers = []answer{{
+		snap:  quota.Observed("minimax", "test", time.Now().Add(-2*time.Hour).UTC(), windows(80), 0.1),
+		state: healthy(),
+	}}
+	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
+	p.StaleAfter = time.Hour
+	p.poll(context.Background(), p.Targets[0], &loopState{})
+
+	snaps := rec.snapshots()
+	if len(snaps) != 1 {
+		t.Fatalf("persisted %d snapshots, want 1", len(snaps))
+	}
+	if snaps[0].State != store.QuotaUnknown {
+		t.Fatalf("state = %s, want UNKNOWN for a stale observation", snaps[0].State)
+	}
+	if got := rec.successAt("minimax"); !got.IsZero() {
+		t.Fatalf("last success = %s, want none: a stale observation must not establish quota", got)
 	}
 }
 
@@ -505,6 +588,78 @@ func TestZeroBaseDelayDoesNotSpin(t *testing.T) {
 	}
 }
 
+// Each rejected cycle write is logged, marks the cycle failed, rolls the whole
+// cycle back, leaves the poll state unadvanced, and does not stop the next poll.
+func TestPersistenceFailuresAreLoggedAndPollStateNotCommitted(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		op        string
+		snapshots int
+		healths   int
+	}{
+		{"snapshot", failSnapshot, 0, 0},
+		{"health", failHealth, 0, 0},
+		{"poll state", failPoll, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			rec := newRecorder()
+			rec.fail = true
+			rec.failOp = tc.op
+			p := New(time.Hour, 3*time.Hour, log, rec, Target{Name: "minimax", Source: &scripted{}})
+			p.Attempts = 1
+
+			p.poll(context.Background(), p.Targets[0], &loopState{})
+			logged := buf.String()
+			if !strings.Contains(logged, "persist poll result") {
+				t.Fatalf("failure not logged: log = %q, want it to contain %q", logged, "persist poll result")
+			}
+			if !strings.Contains(logged, "persist_ok=false") {
+				t.Fatalf("failed cycle not marked: log = %q, want persist_ok=false", logged)
+			}
+			if got := len(rec.snapshots()); got != tc.snapshots {
+				t.Fatalf("persisted %d snapshots, want %d for a %s write failure", got, tc.snapshots, tc.op)
+			}
+			if got := len(rec.health); got != tc.healths {
+				t.Fatalf("persisted %d health rows, want %d for a %s write failure", got, tc.healths, tc.op)
+			}
+			if _, ok := rec.attempts["minimax"]; ok {
+				t.Fatalf("poll state was committed after a %s write failure", tc.op)
+			}
+
+			// The next poll runs: a logged write failure is not a stop condition.
+			rec.fail = false
+			rec.failOp = ""
+			p.poll(context.Background(), p.Targets[0], &loopState{})
+			if got := len(rec.snapshots()); got != tc.snapshots+1 {
+				t.Fatalf("persisted %d snapshots after a failed write and a retry, want %d", got, tc.snapshots+1)
+			}
+		})
+	}
+}
+
+// The per-attempt diagnostics ride the established slog mechanism: duration,
+// retry count, the consecutive-failure counter and the last success.
+func TestPollLogsDurationRetriesAndOutcome(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rec := newRecorder()
+	src := &scripted{}
+	src.answers = []answer{transient()} // every attempt fails the same way
+	p := New(time.Hour, 3*time.Hour, log, rec, Target{Name: "minimax", Source: src})
+	p.Attempts = defaultAttempts
+	p.BaseDelay, p.MaxDelay = time.Millisecond, 2*time.Millisecond
+
+	p.poll(context.Background(), p.Targets[0], &loopState{})
+	logged := buf.String()
+	for _, want := range []string{"attempt_duration_ms", "retries", "consecutive_failures", "process_last_success_at", "last_attempt_at", "persist_ok"} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("poll log %q missing %q", logged, want)
+		}
+	}
+}
+
 // SourceFunc adapts a function to Source, so a test needs no adapter type.
 type SourceFunc func(ctx context.Context) (quota.Snapshot, quota.ProviderState)
 
@@ -558,11 +713,8 @@ func TestOutcomesSurviveStoreValidation(t *testing.T) {
 				t.Fatalf("health record does not validate: %v", err)
 			}
 			// And the store accepts it, constraints included.
-			if err := st.SaveQuotaSnapshot(context.Background(), snapshot); err != nil {
-				t.Fatalf("SaveQuotaSnapshot: %v", err)
-			}
-			if err := st.SaveProviderHealth(context.Background(), health("minimax", a.state)); err != nil {
-				t.Fatalf("SaveProviderHealth: %v", err)
+			if err := st.SavePollResult(context.Background(), "minimax", snapshot, health("minimax", a.state), time.Now().UTC(), snapshot.ObservedAt); err != nil {
+				t.Fatalf("SavePollResult: %v", err)
 			}
 		})
 	}
