@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,214 +147,80 @@ func TestWindowAtAbsentConfigurationNeverRestricts(t *testing.T) {
 }
 
 func TestUnavailableValidation(t *testing.T) {
-	for _, tt := range []struct {
+	tests := []struct {
 		name string
-		yaml string
+		file string
 		want string
 	}{
 		{
 			name: "valid",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: Asia/Yerevan
-        windows:
-          - days: [saturday]
-            start: "02:00"
-            end: "06:00"
-`,
+			file: "valid.yaml",
 		},
 		{
 			name: "valid overnight",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: UTC
-        windows:
-          - days: [saturday]
-            start: "23:00"
-            end: "02:00"
-`,
+			file: "valid-overnight.yaml",
 		},
 		{
 			name: "no windows",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: Nowhere/Invalid
-`,
+			file: "no-windows.yaml",
 		},
 		{
 			name: "missing timezone",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        windows:
-          - days: [saturday]
-            start: "02:00"
-            end: "06:00"
-`,
+			file: "missing-timezone.yaml",
 			want: "timezone must name an IANA time zone",
 		},
 		{
 			name: "unknown timezone",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: Nowhere/Invalid
-        windows:
-          - days: [saturday]
-            start: "02:00"
-            end: "06:00"
-`,
+			file: "unknown-timezone.yaml",
 			want: "timezone must name an IANA time zone",
 		},
 		{
 			// Go resolves Local to the host's zone, which would make the same config
 			// cover different hours on different machines.
 			name: "Local is not IANA",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: Local
-        windows:
-          - days: [saturday]
-            start: "02:00"
-            end: "06:00"
-`,
+			file: "local-timezone.yaml",
 			want: "timezone must name an IANA time zone",
 		},
 		{
 			name: "UTC is IANA",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: UTC
-        windows:
-          - days: [saturday]
-            start: "02:00"
-            end: "06:00"
-`,
+			file: "utc-timezone.yaml",
 		},
 		{
 			name: "real IANA name",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: Asia/Yerevan
-        windows:
-          - days: [saturday]
-            start: "02:00"
-            end: "06:00"
-`,
+			file: "iana-timezone.yaml",
 		},
 		{
 			name: "unknown weekday",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: UTC
-        windows:
-          - days: [funday]
-            start: "02:00"
-            end: "06:00"
-`,
+			file: "unknown-weekday.yaml",
 			want: "days must name weekdays",
 		},
 		{
 			name: "no weekday",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: UTC
-        windows:
-          - start: "02:00"
-            end: "06:00"
-`,
+			file: "no-weekday.yaml",
 			want: "days must name at least one weekday",
 		},
 		{
 			name: "malformed start",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: UTC
-        windows:
-          - days: [monday]
-            start: "2am"
-            end: "06:00"
-`,
+			file: "malformed-start.yaml",
 			want: "start must be a 24-hour HH:MM time",
 		},
 		{
 			name: "out of range end",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: UTC
-        windows:
-          - days: [monday]
-            start: "02:00"
-            end: "24:00"
-`,
+			file: "out-of-range-end.yaml",
 			want: "end must be a 24-hour HH:MM time",
 		},
 		{
 			name: "equal boundaries",
-			yaml: `
-litellm:
-  model_aliases:
-    free-coding:
-      model: commandcode/stealth/glyph-cluster:free
-      unavailable:
-        timezone: UTC
-        windows:
-          - days: [monday]
-            start: "02:00"
-            end: "02:00"
-`,
+			file: "equal-boundaries.yaml",
 			want: "start and end must differ",
 		},
-	} {
+	}
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cleanEnv(t)
-			t.Setenv(ConfigFileEnv, writeConfig(t, tt.yaml))
+			configPath := filepath.Join("testdata", "unavailable", tt.file)
+			t.Setenv(ConfigFileEnv, configPath)
+
 			_, err := Load()
 			if tt.want == "" {
 				if err != nil {
