@@ -83,36 +83,3 @@ func TestReleaseIsNotUndoneByInFlightSelection(t *testing.T) {
 		t.Fatalf("pin = %+v survived the release: the in-flight selection undid it", base.affinity["sess-1"])
 	}
 }
-
-// The lock is per session: two different sessions must not serialize against each
-// other, or one slow session would stall every other conversation.
-func TestSessionLockIsPerSession(t *testing.T) {
-	var l sessionLocks
-	unlockA := l.lock("a")
-	taken := make(chan struct{})
-	release := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		unlockB := l.lock("b")
-		close(taken)
-		<-release
-		unlockB()
-	}()
-	select {
-	case <-taken:
-	case <-time.After(time.Second):
-		t.Fatal("lock on session b blocked on session a: the lock is not per session")
-	}
-	close(release)
-	<-done // both holders must have released before the table can be checked
-	unlockA()
-
-	// Entries are dropped once unused, so the map does not grow forever.
-	l.mu.Lock()
-	entries := len(l.m)
-	l.mu.Unlock()
-	if entries != 0 {
-		t.Fatalf("lock table holds %d entries after every holder left, want 0", entries)
-	}
-}

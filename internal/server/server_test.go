@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gazon1/quota-router/internal/application"
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/routing"
 	"github.com/gazon1/quota-router/internal/store"
@@ -769,7 +770,7 @@ func TestSelectEndpointHonorsSessionRelease(t *testing.T) {
 
 // pin builds a stored affinity row the way the selection path writes one.
 func pin(sessionID, alias string, now time.Time) store.SessionAffinity {
-	return store.SessionAffinity{SessionID: sessionID, Alias: alias, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(sessionAffinityTTL)}
+	return store.SessionAffinity{SessionID: sessionID, Alias: alias, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(application.SessionAffinityTTL())}
 }
 
 // selectAlias runs one route decision and returns the selected alias.
@@ -852,7 +853,7 @@ func TestSelectExpiredPinReevaluatesAndRepins(t *testing.T) {
 	st := &fakeStore{
 		snaps:    []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 		health:   []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
-		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "mm-fast", now.Add(-2*sessionAffinityTTL))},
+		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "mm-fast", now.Add(-2*application.SessionAffinityTTL()))},
 	}
 	srv := affinityServer(t, st)
 	// pin() computed its expiry from the old now, so it is already past.
