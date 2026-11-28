@@ -4,138 +4,274 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gazon1/quota-router/internal/settings"
+	"github.com/go-playground/validator/v10"
 )
 
 // validate reports every broken constraint at once. Messages name the setting
-// and, for URLs, print the redacted form so embedded credentials stay out of
-// logs and error output.
+// and never leak secrets or URL credentials.
 func (c Config) validate() error {
-	var errs []error
-	check := func(ok bool, format string, args ...any) {
-		if !ok {
-			errs = append(errs, fmt.Errorf(format, args...))
-		}
-	}
-
-	check(c.Server.Addr != "", "server.addr must not be empty")
-	for _, d := range []struct {
-		name string
-		v    time.Duration
-	}{
-		{"shutdown_timeout", c.Server.ShutdownTimeout},
-		{"read_header_timeout", c.Server.ReadHeaderTimeout},
-		{"read_timeout", c.Server.ReadTimeout},
-		{"write_timeout", c.Server.WriteTimeout},
-		{"idle_timeout", c.Server.IdleTimeout},
-	} {
-		check(d.v > 0, "server.%s must be > 0, got %s", d.name, d.v)
-	}
-
-	if err := checkURL(c.LiteLLM.BaseURL); err != nil {
-		errs = append(errs, fmt.Errorf("litellm.base_url: %w", err))
-	}
-	for alias, m := range c.LiteLLM.ModelAliases {
-		where := "litellm.model_aliases." + alias
-		if alias == "" {
-			errs = append(errs, errors.New("litellm.model_aliases must not contain an empty alias"))
-		} else if strings.ContainsAny(alias, "/ \t") {
-			// The alias is also an environment-variable segment and a routing key.
-			errs = append(errs, fmt.Errorf("litellm.model_aliases.%s must not contain a slash or whitespace", alias))
-		}
-		// The provider is the prefix of the model id, so one check covers both.
-		if _, name, found := strings.Cut(m.Model, "/"); m.Provider() == "" || !found || name == "" {
-			errs = append(errs, fmt.Errorf("%s.model must be <provider>/<model>, got %q", where, m.Model))
-		}
-		if m.ContextLimit < 0 {
-			errs = append(errs, fmt.Errorf("%s.context_limit must be >= 0 (0 means unverified), got %d", where, m.ContextLimit))
-		}
-		for name, cap := range map[string]Capability{
-			"streaming":         m.Capabilities.Streaming,
-			"tool_calling":      m.Capabilities.ToolCalling,
-			"structured_output": m.Capabilities.StructuredOutput,
-		} {
-			switch cap {
-			case CapabilityUnknown, CapabilitySupported, CapabilityUnsupported:
-			default:
-				errs = append(errs, fmt.Errorf("%s.capabilities.%s must be %q, %q or absent, got %q",
-					where, name, CapabilitySupported, CapabilityUnsupported, cap))
-			}
-		}
-		for _, task := range m.Tasks {
-			if strings.TrimSpace(task) == "" {
-				errs = append(errs, fmt.Errorf("%s.tasks must not contain an empty task class", where))
-			}
-		}
-		errs = append(errs, m.Unavailable.Validate(where+".unavailable")...)
-	}
-
-	for name, p := range c.Providers {
-		if name == "" {
-			errs = append(errs, errors.New("providers must not contain an empty provider name"))
-			continue
-		}
-		if err := checkURL(p.BaseURL); err != nil {
-			errs = append(errs, fmt.Errorf("providers.%s.base_url: %w", name, err))
-		}
-	}
-
-	check(c.Polling.Interval > 0, "polling.interval must be > 0, got %s", c.Polling.Interval)
-	check(c.Polling.RequestTimeout > 0, "polling.request_timeout must be > 0, got %s", c.Polling.RequestTimeout)
-	check(c.Polling.RequestTimeout <= c.Polling.Interval,
-		"polling.request_timeout (%s) must not exceed polling.interval (%s), or polls overlap", c.Polling.RequestTimeout, c.Polling.Interval)
-
-	check(c.Routing.LowQuotaThreshold > 0 && c.Routing.LowQuotaThreshold <= 1,
-		"routing.low_quota_threshold must be in (0, 1], got %v", c.Routing.LowQuotaThreshold)
-	check(c.Routing.ReserveFraction >= 0 && c.Routing.ReserveFraction <= 1,
-		"routing.reserve_fraction must be in [0, 1], got %v", c.Routing.ReserveFraction)
-	check(c.Routing.ReserveFraction == 0 || c.Routing.ReserveFraction >= c.Routing.LowQuotaThreshold,
-		"routing.reserve_fraction (%v) must be 0 or >= routing.low_quota_threshold (%v)", c.Routing.ReserveFraction, c.Routing.LowQuotaThreshold)
-	errs = append(errs, c.validateRouting()...)
-
-	check(c.SQLite.Path != "", "sqlite.path must not be empty")
-	// The DSN is built from this value, so a SQLite URI form here would be
-	// prefixed with another "file:" and open a different database than the one
-	// named — or an in-memory one that loses everything on restart. Accept a
-	// plain filesystem path only.
-	lower := strings.ToLower(c.SQLite.Path)
-	check(!strings.HasPrefix(c.SQLite.Path, ":"),
-		"sqlite.path must be a file path, not a SQLite special name like %q (it would not persist)", c.SQLite.Path)
-	check(!strings.HasPrefix(lower, "file:"),
-		"sqlite.path must be a file path, not a SQLite URI like %q", c.SQLite.Path)
-	check(c.SQLite.BusyTimeout > 0, "sqlite.busy_timeout must be > 0, got %s", c.SQLite.BusyTimeout)
-	// Zero disables pruning for that table; a negative value is a typo.
-	for _, d := range []struct {
-		name string
-		v    time.Duration
-	}{
-		{"quota_snapshots", c.SQLite.Retention.QuotaSnapshots},
-		{"provider_health", c.SQLite.Retention.ProviderHealth},
-		{"usage_records", c.SQLite.Retention.UsageRecords},
-		{"routing_decisions", c.SQLite.Retention.RoutingDecisions},
-	} {
-		check(d.v >= 0, "sqlite.retention.%s must be >= 0 (0 keeps everything), got %s", d.name, d.v)
-	}
-
-	switch c.Observability.Level {
-	case "debug", "info", "warn", "error":
-	default:
-		errs = append(errs, fmt.Errorf("observability.level must be debug, info, warn or error, got %q", c.Observability.Level))
-	}
-
+	errs := make([]error, 0, 8)
+	collectFieldErrors(getValidator().Struct(c), &errs)
+	errs = append(errs, validateRoutingCatalogue(c)...)
+	sort.SliceStable(errs, func(i, j int) bool { return errs[i].Error() < errs[j].Error() })
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
 	}
 	return nil
 }
 
-func (c Config) validateRouting() []error {
+func collectFieldErrors(err error, errs *[]error) {
+	if err == nil {
+		return
+	}
+	var ve validator.ValidationErrors
+	if !errors.As(err, &ve) {
+		*errs = append(*errs, err)
+		return
+	}
+	for _, fe := range ve {
+		*errs = append(*errs, formatValidationError(fe))
+	}
+}
+
+func formatValidationError(fe validator.FieldError) error {
+	path := fieldPath(fe)
+	switch fe.Tag() {
+	case "required":
+		if path == "litellm.model_aliases" {
+			return fmt.Errorf("litellm.model_aliases must not contain an empty alias")
+		}
+		if strings.HasSuffix(path, ".days") {
+			return fmt.Errorf("%s must name at least one weekday (monday..sunday)", path)
+		}
+		if strings.HasSuffix(path, ".timezone") {
+			return fmt.Errorf("%s must name an IANA time zone when windows are configured", path)
+		}
+		if strings.Contains(path, ".tasks.") {
+			base := path[:strings.LastIndex(path, ".tasks.")+len(".tasks")]
+			return fmt.Errorf("%s must not contain an empty task class", base)
+		}
+		return fmt.Errorf("%s must not be empty", path)
+	case "gt":
+		if fe.Kind() == reflect.Int || fe.Kind() == reflect.Int64 {
+			if strings.HasSuffix(path, ".priority") || strings.Contains(path, ".models.") {
+				return fmt.Errorf("%s must be a positive integer (lower means higher preference), got %v", path, fe.Value())
+			}
+			return fmt.Errorf("%s must be > 0, got %v", path, fe.Value())
+		}
+		return fmt.Errorf("%s must be > 0, got %v", path, fe.Value())
+	case "gte":
+		if fe.Field() == "context_limit" {
+			return fmt.Errorf("%s must be >= 0 (0 means unverified), got %v", path, fe.Value())
+		}
+		if strings.HasPrefix(path, "sqlite.retention.") {
+			return fmt.Errorf("%s must be >= 0 (0 keeps everything), got %v", path, fe.Value())
+		}
+		if path == "routing.reserve_fraction" {
+			return fmt.Errorf("%s must be in [0, 1], got %v", path, fe.Value())
+		}
+		return fmt.Errorf("%s must be >= %s, got %v", path, fe.Param(), fe.Value())
+	case "lte":
+		if path == "routing.low_quota_threshold" || path == "routing.reserve_fraction" {
+			if path == "routing.low_quota_threshold" {
+				return fmt.Errorf("%s must be in (0, 1], got %v", path, fe.Value())
+			}
+			return fmt.Errorf("%s must be in [0, 1], got %v", path, fe.Value())
+		}
+		return fmt.Errorf("%s must be <= %s, got %v", path, fe.Param(), fe.Value())
+	case "oneof":
+		if strings.HasPrefix(path, "observability.level") {
+			return fmt.Errorf("%s must be debug, info, warn or error, got %q", path, fe.Value())
+		}
+		if strings.Contains(path, ".capabilities.") {
+			return fmt.Errorf("%s must be %q, %q or absent, got %q", path, settings.CapabilitySupported, settings.CapabilityUnsupported, fe.Value())
+		}
+		return fmt.Errorf("%s must be one of [%s], got %v", path, fe.Param(), fe.Value())
+	case "http_url":
+		return httpURLValidationError(path, fmt.Sprint(fe.Value()))
+	case "sqlite_path":
+		p := fmt.Sprint(fe.Value())
+		lower := strings.ToLower(p)
+		if strings.HasPrefix(p, ":") {
+			return fmt.Errorf("%s must be a file path, not a SQLite special name like %q (it would not persist)", path, p)
+		}
+		if strings.HasPrefix(lower, "file:") {
+			return fmt.Errorf("%s must be a file path, not a SQLite URI like %q", path, p)
+		}
+		return fmt.Errorf("%s must be a file path", path)
+	case "model_id":
+		return fmt.Errorf("%s must be <provider>/<model>, got %q", path, fe.Value())
+	case "alias_name":
+		if strings.TrimSpace(fmt.Sprint(fe.Value())) == "" {
+			if strings.HasPrefix(path, "litellm.model_aliases") {
+				return fmt.Errorf("litellm.model_aliases must not contain an empty alias")
+			}
+			return fmt.Errorf("%s must not be empty", path)
+		}
+		return fmt.Errorf("%s must not contain a slash or whitespace", path)
+	case "iana_timezone":
+		if strings.TrimSpace(fmt.Sprint(fe.Value())) == "" {
+			return fmt.Errorf("%s must name an IANA time zone when windows are configured", path)
+		}
+		return fmt.Errorf("%s must name an IANA time zone", path)
+	case "weekday":
+		// Report on the days field, not the individual element, to preserve
+		// the existing config validation message shape.
+		if idx := strings.LastIndex(path, ".days."); idx >= 0 {
+			path = path[:idx+len(".days")]
+		}
+		return fmt.Errorf("%s must name weekdays (monday..sunday)", path)
+	case "clock_hhmm":
+		if strings.HasSuffix(path, ".start") {
+			return fmt.Errorf("%s must be a 24-hour HH:MM time", path)
+		}
+		if strings.HasSuffix(path, ".end") {
+			return fmt.Errorf("%s must be a 24-hour HH:MM time", path)
+		}
+		return fmt.Errorf("%s must be a 24-hour HH:MM time", path)
+	case "nonempty_task":
+		return fmt.Errorf("%s must not contain an empty task class", path)
+	case "unique_provider_priority":
+		return fmt.Errorf("%s duplicates routing.providers.%s.priority: %v", path, fe.Param(), fe.Value())
+	case "unique_model_priority":
+		providerPath := strings.Split(path, ".models.")[0]
+		return fmt.Errorf("%s duplicates %s.models.%s: %v", path, providerPath, fe.Param(), fe.Value())
+	case "window_bounds_differ":
+		base := path
+		if idx := strings.LastIndex(base, "."); idx >= 0 {
+			base = base[:idx]
+		}
+		return fmt.Errorf("%s.start and end must differ", base)
+	case "poll_timeout_lte_interval":
+		// param carries interval, value is timeout
+		return fmt.Errorf("polling.request_timeout (%v) must not exceed polling.interval (%s), or polls overlap", fe.Value(), fe.Param())
+	case "reserve_gte_low_quota":
+		return fmt.Errorf("routing.reserve_fraction (%v) must be 0 or >= routing.low_quota_threshold (%s)", fe.Value(), fe.Param())
+	default:
+		return fmt.Errorf("%s is invalid", path)
+	}
+}
+
+func httpURLValidationError(path, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("%s: must be an absolute http:// or https:// URL", path)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%s: must not embed credentials in the URL; use the api_key or token setting instead", path)
+	}
+	return fmt.Errorf("%s: must be an absolute http:// or https:// URL", path)
+}
+
+func fieldPath(fe validator.FieldError) string {
+	ns := fe.Namespace()
+	ns = strings.TrimPrefix(ns, "Config.")
+	// map keys in validator namespaces are wrapped as [key]
+	ns = strings.ReplaceAll(ns, "[", ".")
+	ns = strings.ReplaceAll(ns, "]", "")
+	ns = strings.ReplaceAll(ns, "..", ".")
+	return strings.Trim(ns, ".")
+}
+
+func validateConfigStruct(sl validator.StructLevel) {
+	c := sl.Current().Interface().(Config)
+	if c.Polling.RequestTimeout > 0 && c.Polling.Interval > 0 && c.Polling.RequestTimeout > c.Polling.Interval {
+		sl.ReportError(c.Polling.RequestTimeout, "request_timeout", "request_timeout", "poll_timeout_lte_interval", c.Polling.Interval.String())
+	}
+	if c.Routing.ReserveFraction > 0 && c.Routing.LowQuotaThreshold > 0 && c.Routing.ReserveFraction < c.Routing.LowQuotaThreshold {
+		sl.ReportError(c.Routing.ReserveFraction, "reserve_fraction", "reserve_fraction", "reserve_gte_low_quota", fmt.Sprint(c.Routing.LowQuotaThreshold))
+	}
+}
+
+func validateRoutingStruct(sl validator.StructLevel) {
+	r := sl.Current().Interface().(Routing)
+	seenPriority := map[int]string{}
+	for _, provider := range sortedProviderRouting(r.Providers) {
+		rp := r.Providers[provider]
+		if rp.Priority <= 0 {
+			continue
+		}
+		if prev, ok := seenPriority[rp.Priority]; ok {
+			sl.ReportError(rp.Priority, fmt.Sprintf("providers[%s].priority", provider), "priority", "unique_provider_priority", prev)
+		} else {
+			seenPriority[rp.Priority] = provider
+		}
+	}
+}
+
+func validateProviderRoutingStruct(sl validator.StructLevel) {
+	rp := sl.Current().Interface().(ProviderRouting)
+	seen := map[int]string{}
+	for _, alias := range sortedModelPriorities(rp.Models) {
+		prio := rp.Models[alias]
+		if prio <= 0 {
+			continue
+		}
+		if prev, ok := seen[prio]; ok {
+			sl.ReportError(prio, fmt.Sprintf("models[%s]", alias), alias, "unique_model_priority", prev)
+		} else {
+			seen[prio] = alias
+		}
+	}
+}
+
+func validateModelStruct(sl validator.StructLevel) {
+	m := sl.Current().Interface().(settings.Model)
+	for i, task := range m.Tasks {
+		if strings.TrimSpace(task) == "" {
+			sl.ReportError(task, fmt.Sprintf("tasks[%d]", i), "tasks", "nonempty_task", "")
+		}
+	}
+	// unavailable window sanity for equal boundaries is handled in window struct validation;
+	// cross-field presence is handled by Unavailable struct validation.
+	_ = m
+}
+
+func validateUnavailableStruct(sl validator.StructLevel) {
+	u := sl.Current().Interface().(settings.Unavailable)
+	if len(u.Windows) == 0 {
+		return
+	}
+	if strings.TrimSpace(u.Timezone) == "" {
+		sl.ReportError(u.Timezone, "timezone", "timezone", "required", "")
+		return
+	}
+	if u.Timezone == "Local" {
+		sl.ReportError(u.Timezone, "timezone", "timezone", "iana_timezone", "")
+		return
+	}
+	if _, err := time.LoadLocation(u.Timezone); err != nil {
+		sl.ReportError(u.Timezone, "timezone", "timezone", "iana_timezone", "")
+	}
+}
+
+func validateUnavailableWindowStruct(sl validator.StructLevel) {
+	w := sl.Current().Interface().(settings.UnavailableWindow)
+	start, err1 := timeParseHHMM(w.Start)
+	end, err2 := timeParseHHMM(w.End)
+	if err1 == nil && err2 == nil && start == end {
+		sl.ReportError(w.End, "end", "end", "window_bounds_differ", "")
+	}
+}
+
+func timeParseHHMM(v string) (int, error) {
+	t, err := time.Parse("15:04", v)
+	if err != nil {
+		return 0, err
+	}
+	return t.Hour()*60 + t.Minute(), nil
+}
+
+func validateRoutingCatalogue(c Config) []error {
 	if len(c.Routing.Providers) == 0 {
 		return nil
 	}
-
 	var errs []error
 	byProvider := map[string][]string{}
 	for _, alias := range sortedAliases(c.LiteLLM.ModelAliases) {
@@ -143,11 +279,9 @@ func (c Config) validateRouting() []error {
 		if !m.IsEnabled() {
 			continue
 		}
-		p := m.Provider()
-		byProvider[p] = append(byProvider[p], alias)
+		byProvider[m.Provider()] = append(byProvider[m.Provider()], alias)
 	}
 
-	seenPriority := map[int]string{}
 	for _, provider := range sortedProviderRouting(c.Routing.Providers) {
 		rp := c.Routing.Providers[provider]
 		where := "routing.providers." + provider
@@ -155,14 +289,6 @@ func (c Config) validateRouting() []error {
 			errs = append(errs, errors.New("routing.providers must not contain an empty provider name"))
 			continue
 		}
-		if rp.Priority <= 0 {
-			errs = append(errs, fmt.Errorf("%s.priority must be a positive integer (lower means higher preference), got %d", where, rp.Priority))
-		} else if prev, ok := seenPriority[rp.Priority]; ok {
-			errs = append(errs, fmt.Errorf("%s.priority duplicates %s.priority: %d", where, "routing.providers."+prev, rp.Priority))
-		} else {
-			seenPriority[rp.Priority] = provider
-		}
-
 		aliases, ok := byProvider[provider]
 		if !ok {
 			errs = append(errs, fmt.Errorf("%s references provider %q, which has no enabled catalogue aliases", where, provider))
@@ -173,14 +299,8 @@ func (c Config) validateRouting() []error {
 			continue
 		}
 
-		seenModelPriority := map[int]string{}
 		for _, alias := range sortedModelPriorities(rp.Models) {
-			priority := rp.Models[alias]
 			mWhere := where + ".models." + alias
-			if alias == "" {
-				errs = append(errs, fmt.Errorf("%s.models must not contain an empty alias", where))
-				continue
-			}
 			m, exists := c.LiteLLM.ModelAliases[alias]
 			if !exists {
 				errs = append(errs, fmt.Errorf("%s references unknown catalogue alias %q", mWhere, alias))
@@ -193,13 +313,6 @@ func (c Config) validateRouting() []error {
 			if m.Provider() != provider {
 				errs = append(errs, fmt.Errorf("%s belongs to provider %q, not %q", mWhere, m.Provider(), provider))
 				continue
-			}
-			if priority <= 0 {
-				errs = append(errs, fmt.Errorf("%s must be a positive integer (lower means higher preference), got %d", mWhere, priority))
-			} else if prev, ok := seenModelPriority[priority]; ok {
-				errs = append(errs, fmt.Errorf("%s duplicates %s: %d", mWhere, where+".models."+prev, priority))
-			} else {
-				seenModelPriority[priority] = alias
 			}
 		}
 		for _, alias := range aliases {
@@ -234,19 +347,4 @@ func sortedModelPriorities(m map[string]int) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// checkURL never echoes the value: a URL may carry user:password credentials.
-// Credentials are rejected rather than accepted, because a base URL is a plain
-// string that a log line or a JSON dump would print in full; callers set the
-// credential on the matching Secret field instead.
-func checkURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return errors.New("must be an absolute http:// or https:// URL")
-	}
-	if u.User != nil {
-		return errors.New("must not embed credentials in the URL; use the api_key or token setting instead")
-	}
-	return nil
 }

@@ -36,7 +36,7 @@ const (
 type Config struct {
 	Server        Server              `koanf:"server"`
 	LiteLLM       LiteLLM             `koanf:"litellm"`
-	Providers     map[string]Provider `koanf:"providers"`
+	Providers     map[string]Provider `koanf:"providers" validate:"dive,keys,required,endkeys,required"`
 	Polling       Polling             `koanf:"polling"`
 	Routing       Routing             `koanf:"routing"`
 	SQLite        SQLite              `koanf:"sqlite"`
@@ -46,25 +46,25 @@ type Config struct {
 
 // Server configures the controller's own HTTP server.
 type Server struct {
-	Addr              string        `koanf:"addr"`
-	ShutdownTimeout   time.Duration `koanf:"shutdown_timeout"`
-	ReadHeaderTimeout time.Duration `koanf:"read_header_timeout"`
-	ReadTimeout       time.Duration `koanf:"read_timeout"`
-	WriteTimeout      time.Duration `koanf:"write_timeout"`
-	IdleTimeout       time.Duration `koanf:"idle_timeout"`
+	Addr              string        `koanf:"addr" validate:"required"`
+	ShutdownTimeout   time.Duration `koanf:"shutdown_timeout" validate:"gt=0"`
+	ReadHeaderTimeout time.Duration `koanf:"read_header_timeout" validate:"gt=0"`
+	ReadTimeout       time.Duration `koanf:"read_timeout" validate:"gt=0"`
+	WriteTimeout      time.Duration `koanf:"write_timeout" validate:"gt=0"`
+	IdleTimeout       time.Duration `koanf:"idle_timeout" validate:"gt=0"`
 }
 
 // LiteLLM locates the proxy the controller routes through.
 type LiteLLM struct {
 	// BaseURL is the proxy root, for example http://127.0.0.1:4000; model
 	// requests go to /v1/... below it.
-	BaseURL string `koanf:"base_url"`
+	BaseURL string `koanf:"base_url" validate:"required,http_url"`
 	// APIKey is the proxy's master key, used only to verify the catalogue
 	// against GET /v1/models. Unset skips that verification.
 	APIKey Secret `koanf:"api_key"`
 	// ModelAliases is the model catalogue: a routing alias to the entry the
 	// proxy serves under that name.
-	ModelAliases map[string]Model `koanf:"model_aliases"`
+	ModelAliases map[string]Model `koanf:"model_aliases" validate:"dive,keys,alias_name,endkeys,required"`
 }
 
 // Model, Capabilities, Capability, Provider, Routing, ProviderRouting, and
@@ -73,8 +73,8 @@ type LiteLLM struct {
 
 // Polling configures the quota polling loop.
 type Polling struct {
-	Interval       time.Duration `koanf:"interval"`
-	RequestTimeout time.Duration `koanf:"request_timeout"`
+	Interval       time.Duration `koanf:"interval" validate:"gt=0"`
+	RequestTimeout time.Duration `koanf:"request_timeout" validate:"gt=0"`
 }
 
 // Routing and ProviderRouting are defined in internal/settings; config keeps
@@ -82,8 +82,8 @@ type Polling struct {
 
 // SQLite configures quota snapshot persistence.
 type SQLite struct {
-	Path        string        `koanf:"path"`
-	BusyTimeout time.Duration `koanf:"busy_timeout"`
+	Path        string        `koanf:"path" validate:"required,sqlite_path"`
+	BusyTimeout time.Duration `koanf:"busy_timeout" validate:"gt=0"`
 	// Retention bounds history. Zero keeps everything.
 	Retention Retention `koanf:"retention"`
 }
@@ -91,10 +91,10 @@ type SQLite struct {
 // Retention bounds how long persisted history is kept. The newest state per
 // provider always survives, so cleanup never removes what routing reads.
 type Retention struct {
-	QuotaSnapshots   time.Duration `koanf:"quota_snapshots"`
-	ProviderHealth   time.Duration `koanf:"provider_health"`
-	UsageRecords     time.Duration `koanf:"usage_records"`
-	RoutingDecisions time.Duration `koanf:"routing_decisions"`
+	QuotaSnapshots   time.Duration `koanf:"quota_snapshots" validate:"gte=0"`
+	ProviderHealth   time.Duration `koanf:"provider_health" validate:"gte=0"`
+	UsageRecords     time.Duration `koanf:"usage_records" validate:"gte=0"`
+	RoutingDecisions time.Duration `koanf:"routing_decisions" validate:"gte=0"`
 }
 
 // Auth holds the bearer token for the controller's own HTTP API.
@@ -104,7 +104,7 @@ type Auth struct {
 
 // Observability configures logging.
 type Observability struct {
-	Level string `koanf:"level"`
+	Level string `koanf:"level" validate:"required,oneof=debug info warn error"`
 }
 
 // SlogLevel returns the configured level. Validate rejects other values, so the

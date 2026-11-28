@@ -168,7 +168,7 @@ func TestUnavailableValidation(t *testing.T) {
 		{"equal boundaries", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"monday"}, Start: "02:00", End: "02:00"}}}, "start and end must differ"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := tt.u.Validate("litellm.model_aliases.free-coding.unavailable")
+			errs := validateUnavailableConfig(tt.u)
 			if tt.want == "" {
 				if len(errs) != 0 {
 					t.Fatalf("errors = %v, want none", errs)
@@ -189,6 +189,48 @@ func TestUnavailableValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func validateUnavailableConfig(u *Unavailable) []error {
+	c := Default()
+	c.LiteLLM.ModelAliases = map[string]Model{
+		"free-coding": {Model: "commandcode/stealth/glyph-cluster:free", Unavailable: u},
+	}
+	err := c.validate()
+	if err == nil {
+		return nil
+	}
+	joined, ok := unwrapJoinedConfigError(err)
+	if !ok {
+		return []error{err}
+	}
+	var out []error
+	for _, e := range joined {
+		if strings.Contains(e.Error(), "litellm.model_aliases.free-coding.unavailable") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func unwrapJoinedConfigError(err error) ([]error, bool) {
+	if err == nil {
+		return nil, false
+	}
+	type multiUnwrapper interface{ Unwrap() []error }
+	type singleUnwrapper interface{ Unwrap() error }
+
+	var walk func(error) ([]error, bool)
+	walk = func(e error) ([]error, bool) {
+		if u, ok := e.(multiUnwrapper); ok {
+			return u.Unwrap(), true
+		}
+		if u, ok := e.(singleUnwrapper); ok {
+			return walk(u.Unwrap())
+		}
+		return nil, false
+	}
+	return walk(err)
 }
 
 // The setting is file-configured only: a nested list has no honest environment
