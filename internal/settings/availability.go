@@ -1,7 +1,6 @@
-package config
+package settings
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -15,24 +14,23 @@ import (
 // registry, and it has no stored state: availability is a pure function of the
 // configuration and the instant a decision is made.
 type Unavailable struct {
-	// Timezone is the IANA zone the windows are written in. Required when
-	// Windows is not empty; the schedule must not depend on the host's zone.
-	Timezone string `koanf:"timezone"`
+	// Timezone is the IANA zone the windows are written in.
+	Timezone string
 	// Windows are recurring weekly intervals. An empty list means no
 	// time-based restriction.
-	Windows []UnavailableWindow `koanf:"windows"`
+	Windows []UnavailableWindow
 }
 
 // UnavailableWindow is one recurring weekly interval in local wall-clock time.
 // Days name the weekday the window starts on, Start is inclusive and End is
 // exclusive. Start after End is an overnight window that runs into the
 // following day, so [saturday 23:00, 02:00] covers Saturday night up to Sunday
-// 02:00. Equal Start and End is rejected: it names an empty or endless window,
-// never a useful one.
+// 02:00. Equal Start and End is rejected by the loader: it names an empty or
+// endless window, never a useful one.
 type UnavailableWindow struct {
-	Days  []string `koanf:"days"`
-	Start string   `koanf:"start"`
-	End   string   `koanf:"end"`
+	Days  []string
+	Start string
+	End   string
 }
 
 // WindowAt returns the configured window containing instant now, if any. now is
@@ -89,59 +87,6 @@ func (w UnavailableWindow) startsOn(day time.Weekday) bool {
 	return false
 }
 
-// validate reports every broken unavailable setting under where. Messages name
-// the setting path and never echo the configured value.
-func (u *Unavailable) validate(where string) []error {
-	if u == nil || len(u.Windows) == 0 {
-		return nil
-	}
-	var errs []error
-	if u.Timezone == "" {
-		errs = append(errs, fmt.Errorf("%s.timezone must name an IANA time zone when windows are configured", where))
-	} else if !validZone(u.Timezone) {
-		errs = append(errs, fmt.Errorf("%s.timezone must name an IANA time zone", where))
-	}
-	for i, w := range u.Windows {
-		wWhere := fmt.Sprintf("%s.windows[%d]", where, i)
-		if len(w.Days) == 0 {
-			errs = append(errs, fmt.Errorf("%s.days must name at least one weekday (monday..sunday)", wWhere))
-		}
-		for _, d := range w.Days {
-			if !validWeekday(d) {
-				errs = append(errs, fmt.Errorf("%s.days must name weekdays (monday..sunday)", wWhere))
-				break
-			}
-		}
-		start, okStart := clock(w.Start)
-		end, okEnd := clock(w.End)
-		if !okStart {
-			errs = append(errs, fmt.Errorf("%s.start must be a 24-hour HH:MM time", wWhere))
-		}
-		if !okEnd {
-			errs = append(errs, fmt.Errorf("%s.end must be a 24-hour HH:MM time", wWhere))
-		}
-		if okStart && okEnd && start == end {
-			errs = append(errs, fmt.Errorf("%s.start and end must differ", wWhere))
-		}
-	}
-	return errs
-}
-
-// validZone reports whether name is an IANA time zone the schedule may use.
-//
-// "Local" is rejected even though time.LoadLocation accepts it: it resolves to
-// the zone of the host process, so the same configuration would cover different
-// hours on a UTC server and on an operator's laptop. Refusing it keeps the
-// schedule a property of the config, not of the machine. "UTC" and real IANA
-// names such as "Asia/Yerevan" are accepted.
-func validZone(name string) bool {
-	if name == "Local" {
-		return false
-	}
-	_, err := time.LoadLocation(name)
-	return err == nil
-}
-
 // clock parses a local wall-clock HH:MM into minutes since midnight.
 func clock(v string) (int, bool) {
 	t, err := time.Parse("15:04", v)
@@ -149,13 +94,4 @@ func clock(v string) (int, bool) {
 		return 0, false
 	}
 	return t.Hour()*60 + t.Minute(), true
-}
-
-func validWeekday(name string) bool {
-	for day := time.Sunday; day <= time.Saturday; day++ {
-		if strings.EqualFold(strings.TrimSpace(name), day.String()) {
-			return true
-		}
-	}
-	return false
 }

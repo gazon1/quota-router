@@ -5,22 +5,22 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gazon1/quota-router/internal/config"
+	"github.com/gazon1/quota-router/internal/settings"
 )
 
 // weekday names the zone-local weekday of an instant, so a test that dates a
 // window reads as the window an operator would write.
-func inWindow(days []string, start, end string) *config.Unavailable {
-	return &config.Unavailable{
+func inWindow(days []string, start, end string) *settings.Unavailable {
+	return &settings.Unavailable{
 		Timezone: "UTC",
-		Windows:  []config.UnavailableWindow{{Days: days, Start: start, End: end}},
+		Windows:  []settings.UnavailableWindow{{Days: days, Start: start, End: end}},
 	}
 }
 
-func withUnavailable(cfg config.Config, alias string, u *config.Unavailable) config.Config {
-	m := cfg.LiteLLM.ModelAliases[alias]
+func withUnavailable(cfg settings.Catalogue, alias string, u *settings.Unavailable) settings.Catalogue {
+	m := cfg.ModelAliases[alias]
 	m.Unavailable = u
-	cfg.LiteLLM.ModelAliases[alias] = m
+	cfg.ModelAliases[alias] = m
 	return cfg
 }
 
@@ -36,7 +36,7 @@ func selectState(now time.Time) SelectState {
 // selNow is Friday 2026-11-27 12:00 UTC.
 func TestSelectExcludesModelInsideWindow(t *testing.T) {
 	cfg := withUnavailable(testConfig(), "cc-coding", inWindow([]string{"friday"}, "11:00", "13:00"))
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	d := sel.Select(baseRequest(), selectState(selNow))
 	// cc-fast is the next route in configured order; the window removed only the
@@ -63,7 +63,7 @@ func TestSelectExcludesModelInsideWindow(t *testing.T) {
 // it ends selects the model again with no scheduler, reload or restart.
 func TestSelectEligibleImmediatelyAfterWindow(t *testing.T) {
 	cfg := withUnavailable(testConfig(), "cc-coding", inWindow([]string{"friday"}, "11:00", "13:00"))
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	// Inclusive start, exclusive end: these two instants are the boundary.
 	if d := sel.Select(baseRequest(), selectState(time.Date(2026, time.November, 27, 11, 0, 0, 0, time.UTC))); d.SelectedAlias != "cc-fast" {
@@ -82,20 +82,20 @@ func TestSelectWindowUsesConfiguredZone(t *testing.T) {
 	// Noon in Yerevan (UTC+4) is 08:00 UTC. The window names local hours, so the
 	// same instant is outside a 09:00-10:00 window but inside a 12:00-13:00 one.
 	instant := time.Date(2026, time.November, 28, 8, 0, 0, 0, time.UTC) // Saturday
-	cfg := withUnavailable(testConfig(), "cc-coding", &config.Unavailable{
+	cfg := withUnavailable(testConfig(), "cc-coding", &settings.Unavailable{
 		Timezone: "Asia/Yerevan",
-		Windows:  []config.UnavailableWindow{{Days: []string{"saturday"}, Start: "12:00", End: "13:00"}},
+		Windows:  []settings.UnavailableWindow{{Days: []string{"saturday"}, Start: "12:00", End: "13:00"}},
 	})
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	if d := sel.Select(baseRequest(), selectState(instant)); d.SelectedAlias != "cc-fast" {
 		t.Fatalf("SelectedAlias = %q, want the Yerevan noon window to exclude cc-coding", d.SelectedAlias)
 	}
 
-	cfg = withUnavailable(testConfig(), "cc-coding", &config.Unavailable{
+	cfg = withUnavailable(testConfig(), "cc-coding", &settings.Unavailable{
 		Timezone: "Asia/Yerevan",
-		Windows:  []config.UnavailableWindow{{Days: []string{"saturday"}, Start: "08:00", End: "09:00"}},
+		Windows:  []settings.UnavailableWindow{{Days: []string{"saturday"}, Start: "08:00", End: "09:00"}},
 	})
-	sel = Selector{Config: cfg}
+	sel = Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	if d := sel.Select(baseRequest(), selectState(instant)); d.SelectedAlias != "cc-coding" {
 		t.Fatalf("SelectedAlias = %q, want the UTC hour not to be read as local", d.SelectedAlias)
 	}
@@ -105,7 +105,7 @@ func TestSelectWindowUsesConfiguredZone(t *testing.T) {
 // the affinity stage, so a session on a model that entered its window moves.
 func TestSelectAffinityCannotBypassWindow(t *testing.T) {
 	cfg := withUnavailable(testConfig(), "cc-coding", inWindow([]string{"friday"}, "11:00", "13:00"))
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	state := selectState(selNow)
 	state.Affinity = &Affinity{SessionID: req.SessionID, Alias: "cc-coding", ExpiresAt: selNow.Add(time.Hour)}
@@ -127,7 +127,7 @@ func TestSelectAffinityCannotBypassWindow(t *testing.T) {
 
 func TestSelectOverrideCannotBypassWindow(t *testing.T) {
 	cfg := withUnavailable(testConfig(), "cc-coding", inWindow([]string{"friday"}, "11:00", "13:00"))
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.Override = &ManualOverride{ModelAlias: "cc-coding"}
 
@@ -158,7 +158,7 @@ func TestSelectNoEligibleWhenEveryModelIsInWindow(t *testing.T) {
 	cfg := withUnavailable(testConfig(), "cc-coding", inWindow([]string{"friday"}, "11:00", "13:00"))
 	cfg = withUnavailable(cfg, "cc-fast", inWindow([]string{"friday"}, "11:00", "13:00"))
 	cfg = withUnavailable(cfg, "mm-general", inWindow([]string{"friday"}, "11:00", "13:00"))
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	d := sel.Select(baseRequest(), selectState(selNow))
 	if d.SelectedAlias != "" {
@@ -178,7 +178,7 @@ func TestSelectNoEligibleWhenEveryModelIsInWindow(t *testing.T) {
 // the exclusion text an operator reads from the audit log.
 func TestSelectWindowExplanationIsStable(t *testing.T) {
 	cfg := withUnavailable(testConfig(), "cc-coding", inWindow([]string{"friday"}, "11:00", "13:00"))
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	state := selectState(selNow)
 
 	d1 := sel.Select(baseRequest(), state)
@@ -199,8 +199,8 @@ func TestDecisionIDCoversConfiguredWindows(t *testing.T) {
 	plain := testConfig()
 	windowed := withUnavailable(testConfig(), "cc-coding", inWindow([]string{"monday"}, "11:00", "13:00"))
 	// selNow is a Friday, so neither decision is excluded by the window itself.
-	d1 := Selector{Config: plain}.Select(baseRequest(), selectState(selNow))
-	d2 := Selector{Config: windowed}.Select(baseRequest(), selectState(selNow))
+	d1 := Selector{Catalogue: settings.Catalogue{ModelAliases: plain.ModelAliases, Routing: plain.Routing}}.Select(baseRequest(), selectState(selNow))
+	d2 := Selector{Catalogue: settings.Catalogue{ModelAliases: windowed.ModelAliases, Routing: windowed.Routing}}.Select(baseRequest(), selectState(selNow))
 	if d1.SelectedAlias != d2.SelectedAlias {
 		t.Fatalf("selection differs: %q vs %q", d1.SelectedAlias, d2.SelectedAlias)
 	}

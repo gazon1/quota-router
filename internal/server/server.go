@@ -79,7 +79,7 @@ func New(log *slog.Logger, opts Options) *Server {
 		log:      log,
 		mux:      http.NewServeMux(),
 		cfg:      cfg,
-		selector: routing.Selector{Config: cfg},
+		selector: routing.Selector{Catalogue: cfg.Catalogue()},
 		usage:    opts.Usage,
 		token:    opts.AuthToken,
 	}
@@ -409,7 +409,7 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 	for n := range byHealth {
 		add(n)
 	}
-	for _, m := range s.cfg.LiteLLM.ModelAliases {
+	for _, m := range s.selector.Catalogue.ModelAliases {
 		add(m.Provider())
 	}
 	sort.Strings(names)

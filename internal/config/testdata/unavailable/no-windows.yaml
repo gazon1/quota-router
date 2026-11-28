@@ -1,0 +1,6 @@
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: Nowhere/Invalid

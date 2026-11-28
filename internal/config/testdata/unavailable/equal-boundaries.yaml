@@ -1,0 +1,10 @@
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - days: [monday]
+            start: "02:00"
+            end: "02:00"

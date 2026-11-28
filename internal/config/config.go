@@ -36,7 +36,7 @@ const (
 type Config struct {
 	Server        Server              `koanf:"server"`
 	LiteLLM       LiteLLM             `koanf:"litellm"`
-	Providers     map[string]Provider `koanf:"providers"`
+	Providers     map[string]Provider `koanf:"providers" validate:"dive,keys,required,endkeys,required"`
 	Polling       Polling             `koanf:"polling"`
 	Routing       Routing             `koanf:"routing"`
 	SQLite        SQLite              `koanf:"sqlite"`
@@ -46,139 +46,43 @@ type Config struct {
 
 // Server configures the controller's own HTTP server.
 type Server struct {
-	Addr              string        `koanf:"addr"`
-	ShutdownTimeout   time.Duration `koanf:"shutdown_timeout"`
-	ReadHeaderTimeout time.Duration `koanf:"read_header_timeout"`
-	ReadTimeout       time.Duration `koanf:"read_timeout"`
-	WriteTimeout      time.Duration `koanf:"write_timeout"`
-	IdleTimeout       time.Duration `koanf:"idle_timeout"`
+	Addr              string        `koanf:"addr" validate:"required"`
+	ShutdownTimeout   time.Duration `koanf:"shutdown_timeout" validate:"gt=0"`
+	ReadHeaderTimeout time.Duration `koanf:"read_header_timeout" validate:"gt=0"`
+	ReadTimeout       time.Duration `koanf:"read_timeout" validate:"gt=0"`
+	WriteTimeout      time.Duration `koanf:"write_timeout" validate:"gt=0"`
+	IdleTimeout       time.Duration `koanf:"idle_timeout" validate:"gt=0"`
 }
 
 // LiteLLM locates the proxy the controller routes through.
 type LiteLLM struct {
 	// BaseURL is the proxy root, for example http://127.0.0.1:4000; model
 	// requests go to /v1/... below it.
-	BaseURL string `koanf:"base_url"`
+	BaseURL string `koanf:"base_url" validate:"required,http_url"`
 	// APIKey is the proxy's master key, used only to verify the catalogue
 	// against GET /v1/models. Unset skips that verification.
 	APIKey Secret `koanf:"api_key"`
 	// ModelAliases is the model catalogue: a routing alias to the entry the
 	// proxy serves under that name.
-	ModelAliases map[string]Model `koanf:"model_aliases"`
+	ModelAliases map[string]Model `koanf:"model_aliases" validate:"dive,keys,alias_name,endkeys,required"`
 }
 
-// Model is one catalogue entry: the model an alias resolves to and what was
-// verified about it. Nothing in the entry is discovered at runtime — the model
-// id comes from the configuration and from the reference measured in
-// docs/litellm-provider-compatibility.md. Provider and alias are not duplicated
-// here: the provider is the prefix of Model and the alias is the map key.
-type Model struct {
-	// Model is LiteLLM's model_name, exactly "<provider>/<model>" as the proxy
-	// lists and resolves it.
-	Model string `koanf:"model"`
-	// Enabled reports whether routing may use this entry. Absent means enabled,
-	// so listing a model is enough to use it.
-	Enabled *bool `koanf:"enabled"`
-	// ContextLimit is the verified input context window in tokens. Zero means
-	// unverified; a request constraint never relies on it then.
-	ContextLimit int          `koanf:"context_limit"`
-	Capabilities Capabilities `koanf:"capabilities"`
-	// Tasks are the task classes this model is suitable for, for example
-	// "coding" or "reasoning".
-	Tasks []string `koanf:"tasks"`
-	// Unavailable is an optional recurring weekly schedule during which routing
-	// must not select this model, in the model's own local time. Absent or empty
-	// means no time-based restriction.
-	Unavailable *Unavailable `koanf:"unavailable"`
-}
-
-// Capabilities are what a model was verified to support. Each field is
-// tri-state and defaults to CapabilityUnknown, so a model that never claimed a
-// capability is not treated as supporting it.
-type Capabilities struct {
-	Streaming        Capability `koanf:"streaming"`
-	ToolCalling      Capability `koanf:"tool_calling"`
-	StructuredOutput Capability `koanf:"structured_output"`
-}
-
-// IsEnabled reports whether routing may use this entry. Listing a model is
-// enough to use it; the field only exists to switch one off.
-func (m Model) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
-
-// Provider is the provider prefix of the model id. It is derived rather than
-// stored, so the entry cannot name two different providers at once.
-func (m Model) Provider() string {
-	p, _, _ := strings.Cut(m.Model, "/")
-	return p
-}
-
-// UnmarshalText accepts the short form the catalogue shipped with
-// (`fast: minimax/MiniMax-M2.7`) as a model id with everything else unknown, so
-// widening the entry did not break an existing configuration file.
-func (m *Model) UnmarshalText(b []byte) error {
-	m.Model = string(b)
-	return nil
-}
-
-// Capability is a verified capability claim. CapabilityUnknown is the zero value
-// and means nobody verified it, which is weaker than CapabilityUnsupported.
-type Capability string
-
-const (
-	CapabilityUnknown     Capability = ""
-	CapabilitySupported   Capability = "supported"
-	CapabilityUnsupported Capability = "unsupported"
-)
-
-// Supported reports whether the capability is explicitly supported.
-func (c Capability) Supported() bool { return c == CapabilitySupported }
-
-// Provider is a quota provider the controller polls directly.
+// Provider is one quota provider the controller polls directly.
 type Provider struct {
-	BaseURL string `koanf:"base_url"`
+	BaseURL string `koanf:"base_url" validate:"required,http_url"`
 	APIKey  Secret `koanf:"api_key"`
 }
 
 // Polling configures the quota polling loop.
 type Polling struct {
-	Interval       time.Duration `koanf:"interval"`
-	RequestTimeout time.Duration `koanf:"request_timeout"`
-}
-
-// Routing configures routing thresholds and the static provider/model
-// preference order. Preference is consulted only after hard constraints and
-// viable session affinity, as defined by issue #53 and applied by #17.
-type Routing struct {
-	// LowQuotaThreshold is the remaining-quota fraction at or below which a
-	// provider counts as scarce and loses to a healthier candidate.
-	LowQuotaThreshold float64 `koanf:"low_quota_threshold"`
-	// ReserveFraction is the remaining-quota fraction reserved for reasoning and
-	// coding workloads. A provider at or below this fraction is ineligible for
-	// those task classes while quota is not exhausted. Zero disables the reserve.
-	ReserveFraction float64 `koanf:"reserve_fraction"`
-	// Providers is the static preference order. Keys are provider names as they
-	// appear in model ids (<provider>/<model>). When empty, no static preference
-	// is configured. When set, every enabled catalogue alias must be listed under
-	// its provider with an explicit priority.
-	Providers map[string]ProviderRouting `koanf:"providers"`
-}
-
-// ProviderRouting orders one provider and the model aliases served by it.
-// Lower numeric priority means higher preference.
-type ProviderRouting struct {
-	// Priority is this provider's static preference rank. Must be a positive
-	// integer; lower values are preferred. Duplicate provider priorities are invalid.
-	Priority int `koanf:"priority"`
-	// Models orders catalogue aliases within this provider. Keys are catalogue
-	// aliases; values are positive integer priorities where lower is preferred.
-	// Model priority is scoped to this provider and never compared across providers.
-	Models map[string]int `koanf:"models"`
+	Interval       time.Duration `koanf:"interval" validate:"gt=0"`
+	RequestTimeout time.Duration `koanf:"request_timeout" validate:"gt=0"`
 }
 
 // SQLite configures quota snapshot persistence.
 type SQLite struct {
-	Path        string        `koanf:"path"`
-	BusyTimeout time.Duration `koanf:"busy_timeout"`
+	Path        string        `koanf:"path" validate:"required,sqlite_path"`
+	BusyTimeout time.Duration `koanf:"busy_timeout" validate:"gt=0"`
 	// Retention bounds history. Zero keeps everything.
 	Retention Retention `koanf:"retention"`
 }
@@ -186,10 +90,10 @@ type SQLite struct {
 // Retention bounds how long persisted history is kept. The newest state per
 // provider always survives, so cleanup never removes what routing reads.
 type Retention struct {
-	QuotaSnapshots   time.Duration `koanf:"quota_snapshots"`
-	ProviderHealth   time.Duration `koanf:"provider_health"`
-	UsageRecords     time.Duration `koanf:"usage_records"`
-	RoutingDecisions time.Duration `koanf:"routing_decisions"`
+	QuotaSnapshots   time.Duration `koanf:"quota_snapshots" validate:"gte=0"`
+	ProviderHealth   time.Duration `koanf:"provider_health" validate:"gte=0"`
+	UsageRecords     time.Duration `koanf:"usage_records" validate:"gte=0"`
+	RoutingDecisions time.Duration `koanf:"routing_decisions" validate:"gte=0"`
 }
 
 // Auth holds the bearer token for the controller's own HTTP API.
@@ -199,7 +103,7 @@ type Auth struct {
 
 // Observability configures logging.
 type Observability struct {
-	Level string `koanf:"level"`
+	Level string `koanf:"level" validate:"required,oneof=debug info warn error"`
 }
 
 // SlogLevel returns the configured level. Validate rejects other values, so the

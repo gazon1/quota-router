@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/routing"
+	"github.com/gazon1/quota-router/internal/settings"
 )
 
 // Outcomes the usage endpoint accepts, for the caller that finishes a stream
@@ -71,10 +71,10 @@ type Client struct {
 	// Token is the controller bearer token
 	// (QUOTA_ROUTER_AUTH__TOKEN). Empty refuses nothing here: the controller
 	// answers 401, which this client surfaces rather than falling back.
-	Token config.Secret
+	Token settings.Secret
 	// ProxyKey is the proxy's master key, sent as the bearer token on the model
 	// call. Empty sends no Authorization header.
-	ProxyKey config.Secret
+	ProxyKey settings.Secret
 	// Manual is the explicit route an operator pins for controller outages. The
 	// zero value fails closed.
 	Manual ManualRoute
@@ -385,7 +385,7 @@ func (c *Client) httpClient() *http.Client {
 	return defaultHTTP
 }
 
-func (c *Client) authorize(req *http.Request, secret config.Secret) {
+func (c *Client) authorize(req *http.Request, secret settings.Secret) {
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+string(secret))
 	}
