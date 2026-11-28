@@ -238,8 +238,9 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 			snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 			health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 		},
-		read: make(chan struct{}),
-		gate: make(chan struct{}),
+		read1: make(chan struct{}),
+		gate1: make(chan struct{}),
+		read2: make(chan struct{}),
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
@@ -247,7 +248,7 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 
 	done1 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
-	<-state.read // route1 holds session lock and is blocked in state read
+	<-state.read1 // route1 holds session lock and is blocked in state read
 
 	done2 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done2 <- err }()
@@ -272,13 +273,19 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
+	// While route2 is blocked on the session lock, it cannot enter loadSelectState.
 	select {
-	case err := <-done2:
-		t.Fatalf("second same-session route completed before first released lock: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	case <-state.read2:
+		t.Fatal("second same-session route entered critical section before first released lock")
+	default:
 	}
 
-	close(state.gate)
+	close(state.gate1)
+	select {
+	case <-state.read2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second same-session route did not enter critical section after lock release")
+	}
 	if err := <-done1; err != nil {
 		t.Fatalf("route1: %v", err)
 	}
@@ -289,16 +296,19 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 
 type gateState struct {
 	*fakeState
-	once sync.Once
-	read chan struct{}
-	gate chan struct{}
-	n    atomic.Int32
+	read1 chan struct{}
+	gate1 chan struct{}
+	read2 chan struct{}
+	n     atomic.Int32
 }
 
 func (g *gateState) LatestQuotaSnapshot(ctx context.Context) ([]store.QuotaSnapshot, error) {
-	if g.n.Add(1) == 1 {
-		g.once.Do(func() { close(g.read) })
-		<-g.gate
+	switch g.n.Add(1) {
+	case 1:
+		close(g.read1)
+		<-g.gate1
+	case 2:
+		close(g.read2)
 	}
 	return g.fakeState.LatestQuotaSnapshot(ctx)
 }
@@ -310,8 +320,9 @@ func TestRouteDifferentSessionsConcurrent(t *testing.T) {
 			snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80), quotaSnap("minimax", store.QuotaAvailable, 80)},
 			health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 		},
-		read: make(chan struct{}),
-		gate: make(chan struct{}),
+		read1: make(chan struct{}),
+		gate1: make(chan struct{}),
+		read2: make(chan struct{}),
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
@@ -319,21 +330,21 @@ func TestRouteDifferentSessionsConcurrent(t *testing.T) {
 
 	done1 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
-	<-state.read // route1 holds s1 lock while blocked
+	<-state.read1 // route1 holds s1 lock while blocked
 
 	done2 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s2")); done2 <- err }()
 	select {
-	case err := <-done2:
-		if err != nil {
-			t.Fatalf("route2: %v", err)
-		}
+	case <-state.read2:
 	case <-time.After(2 * time.Second):
 		t.Fatal("different session blocked on unrelated session lock")
 	}
-	close(state.gate)
+	close(state.gate1)
 	if err := <-done1; err != nil {
 		t.Fatalf("route1: %v", err)
+	}
+	if err := <-done2; err != nil {
+		t.Fatalf("route2: %v", err)
 	}
 }
 
