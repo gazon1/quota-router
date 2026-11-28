@@ -357,7 +357,6 @@ func newHarness(t *testing.T) *harness {
 		AuthToken: contractToken,
 		Store:     st,
 		Usage:     st,
-		Releases:  st,
 	})
 	// The recorder proves the criterion the hard way: whatever body reaches the
 	// controller, the test can look for prompt content in it.

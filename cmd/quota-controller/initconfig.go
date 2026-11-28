@@ -38,14 +38,14 @@ secret file.
 // it would destroy exactly what this feature exists to preserve.
 func initConfig(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 1 {
-		fmt.Fprint(stderr, fmt.Sprintf(initConfigUsage, defaultConfigPathHint()))
+		fmt.Fprintf(stderr, initConfigUsage, defaultConfigPathHint())
 		return 2
 	}
 	// -h is help, not a path: treating it as one would create a file named "-h"
 	// in the working directory, which is never what a caller asking for help
 	// meant.
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprint(stdout, fmt.Sprintf(initConfigUsage, defaultConfigPathHint()))
+		fmt.Fprintf(stdout, initConfigUsage, defaultConfigPathHint())
 		return 0
 	}
 	path := ""

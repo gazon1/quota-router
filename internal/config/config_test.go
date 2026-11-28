@@ -328,7 +328,7 @@ func TestLoadEmptyValuesUseDefaults(t *testing.T) {
 func TestSecretRedaction(t *testing.T) {
 	s := Secret("sk-live-do-not-print")
 	for name, got := range map[string]string{
-		"sprintf %s":    fmt.Sprintf("%s", s),
+		"sprintf %s":    s.String(),
 		"sprintf %q":    fmt.Sprintf("%q", s),
 		"sprintf %v":    fmt.Sprintf("%v", s),
 		"sprintf %#v":   fmt.Sprintf("%#v", s),
