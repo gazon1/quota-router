@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gazon1/quota-router/internal/config"
+	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/gazon1/quota-router/internal/routing"
 	"github.com/gazon1/quota-router/internal/store"
 )
@@ -223,7 +224,7 @@ func TestSelectEndpoint(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{"tool_calling":true},"task_class":"coding"}`
 	w := postSelect(t, srv, testRoutingToken, body)
@@ -260,7 +261,7 @@ func TestSelectEndpointNoEligible(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
 	w := postSelect(t, srv, testRoutingToken, body)
@@ -290,7 +291,7 @@ func TestSelectEndpointInvalidVersion(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 	w := postSelect(t, srv, testRoutingToken, `{"version":2,"session_id":"s1","capabilities":{}}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -323,7 +324,7 @@ func TestSelectEndpointPersistenceFailure(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
 	w := postSelect(t, srv, testRoutingToken, body)
@@ -341,7 +342,7 @@ func TestDecisionsEndpoint(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
 	w := postSelect(t, srv, testRoutingToken, body)
@@ -373,7 +374,7 @@ func TestSelectEndpointStateLoadError(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
 	if w.Code != http.StatusServiceUnavailable {
@@ -391,7 +392,7 @@ func TestSelectEndpointInvalidJSON(t *testing.T) {
 
 func TestSelectEndpointRejectsUnknownField(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
-	srv.selector = routing.Selector{Config: testRoutingConfig()}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: testRoutingConfig().LiteLLM.ModelAliases, Routing: testRoutingConfig().Routing}}
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{},"unknown":true}`)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -407,7 +408,7 @@ func TestSelectEndpointRequiresAuth(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
 
 	for _, tc := range []struct {
@@ -648,7 +649,7 @@ func TestRouteAliasEndpoint(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	w := postRoute(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
 	if w.Code != http.StatusOK {
@@ -752,7 +753,7 @@ func TestSelectEndpointHonorsSessionRelease(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	// Pinned to mm-fast, which the configured priority would not pick.
 	if got := selectAlias(t, srv, "sess-1"); got != "mm-fast" {
@@ -794,7 +795,7 @@ func affinityServer(t *testing.T, st *fakeStore) *Server {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 	return srv
 }
 
@@ -956,7 +957,7 @@ func TestSelectHonorsUnavailableWindow(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
-	srv.selector = routing.Selector{Config: cfg}
+	srv.selector = routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}
 
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
 	if w.Code != http.StatusConflict {

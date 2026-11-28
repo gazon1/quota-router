@@ -5,48 +5,59 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gazon1/quota-router/internal/config"
+	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/gazon1/quota-router/internal/quota"
 )
 
 var selNow = time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
 
+
+func defaultCatalogue() settings.Catalogue {
+	return settings.Catalogue{
+		ModelAliases: map[string]settings.Model{},
+		Routing: settings.Routing{
+			LowQuotaThreshold: 0.1,
+			ReserveFraction:   0,
+			Providers:         map[string]settings.ProviderRouting{},
+		},
+	}
+}
 func boolPtr(v bool) *bool { return &v }
 
-func testConfig() config.Config {
-	cfg := config.Default()
-	cfg.LiteLLM.ModelAliases = map[string]config.Model{
+func testConfig() settings.Catalogue {
+	cfg := defaultCatalogue()
+	cfg.ModelAliases = map[string]settings.Model{
 		"cc-coding": {
 			Model:   "commandcode/glyph:free",
 			Enabled: boolPtr(true),
-			Capabilities: config.Capabilities{
-				Streaming:        config.CapabilitySupported,
-				ToolCalling:      config.CapabilitySupported,
-				StructuredOutput: config.CapabilitySupported,
+			Capabilities: settings.Capabilities{
+				Streaming:        settings.CapabilitySupported,
+				ToolCalling:      settings.CapabilitySupported,
+				StructuredOutput: settings.CapabilitySupported,
 			},
 			Tasks: []string{"coding", "reasoning"},
 		},
 		"cc-fast": {
 			Model:   "commandcode/fast:free",
 			Enabled: boolPtr(true),
-			Capabilities: config.Capabilities{
-				Streaming:   config.CapabilitySupported,
-				ToolCalling: config.CapabilitySupported,
+			Capabilities: settings.Capabilities{
+				Streaming:   settings.CapabilitySupported,
+				ToolCalling: settings.CapabilitySupported,
 			},
 			Tasks: []string{"routine", "coding"},
 		},
 		"mm-general": {
 			Model:   "minimax/MiniMax-M2.7",
 			Enabled: boolPtr(true),
-			Capabilities: config.Capabilities{
-				Streaming:        config.CapabilitySupported,
-				ToolCalling:      config.CapabilitySupported,
-				StructuredOutput: config.CapabilitySupported,
+			Capabilities: settings.Capabilities{
+				Streaming:        settings.CapabilitySupported,
+				ToolCalling:      settings.CapabilitySupported,
+				StructuredOutput: settings.CapabilitySupported,
 			},
 			Tasks: []string{"routine", "coding", "reasoning"},
 		},
 	}
-	cfg.Routing.Providers = map[string]config.ProviderRouting{
+	cfg.Routing.Providers = map[string]settings.ProviderRouting{
 		"commandcode": {Priority: 1, Models: map[string]int{"cc-coding": 1, "cc-fast": 2}},
 		"minimax":     {Priority: 2, Models: map[string]int{"mm-general": 1}},
 	}
@@ -95,7 +106,7 @@ func hasStage(d Decision, stage string) bool {
 
 func TestSelectDeterministic(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	state := SelectState{
 		Now:         selNow,
@@ -126,11 +137,11 @@ func TestDecisionIDChangesWhenConfigChanges(t *testing.T) {
 	cfg1 := testConfig()
 	cfg2 := testConfig()
 	// Change a configured priority that does not alter the selected alias.
-	cfg2.Routing.Providers["minimax"] = config.ProviderRouting{Priority: 5, Models: map[string]int{"mm-general": 1}}
+	cfg2.Routing.Providers["minimax"] = settings.ProviderRouting{Priority: 5, Models: map[string]int{"mm-general": 1}}
 	req := baseRequest()
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
-	d1 := (Selector{Config: cfg1}).Select(req, state)
-	d2 := (Selector{Config: cfg2}).Select(req, state)
+	d1 := (Selector{Catalogue: settings.Catalogue{ModelAliases: cfg1.ModelAliases, Routing: cfg1.Routing}}).Select(req, state)
+	d2 := (Selector{Catalogue: settings.Catalogue{ModelAliases: cfg2.ModelAliases, Routing: cfg2.Routing}}).Select(req, state)
 	if d1.SelectedAlias != "cc-coding" || d2.SelectedAlias != "cc-coding" {
 		t.Fatalf("selected aliases = %q, %q; want cc-coding, cc-coding", d1.SelectedAlias, d2.SelectedAlias)
 	}
@@ -141,8 +152,8 @@ func TestDecisionIDChangesWhenConfigChanges(t *testing.T) {
 
 func TestSelectNeverSelectsIneligible(t *testing.T) {
 	cfg := testConfig()
-	cfg.LiteLLM.ModelAliases["cc-coding"] = config.Model{Model: "commandcode/glyph:free", Enabled: boolPtr(false), Capabilities: cfg.LiteLLM.ModelAliases["cc-coding"].Capabilities, Tasks: cfg.LiteLLM.ModelAliases["cc-coding"].Tasks}
-	sel := Selector{Config: cfg}
+	cfg.ModelAliases["cc-coding"] = settings.Model{Model: "commandcode/glyph:free", Enabled: boolPtr(false), Capabilities: cfg.ModelAliases["cc-coding"].Capabilities, Tasks: cfg.ModelAliases["cc-coding"].Tasks}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	state := SelectState{
 		Now:         selNow,
@@ -196,7 +207,7 @@ func TestSelectNeverSelectsIneligible(t *testing.T) {
 func TestSelectReserveForReasoningCoding(t *testing.T) {
 	cfg := testConfig()
 	cfg.Routing.ReserveFraction = 0.2
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	q := availableQuota(selNow, "commandcode", "minimax")
 	limit, rem, used := 100.0, 15.0, 85.0 // LOW_QUOTA and below reserve
@@ -223,7 +234,7 @@ func TestSelectReserveForReasoningCoding(t *testing.T) {
 
 func TestSelectHealthFreshness(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	h := healthyProviders(selNow, "commandcode", "minimax")
 	h["commandcode"] = quota.NewProviderState("commandcode", quota.Healthy, quota.ReasonNone, selNow.Add(-2*time.Hour))
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour, HealthMaxAge: time.Hour})
@@ -243,7 +254,7 @@ func TestSelectHealthFreshness(t *testing.T) {
 
 func TestSelectUnknownQuotaAndHealth(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	// Unknown quota is conservative - not eligible
 	q := availableQuota(selNow, "commandcode", "minimax")
@@ -285,7 +296,7 @@ func TestSelectUnknownQuotaAndHealth(t *testing.T) {
 
 func TestSelectAffinityOnlyAmongViable(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.SessionID = "session-1"
 
@@ -327,7 +338,7 @@ func TestSelectAffinityOnlyAmongViable(t *testing.T) {
 
 func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	state := SelectState{
 		Now:         selNow,
 		Quota:       availableQuota(selNow, "commandcode", "minimax"),
@@ -355,8 +366,8 @@ func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
 
 	// Performance can break ties among equal-priority candidates.
 	cfg2 := testConfig()
-	cfg2.Routing.Providers["commandcode"] = config.ProviderRouting{Priority: 1, Models: map[string]int{"cc-coding": 1, "cc-fast": 1}}
-	sel2 := Selector{Config: cfg2}
+	cfg2.Routing.Providers["commandcode"] = settings.ProviderRouting{Priority: 1, Models: map[string]int{"cc-coding": 1, "cc-fast": 1}}
+	sel2 := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg2.ModelAliases, Routing: cfg2.Routing}}
 	state.Performance = map[string]PerformanceRecord{
 		"cc-coding": {Alias: "cc-coding", Score: 100, Fresh: true, Sufficient: true, ObservedAt: selNow},
 		"cc-fast":   {Alias: "cc-fast", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow},
@@ -393,7 +404,7 @@ func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
 
 func TestSelectManualOverride(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.Override = &ManualOverride{ModelAlias: "mm-general"}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
@@ -445,7 +456,7 @@ func TestSelectManualOverride(t *testing.T) {
 
 func TestSelectDecisionExplanation(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	q := availableQuota(selNow, "commandcode", "minimax")
 	limit, rem, used := 100.0, 0.0, 100.0
 	q["commandcode"] = quota.Observed("commandcode", "test", selNow, []quota.Window{{Name: "5h", Limit: &limit, Remaining: &rem, Used: &used, ResetsAt: selNow.Add(time.Hour)}}, 0.1)
@@ -477,7 +488,7 @@ func TestSelectDecisionExplanation(t *testing.T) {
 
 func TestSelectNoEligible(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: map[string]quota.Snapshot{}, Health: map[string]quota.ProviderState{}, QuotaMaxAge: time.Hour})
 	if d.SelectedAlias != "" {
 		t.Fatalf("SelectedAlias = %q, want empty", d.SelectedAlias)
@@ -491,13 +502,13 @@ func TestSelectNoEligible(t *testing.T) {
 }
 
 func TestSelectDeterministicTieBreak(t *testing.T) {
-	cfg := config.Default()
-	cfg.LiteLLM.ModelAliases = map[string]config.Model{
-		"a": {Model: "p1/m1", Enabled: boolPtr(true), Capabilities: config.Capabilities{Streaming: config.CapabilitySupported}},
-		"b": {Model: "p1/m2", Enabled: boolPtr(true), Capabilities: config.Capabilities{Streaming: config.CapabilitySupported}},
+	cfg := defaultCatalogue()
+	cfg.ModelAliases = map[string]settings.Model{
+		"a": {Model: "p1/m1", Enabled: boolPtr(true), Capabilities: settings.Capabilities{Streaming: settings.CapabilitySupported}},
+		"b": {Model: "p1/m2", Enabled: boolPtr(true), Capabilities: settings.Capabilities{Streaming: settings.CapabilitySupported}},
 	}
 	// No configured routing priorities: stable alias tie-break should apply.
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.Capabilities = &RequiredCapabilities{Streaming: true}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "p1"), Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour}
@@ -513,15 +524,15 @@ func TestSelectDeterministicTieBreak(t *testing.T) {
 
 func TestSelectModelPriorityNotComparedAcrossProviders(t *testing.T) {
 	cfg := testConfig()
-	cfg.LiteLLM.ModelAliases = map[string]config.Model{
-		"a1": {Model: "provider-a/model-1", Enabled: boolPtr(true), Capabilities: config.Capabilities{Streaming: config.CapabilitySupported}},
-		"b1": {Model: "provider-b/model-1", Enabled: boolPtr(true), Capabilities: config.Capabilities{Streaming: config.CapabilitySupported}},
+	cfg.ModelAliases = map[string]settings.Model{
+		"a1": {Model: "provider-a/model-1", Enabled: boolPtr(true), Capabilities: settings.Capabilities{Streaming: settings.CapabilitySupported}},
+		"b1": {Model: "provider-b/model-1", Enabled: boolPtr(true), Capabilities: settings.Capabilities{Streaming: settings.CapabilitySupported}},
 	}
-	cfg.Routing.Providers = map[string]config.ProviderRouting{
+	cfg.Routing.Providers = map[string]settings.ProviderRouting{
 		"provider-a": {Priority: 1, Models: map[string]int{"a1": 10}},
 		"provider-b": {Priority: 1, Models: map[string]int{"b1": 1}},
 	}
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := RouteRequest{Version: 1, SessionID: "s1", Capabilities: &RequiredCapabilities{}}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "provider-a", "provider-b"), Health: healthyProviders(selNow, "provider-a", "provider-b"), QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
@@ -535,11 +546,11 @@ func TestSelectModelPriorityNotComparedAcrossProviders(t *testing.T) {
 
 func TestSelectProviderOnlyPriorityReported(t *testing.T) {
 	cfg := testConfig()
-	cfg.Routing.Providers = map[string]config.ProviderRouting{
+	cfg.Routing.Providers = map[string]settings.ProviderRouting{
 		"commandcode": {Priority: 1},
 		"minimax":     {Priority: 2},
 	}
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
 	if !d.ConfiguredPreferenceInfluenced {
 		t.Fatal("provider-only configured priority should influence selection")
@@ -557,7 +568,7 @@ func TestSelectProviderOnlyPriorityReported(t *testing.T) {
 
 func TestSelectAffinityRejectionsInDecisionRejected(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: req.SessionID, Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
@@ -571,7 +582,7 @@ func TestSelectAffinityRejectionsInDecisionRejected(t *testing.T) {
 
 func TestSelectOverrideRejectionsInDecisionRejected(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.Override = &ManualOverride{ModelAlias: "mm-general"}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
@@ -586,7 +597,7 @@ func TestSelectOverrideRejectionsInDecisionRejected(t *testing.T) {
 
 func TestSelectRequestPreferenceDoesNotOverrideConfiguredPriority(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.Preference = &RoutePreference{ModelAlias: "mm-general"}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
@@ -606,13 +617,13 @@ func TestSelectRequestPreferenceDoesNotOverrideConfiguredPriority(t *testing.T) 
 }
 
 func TestSelectRequestPreferenceBreaksEqualPriority(t *testing.T) {
-	cfg := config.Default()
-	cfg.LiteLLM.ModelAliases = map[string]config.Model{
+	cfg := defaultCatalogue()
+	cfg.ModelAliases = map[string]settings.Model{
 		"a": {Model: "p1/m1", Enabled: boolPtr(true)},
 		"b": {Model: "p1/m2", Enabled: boolPtr(true)},
 	}
-	cfg.Routing.Providers = map[string]config.ProviderRouting{"p1": {Priority: 1, Models: map[string]int{"a": 1, "b": 1}}}
-	sel := Selector{Config: cfg}
+	cfg.Routing.Providers = map[string]settings.ProviderRouting{"p1": {Priority: 1, Models: map[string]int{"a": 1, "b": 1}}}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.Preference = &RoutePreference{ModelAlias: "b"}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "p1"), Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour}
@@ -623,13 +634,13 @@ func TestSelectRequestPreferenceBreaksEqualPriority(t *testing.T) {
 }
 
 func TestSelectPerformanceNotInfluencedWhenPreferenceDecides(t *testing.T) {
-	cfg := config.Default()
-	cfg.LiteLLM.ModelAliases = map[string]config.Model{
+	cfg := defaultCatalogue()
+	cfg.ModelAliases = map[string]settings.Model{
 		"a": {Model: "p1/m1", Enabled: boolPtr(true)},
 		"b": {Model: "p1/m2", Enabled: boolPtr(true)},
 	}
-	cfg.Routing.Providers = map[string]config.ProviderRouting{"p1": {Priority: 1, Models: map[string]int{"a": 1, "b": 1}}}
-	sel := Selector{Config: cfg}
+	cfg.Routing.Providers = map[string]settings.ProviderRouting{"p1": {Priority: 1, Models: map[string]int{"a": 1, "b": 1}}}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.Preference = &RoutePreference{ModelAlias: "a"}
 	state := SelectState{
@@ -654,7 +665,7 @@ func TestSelectPerformanceNotInfluencedWhenPreferenceDecides(t *testing.T) {
 
 func TestSelectAffinityDifferentSessionNoInfluence(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.SessionID = "s2"
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
@@ -669,7 +680,7 @@ func TestSelectAffinityDifferentSessionNoInfluence(t *testing.T) {
 
 func TestSelectAffinityEmptySessionIDIgnored(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.SessionID = "s1"
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
@@ -684,7 +695,7 @@ func TestSelectAffinityEmptySessionIDIgnored(t *testing.T) {
 
 func TestSelectInvalidRequest(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	d := sel.Select(RouteRequest{}, SelectState{Now: selNow})
 	if d.SelectedAlias != "" {
 		t.Fatalf("SelectedAlias = %q", d.SelectedAlias)
@@ -699,7 +710,7 @@ func TestSelectInvalidRequest(t *testing.T) {
 
 func TestSelectPreferredCandidateIneligibleFallsThrough(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	q := availableQuota(selNow, "commandcode", "minimax")
 	limit, rem, used := 100.0, 0.0, 100.0
 	q["commandcode"] = quota.Observed("commandcode", "test", selNow, []quota.Window{{Name: "5h", Limit: &limit, Remaining: &rem, Used: &used, ResetsAt: selNow.Add(time.Hour)}}, 0.1)
@@ -714,7 +725,7 @@ func TestSelectPreferredCandidateIneligibleFallsThrough(t *testing.T) {
 
 func TestSelectStageCoverage(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.TaskClass = TaskCoding
 	req.Capabilities = &RequiredCapabilities{ToolCalling: true}
@@ -730,9 +741,9 @@ func TestSelectStageCoverage(t *testing.T) {
 func TestSelectSkipsExhaustedProviderButKeepsOtherProviderPriority(t *testing.T) {
 	cfg := testConfig()
 	// Add second model in minimax with lower priority than mm-general.
-	cfg.LiteLLM.ModelAliases["mm-cheap"] = config.Model{Model: "minimax/cheap", Enabled: boolPtr(true), Capabilities: config.Capabilities{Streaming: config.CapabilitySupported}}
-	cfg.Routing.Providers["minimax"] = config.ProviderRouting{Priority: 2, Models: map[string]int{"mm-general": 1, "mm-cheap": 2}}
-	sel := Selector{Config: cfg}
+	cfg.ModelAliases["mm-cheap"] = settings.Model{Model: "minimax/cheap", Enabled: boolPtr(true), Capabilities: settings.Capabilities{Streaming: settings.CapabilitySupported}}
+	cfg.Routing.Providers["minimax"] = settings.ProviderRouting{Priority: 2, Models: map[string]int{"mm-general": 1, "mm-cheap": 2}}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	q := availableQuota(selNow, "commandcode", "minimax")
 	limit, rem, used := 100.0, 0.0, 100.0
 	q["commandcode"] = quota.Observed("commandcode", "test", selNow, []quota.Window{{Name: "5h", Limit: &limit, Remaining: &rem, Used: &used, ResetsAt: selNow.Add(time.Hour)}}, 0.1)
@@ -744,7 +755,7 @@ func TestSelectSkipsExhaustedProviderButKeepsOtherProviderPriority(t *testing.T)
 
 func TestSelectOverrideCannotBypassQuotaOrCooldown(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	// exhausted
 	q := availableQuota(selNow, "commandcode", "minimax")
@@ -767,10 +778,10 @@ func TestSelectOverrideCannotBypassQuotaOrCooldown(t *testing.T) {
 
 	// disabled
 	cfg2 := testConfig()
-	m := cfg2.LiteLLM.ModelAliases["mm-general"]
+	m := cfg2.ModelAliases["mm-general"]
 	m.Enabled = boolPtr(false)
-	cfg2.LiteLLM.ModelAliases["mm-general"] = m
-	d = Selector{Config: cfg2}.Select(req, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
+	cfg2.ModelAliases["mm-general"] = m
+	d = Selector{Catalogue: settings.Catalogue{ModelAliases: cfg2.ModelAliases, Routing: cfg2.Routing}}.Select(req, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
 	if d.OverrideApplied || d.SelectedAlias == "mm-general" {
 		t.Fatalf("override selected disabled: %+v", d)
 	}
@@ -778,7 +789,7 @@ func TestSelectOverrideCannotBypassQuotaOrCooldown(t *testing.T) {
 
 func TestSelectTableDrivenStages(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 
 	limit100b, rem0, used100 := 100.0, 0.0, 100.0
 	exhaustedWin := []quota.Window{{Name: "5h", Limit: &limit100b, Remaining: &rem0, Used: &used100, ResetsAt: selNow.Add(time.Hour)}}
@@ -786,11 +797,11 @@ func TestSelectTableDrivenStages(t *testing.T) {
 	// Configuration/disabled
 	{
 		c := testConfig()
-		m := c.LiteLLM.ModelAliases["cc-coding"]
+		m := c.ModelAliases["cc-coding"]
 		off := false
 		m.Enabled = &off
-		c.LiteLLM.ModelAliases["cc-coding"] = m
-		d := (Selector{Config: c}).Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
+		c.ModelAliases["cc-coding"] = m
+		d := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
 		if d.SelectedAlias == "cc-coding" {
 			t.Fatal("disabled selected")
 		}
@@ -880,8 +891,8 @@ func TestSelectTableDrivenStages(t *testing.T) {
 	// Performance tie-break
 	{
 		c := testConfig()
-		c.Routing.Providers["commandcode"] = config.ProviderRouting{Priority: 1, Models: map[string]int{"cc-coding": 1, "cc-fast": 1}}
-		d := (Selector{Config: c}).Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour, MaxPerformanceAge: time.Hour, Performance: map[string]PerformanceRecord{"cc-fast": {Alias: "cc-fast", Score: 1, Fresh: true, Sufficient: true, ObservedAt: selNow}, "cc-coding": {Alias: "cc-coding", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow}}})
+		c.Routing.Providers["commandcode"] = settings.ProviderRouting{Priority: 1, Models: map[string]int{"cc-coding": 1, "cc-fast": 1}}
+		d := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour, MaxPerformanceAge: time.Hour, Performance: map[string]PerformanceRecord{"cc-fast": {Alias: "cc-fast", Score: 1, Fresh: true, Sufficient: true, ObservedAt: selNow}, "cc-coding": {Alias: "cc-coding", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow}}})
 		if !d.PerformanceInfluenced || d.SelectedAlias != "cc-fast" {
 			t.Fatalf("perf tie break: %+v", d)
 		}
@@ -889,11 +900,11 @@ func TestSelectTableDrivenStages(t *testing.T) {
 
 	// Deterministic tie-break
 	{
-		c := config.Default()
-		c.LiteLLM.ModelAliases = map[string]config.Model{"b": {Model: "p1/b", Enabled: boolPtr(true)}, "a": {Model: "p1/a", Enabled: boolPtr(true)}}
+		c := defaultCatalogue()
+		c.ModelAliases = map[string]settings.Model{"b": {Model: "p1/b", Enabled: boolPtr(true)}, "a": {Model: "p1/a", Enabled: boolPtr(true)}}
 		q := availableQuota(selNow, "p1")
-		d1 := (Selector{Config: c}).Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour})
-		d2 := (Selector{Config: c}).Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour})
+		d1 := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour})
+		d2 := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour})
 		if d1.SelectedAlias != "a" || d1.DecisionID != d2.DecisionID {
 			t.Fatalf("tie break: %q %q %q", d1.SelectedAlias, d1.DecisionID, d2.DecisionID)
 		}
@@ -905,7 +916,7 @@ func TestSelectTableDrivenStages(t *testing.T) {
 // full candidate set, and the explanation says so rather than "no match".
 func TestSelectExpiredAffinityReevaluates(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.SessionID = "s1"
 	state := SelectState{
@@ -944,7 +955,7 @@ func TestSelectExpiredAffinityReevaluates(t *testing.T) {
 // route it names and silently override every later decision.
 func TestSelectUnboundedAffinityIgnored(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	state := SelectState{
 		Now:         selNow,
@@ -966,7 +977,7 @@ func TestSelectUnboundedAffinityIgnored(t *testing.T) {
 // even when the session would rather stay.
 func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.SessionID = "s1"
 
@@ -1043,10 +1054,10 @@ func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 	// A disabled alias is a durable exclusion too: the route is not routable.
 	off := false
 	cfg2 := testConfig()
-	m := cfg2.LiteLLM.ModelAliases["mm-general"]
+	m := cfg2.ModelAliases["mm-general"]
 	m.Enabled = &off
-	cfg2.LiteLLM.ModelAliases["mm-general"] = m
-	d := (Selector{Config: cfg2}).Select(req, SelectState{
+	cfg2.ModelAliases["mm-general"] = m
+	d := (Selector{Catalogue: settings.Catalogue{ModelAliases: cfg2.ModelAliases, Routing: cfg2.Routing}}).Select(req, SelectState{
 		Now:         selNow,
 		Quota:       availableQuota(selNow, "commandcode", "minimax"),
 		Health:      healthyProviders(selNow, "commandcode", "minimax"),
@@ -1065,7 +1076,7 @@ func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 // whatever is selected then.
 func TestSelectCooldownMovesPinnedSessionAndExpiryAllowsReturn(t *testing.T) {
 	cfg := testConfig()
-	sel := Selector{Config: cfg}
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	req.SessionID = "s1"
 
@@ -1118,10 +1129,10 @@ func TestSelectCooldownMovesPinnedSessionAndExpiryAllowsReturn(t *testing.T) {
 func TestSelectAffinityNoteNamesEarlyExclusion(t *testing.T) {
 	cfg := testConfig()
 	off := false
-	m := cfg.LiteLLM.ModelAliases["mm-general"]
+	m := cfg.ModelAliases["mm-general"]
 	m.Enabled = &off
-	cfg.LiteLLM.ModelAliases["mm-general"] = m
-	sel := Selector{Config: cfg}
+	cfg.ModelAliases["mm-general"] = m
+	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	req := baseRequest()
 	state := SelectState{
 		Now:         selNow,

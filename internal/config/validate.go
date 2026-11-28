@@ -69,7 +69,7 @@ func (c Config) validate() error {
 				errs = append(errs, fmt.Errorf("%s.tasks must not contain an empty task class", where))
 			}
 		}
-		errs = append(errs, m.Unavailable.validate(where+".unavailable")...)
+		errs = append(errs, m.Unavailable.Validate(where+".unavailable")...)
 	}
 
 	for name, p := range c.Providers {

@@ -17,6 +17,7 @@ import (
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/quota"
 	"github.com/gazon1/quota-router/internal/routing"
+	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/gazon1/quota-router/internal/store"
 )
 
@@ -66,6 +67,10 @@ type Options struct {
 	Store     *store.Store
 }
 
+
+func settingsCatalogue(cfg config.Config) settings.Catalogue {
+	return settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}
+}
 // New creates a server with registered routes.
 func New(log *slog.Logger, opts Options) *Server {
 	if log == nil {
@@ -79,7 +84,7 @@ func New(log *slog.Logger, opts Options) *Server {
 		log:      log,
 		mux:      http.NewServeMux(),
 		cfg:      cfg,
-		selector: routing.Selector{Config: cfg},
+		selector: routing.Selector{Catalogue: settingsCatalogue(cfg)},
 		usage:    opts.Usage,
 		token:    opts.AuthToken,
 	}

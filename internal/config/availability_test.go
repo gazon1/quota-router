@@ -168,7 +168,7 @@ func TestUnavailableValidation(t *testing.T) {
 		{"equal boundaries", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"monday"}, Start: "02:00", End: "02:00"}}}, "start and end must differ"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := tt.u.validate("litellm.model_aliases.free-coding.unavailable")
+			errs := tt.u.Validate("litellm.model_aliases.free-coding.unavailable")
 			if tt.want == "" {
 				if len(errs) != 0 {
 					t.Fatalf("errors = %v, want none", errs)

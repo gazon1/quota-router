@@ -1,6 +1,8 @@
 package config
 
 import (
+	"github.com/gazon1/quota-router/internal/settings"
+
 	"fmt"
 	"os"
 	"reflect"
@@ -10,31 +12,8 @@ import (
 	"github.com/knadh/koanf/v2"
 )
 
-// Secret is a credential: an API key or token read from the config file,
-// environment, or a mounted secret file. It prints and marshals as a redacted
-// value so it cannot leak through a log line or an error message.
-type Secret string
-
-const redacted = "[REDACTED]"
-
-// String keeps Secret out of formatted output.
-func (Secret) String() string { return redacted }
-
-// GoString keeps Secret out of %#v output.
-func (Secret) GoString() string { return redacted }
-
-// LogValue keeps Secret out of slog attributes.
-func (Secret) LogValue() any { return redacted }
-
-// MarshalText keeps Secret out of JSON, including slog's JSON handler, which
-// marshals a value that implements encoding.TextMarshaler as a JSON string.
-func (Secret) MarshalText() ([]byte, error) { return []byte(redacted), nil }
-
-// UnmarshalText lets koanf populate a Secret from a plain string value.
-func (s *Secret) UnmarshalText(b []byte) error {
-	*s = Secret(b)
-	return nil
-}
+// Secret is defined in internal/settings; config keeps Secret-file loading
+// and config-file rejection behavior.
 
 // loadSecretFiles applies values mounted as files so a container can use
 // Docker/Kubernetes secrets instead of environment values: an environment
@@ -94,7 +73,7 @@ func secretPaths() map[string]bool {
 					walk(f.Type.Elem(), prefix+name+".*.")
 				}
 			default:
-				if f.Type == reflect.TypeOf(Secret("")) {
+				if f.Type == reflect.TypeOf(settings.Secret("")) {
 					paths[prefix+name] = true
 				}
 			}

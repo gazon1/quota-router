@@ -1,0 +1,52 @@
+package config
+
+import (
+	"os/exec"
+	"strings"
+	"testing"
+
+	"github.com/gazon1/quota-router/internal/settings"
+)
+
+func TestCatalogueBoundary(t *testing.T) {
+	cleanEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	cat := cfg.Catalogue()
+	if cat.Routing.LowQuotaThreshold != cfg.Routing.LowQuotaThreshold {
+		t.Fatalf("threshold = %v, want %v", cat.Routing.LowQuotaThreshold, cfg.Routing.LowQuotaThreshold)
+	}
+	if len(cat.ModelAliases) != len(cfg.LiteLLM.ModelAliases) {
+		t.Fatalf("aliases len = %d, want %d", len(cat.ModelAliases), len(cfg.LiteLLM.ModelAliases))
+	}
+	// Canonical types: a settings.Model is assignable from config.Model (alias).
+	var _ settings.Model = cfg.LiteLLM.ModelAliases["x"]
+	var _ settings.Routing = cfg.Routing
+	var _ settings.Secret = cfg.Auth.Token
+}
+
+func TestRoutingAndAgentDoNotImportConfig(t *testing.T) {
+	for _, pkg := range []string{"github.com/gazon1/quota-router/internal/routing/...", "github.com/gazon1/quota-router/internal/agent"} {
+		out, err := exec.Command("go", "list", "-f", "{{.ImportPath}} {{.Imports}}", pkg).CombinedOutput()
+		if err != nil {
+			t.Fatalf("go list %s: %v\n%s", pkg, err, out)
+		}
+		if strings.Contains(string(out), "\"github.com/gazon1/quota-router/internal/config\"") {
+			t.Fatalf("%s imports internal/config:\n%s", pkg, out)
+		}
+	}
+}
+
+func TestSettingsHasNoKoanfDependency(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "github.com/gazon1/quota-router/internal/settings").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list deps: %v\n%s", err, out)
+	}
+	for _, bad := range []string{"koanf", "mapstructure", "viper", "env.Provider"} {
+		if strings.Contains(strings.ToLower(string(out)), strings.ToLower(bad)) {
+			t.Fatalf("settings depends on %s:\n%s", bad, out)
+		}
+	}
+}
