@@ -1435,6 +1435,49 @@ func TestPollStateTracksAttemptAndSuccessSeparately(t *testing.T) {
 	}
 }
 
+// The batch poll-state read returns one anchor per provider for callers that
+// hold several, instead of one query per provider.
+func TestPollStatesReturnsAnchorsPerProvider(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	states, err := s.PollStates(ctx)
+	if err != nil {
+		t.Fatalf("PollStates: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("PollStates = %v, want no anchors before any poll", states)
+	}
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	if err := s.SavePollState(ctx, "minimax", first, first); err != nil {
+		t.Fatalf("SavePollState: %v", err)
+	}
+	if err := s.SavePollState(ctx, "other", first.Add(time.Minute), time.Time{}); err != nil {
+		t.Fatalf("SavePollState: %v", err)
+	}
+
+	states, err = s.PollStates(ctx)
+	if err != nil {
+		t.Fatalf("PollStates: %v", err)
+	}
+	if len(states) != 2 {
+		t.Fatalf("PollStates = %v, want one anchor per provider", states)
+	}
+	if got := states["minimax"]; !got.Equal(first) {
+		t.Fatalf("PollStates[minimax] = %s, want %s", got, first)
+	}
+	if got := states["other"]; !got.Equal(first.Add(time.Minute)) {
+		t.Fatalf("PollStates[other] = %s, want %s", got, first.Add(time.Minute))
+	}
+
+	// A provider without a poll-state row maps to the zero time, like an absent
+	// poll state: readers must fail closed on it.
+	if got := states["never-polled"]; !got.IsZero() {
+		t.Fatalf("PollStates[never-polled] = %s, want the zero time", got)
+	}
+}
+
 // A pin must survive a restart with its timestamps intact: that is what makes
 // affinity something a controller can lose its process on and still honour.
 func TestSessionAffinitySurvivesRestart(t *testing.T) {

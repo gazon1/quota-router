@@ -36,6 +36,11 @@ type Sink interface {
 	// success untouched: the two timestamps are independent, and a failure does
 	// not erase when quota was last known good.
 	SavePollState(ctx context.Context, provider string, attemptAt, successAt time.Time) error
+	// SavePollResult persists one poll cycle — snapshot, health and the
+	// poll-state anchor — as a single transaction, so a cycle is never observed
+	// half-written and a failed cycle cannot leave a newer snapshot behind an
+	// anchor that was not advanced.
+	SavePollResult(ctx context.Context, provider string, snap store.QuotaSnapshot, health store.HealthRecord, attemptAt, successAt time.Time) error
 }
 
 // Target is one configured provider and the adapter that polls it. The name is
@@ -175,37 +180,22 @@ func (p *Poller) record(ctx context.Context, provider string, st *loopState, sna
 	if success {
 		successAt = snap.ObservedAt
 	}
-	// consecutiveFailures counts attempts that did not establish quota; the
-	// per-attempt debug log reports it, the retry count and the duration, so a
-	// provider outage is diagnosable from logs alone. It counts fetch outcomes
-	// only: the persistence result of the same cycle is reported separately as
-	// persist_ok, so the two failures are never conflated.
-	if success {
-		st.consecutiveFailures = 0
-		st.lastSuccessAt = successAt
-	} else {
-		st.consecutiveFailures++
+	var cycleErr error
+	if err := p.Sink.SavePollResult(ctx, provider, observation(provider, snap, p.StaleAfter, at), health(provider, state), at, successAt); err != nil {
+		cycleErr = err
+		p.Log.Error("persist poll result", "provider", provider, "error", cycleErr)
 	}
 
-	var snapshotErr error
-	if snapshotErr = p.Sink.SaveQuotaSnapshot(ctx, observation(provider, snap, p.StaleAfter, at)); snapshotErr != nil {
-		p.Log.Error("persist quota snapshot", "provider", provider, "error", snapshotErr)
-	}
-	var healthErr error
-	if healthErr = p.Sink.SaveProviderHealth(ctx, health(provider, state)); healthErr != nil {
-		p.Log.Error("persist provider health", "provider", provider, "error", healthErr)
-	}
-	var cycleErr error = snapshotErr
-	if healthErr != nil {
-		cycleErr = healthErr
-	}
-	var pollErr error
+	// A success only counts once the cycle committed: the observation has to be
+	// durably anchored before it becomes the provider's last success, so a failed
+	// persistence leaves the failure history of the last committed cycle alone.
 	if cycleErr == nil {
-		pollErr = p.Sink.SavePollState(ctx, provider, at, successAt)
-	}
-	if pollErr != nil {
-		cycleErr = pollErr
-		p.Log.Error("persist poll state", "provider", provider, "error", pollErr)
+		if success {
+			st.consecutiveFailures = 0
+			st.lastSuccessAt = successAt
+		} else {
+			st.consecutiveFailures++
+		}
 	}
 
 	// started precedes the fetch and the persistence below, so the duration

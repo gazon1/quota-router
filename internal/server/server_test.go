@@ -149,6 +149,16 @@ func (f *fakeStore) PollState(_ context.Context, provider string) (time.Time, ti
 	}
 	return at, time.Time{}, nil
 }
+
+// PollStates maps the fake store's per-provider last attempts onto the batch
+// read the status and selection paths use.
+func (f *fakeStore) PollStates(_ context.Context) (map[string]time.Time, error) {
+	out := map[string]time.Time{}
+	for provider, at := range f.lastAttempt {
+		out[provider] = at
+	}
+	return out, nil
+}
 func (f *fakeStore) SaveRoutingDecision(_ context.Context, r store.RoutingDecisionRecord) error {
 	if f.saveErr != nil {
 		return f.saveErr

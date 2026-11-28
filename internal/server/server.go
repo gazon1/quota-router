@@ -39,6 +39,10 @@ type StateStore interface {
 	// last attempt is the freshness anchor runtime consumers compare the
 	// observation against.
 	PollState(ctx context.Context, provider string) (attemptAt, successAt time.Time, err error)
+	// PollStates returns the latest poll anchor per provider in one query, for
+	// callers that read several providers at once. Same zero value as an absent
+	// poll state: readers fail closed on it.
+	PollStates(ctx context.Context) (map[string]time.Time, error)
 }
 
 // Server wires HTTP routes and handlers.
@@ -428,10 +432,14 @@ func (s *Server) statusProviders(ctx context.Context, snaps []store.QuotaSnapsho
 	out := make([]statusProvider, 0, len(names))
 	now := time.Now().UTC()
 	bound := staleAfter(s.cfg.Polling.Interval)
+	anchors, err := s.store.PollStates(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, n := range names {
 		p := statusProvider{Provider: n}
 		if snap, ok := byQuota[n]; ok {
-			q, err := s.quotaAt(ctx, snap, now, bound)
+			q, err := s.quotaAt(ctx, snap, anchors[snap.Provider], now, bound)
 			if err != nil {
 				return nil, err
 			}
@@ -623,13 +631,9 @@ func (s *Server) routeSession(ctx context.Context, req routing.RouteRequest) (ro
 // process crash or a polling stop leaves behind. A row whose poll state is
 // missing is treated exactly like an expired one: no durably anchored attempt
 // backs it, so it stays stale instead of becoming current.
-func (s *Server) quotaAt(ctx context.Context, snap store.QuotaSnapshot, now time.Time, maxAge time.Duration) (quota.Snapshot, error) {
+func (s *Server) quotaAt(ctx context.Context, snap store.QuotaSnapshot, anchor time.Time, now time.Time, maxAge time.Duration) (quota.Snapshot, error) {
 	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-	attemptAt, _, err := s.store.PollState(ctx, snap.Provider)
-	if err != nil {
-		return quota.Snapshot{}, err
-	}
-	if attemptAt.IsZero() || now.Sub(attemptAt) > maxAge {
+	if anchor.IsZero() || now.Sub(anchor) > maxAge {
 		q.Stale = true
 	}
 	return q, nil
@@ -652,8 +656,12 @@ func (s *Server) loadSelectState(ctx context.Context, sessionID string) (routing
 	if err != nil {
 		return routing.SelectState{}, err
 	}
+	anchors, err := s.store.PollStates(ctx)
+	if err != nil {
+		return routing.SelectState{}, err
+	}
 	for _, snap := range snaps {
-		q, err := s.quotaAt(ctx, snap, now, freshness)
+		q, err := s.quotaAt(ctx, snap, anchors[snap.Provider], now, freshness)
 		if err != nil {
 			return routing.SelectState{}, err
 		}

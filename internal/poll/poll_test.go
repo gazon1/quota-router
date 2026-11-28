@@ -80,6 +80,31 @@ func (r *recorder) SavePollState(_ context.Context, provider string, attemptAt, 
 	return nil
 }
 
+// SavePollResult persists one cycle atomically in the fake: any rejected write
+// rolls the cycle back, so nothing is recorded and the poll state is untouched.
+func (r *recorder) SavePollResult(_ context.Context, provider string, snap store.QuotaSnapshot, h store.HealthRecord, attemptAt, successAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.fail {
+		r.snaps = append(r.snaps, snap)
+		r.health = append(r.health, h)
+		r.attempts[provider] = attemptAt
+		if !successAt.IsZero() {
+			r.success[provider] = successAt
+		}
+		return nil
+	}
+	switch r.failOp {
+	case "", failSnapshot:
+		return errors.New("simulated sink write failure: quota snapshot")
+	case failHealth:
+		return errors.New("simulated sink write failure: provider health")
+	case failPoll:
+		return errors.New("simulated sink write failure: poll state")
+	}
+	return errors.New("simulated sink write failure")
+}
+
 func (r *recorder) snapshots() []store.QuotaSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -572,19 +597,18 @@ func TestZeroBaseDelayDoesNotSpin(t *testing.T) {
 	}
 }
 
-// Each rejected sink write is logged, marks the cycle failed, leaves the poll
-// state unadvanced, and does not stop the next poll.
+// Each rejected cycle write is logged, marks the cycle failed, rolls the whole
+// cycle back, leaves the poll state unadvanced, and does not stop the next poll.
 func TestPersistenceFailuresAreLoggedAndPollStateNotCommitted(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		op        string
 		snapshots int
 		healths   int
-		persist   string
 	}{
-		{"snapshot", failSnapshot, 0, 1, "persist quota snapshot"},
-		{"health", failHealth, 1, 0, "persist provider health"},
-		{"poll state", failPoll, 1, 1, "persist poll state"},
+		{"snapshot", failSnapshot, 0, 0},
+		{"health", failHealth, 0, 0},
+		{"poll state", failPoll, 0, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
@@ -597,8 +621,8 @@ func TestPersistenceFailuresAreLoggedAndPollStateNotCommitted(t *testing.T) {
 
 			p.poll(context.Background(), p.Targets[0], &loopState{})
 			logged := buf.String()
-			if !strings.Contains(logged, tc.persist) {
-				t.Fatalf("failure not logged: log = %q, want it to contain %q", logged, tc.persist)
+			if !strings.Contains(logged, "persist poll result") {
+				t.Fatalf("failure not logged: log = %q, want it to contain %q", logged, "persist poll result")
 			}
 			if !strings.Contains(logged, "persist_ok=false") {
 				t.Fatalf("failed cycle not marked: log = %q, want persist_ok=false", logged)
