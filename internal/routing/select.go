@@ -159,7 +159,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	d.addEliminations(&candidates, configElim)
 	d.recordStage("configuration", candidates, configElim, "")
 
-	candidates, elim := filterCapabilities(candidates, s.Catalogue, req)
+	candidates, elim := filterCapabilities(candidates, req)
 	d.addEliminations(&candidates, elim)
 	d.recordStage("capabilities", candidates, elim, "")
 
@@ -177,7 +177,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	// where that distinction is still recoverable.
 	affinityCandidate, affinityApplies := selectAffinity(candidates, req, state)
 
-	candidates, elim = filterHealth(candidates, s.Catalogue, state)
+	candidates, elim = filterHealth(candidates, state)
 	d.addEliminations(&candidates, elim)
 	d.recordStage("provider_health", candidates, elim, "")
 
@@ -185,7 +185,7 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	d.addEliminations(&candidates, elim)
 	d.recordStage("subscription_quota", candidates, elim, "")
 
-	candidates, elim = filterCooldown(candidates, s.Catalogue, state)
+	candidates, elim = filterCooldown(candidates, state)
 	d.addEliminations(&candidates, elim)
 	d.recordStage("temporary_exclusions", candidates, elim, "")
 

@@ -9,7 +9,7 @@ import (
 	"github.com/gazon1/quota-router/internal/settings"
 )
 
-func filterCapabilities(cs []candidate, cfg settings.Catalogue, req RouteRequest) ([]candidate, []RejectedCandidate) {
+func filterCapabilities(cs []candidate, req RouteRequest) ([]candidate, []RejectedCandidate) {
 	required := requirementsFromRequest(req)
 	var elim []RejectedCandidate
 	for _, c := range cs {
@@ -88,7 +88,7 @@ func filterAvailability(cs []candidate, state SelectState) ([]candidate, []Rejec
 	return cs, elim
 }
 
-func filterHealth(cs []candidate, cfg settings.Catalogue, state SelectState) ([]candidate, []RejectedCandidate) {
+func filterHealth(cs []candidate, state SelectState) ([]candidate, []RejectedCandidate) {
 	var elim []RejectedCandidate
 	for _, c := range cs {
 		h, ok := state.Health[c.Provider]
@@ -124,7 +124,6 @@ func filterHealth(cs []candidate, cfg settings.Catalogue, state SelectState) ([]
 		// Degraded is allowed by explicit policy: it is not unavailable. The
 		// reason is kept in health state for explanation, but it does not
 		// eliminate the candidate.
-		_ = cfg
 	}
 	return cs, elim
 }
@@ -197,7 +196,7 @@ func belowReserve(snap quota.Snapshot, reserve float64) bool {
 // no traffic, not an absence of information about it. Holding a session on a
 // cooled provider would send a whole conversation's requests into the rate
 // limiting the cooldown exists to avoid.
-func filterCooldown(cs []candidate, _ settings.Catalogue, state SelectState) ([]candidate, []RejectedCandidate) {
+func filterCooldown(cs []candidate, state SelectState) ([]candidate, []RejectedCandidate) {
 	var elim []RejectedCandidate
 	for _, c := range cs {
 		h, ok := state.Health[c.Provider]

@@ -45,7 +45,7 @@ func TestCandidatesFiltersCapabilitiesAndDisabled(t *testing.T) {
 		{"no match", Requirements{Tasks: []string{"translation"}}, []string{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := cfg.Candidates(tt.req); !reflect.DeepEqual(got, tt.want) {
+			if got := cfg.Catalogue().Candidates(tt.req); !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("Candidates(%+v) = %v, want %v", tt.req, got, tt.want)
 			}
 		})
@@ -154,7 +154,7 @@ litellm:
 	if got := cfg.LiteLLM.ModelAliases["coding"]; !reflect.DeepEqual(got, want) {
 		t.Fatalf("coding = %+v, want %+v", got, want)
 	}
-	if got := cfg.Candidates(Requirements{}); !reflect.DeepEqual(got, []string{"coding2", "fast"}) {
+	if got := cfg.Catalogue().Candidates(Requirements{}); !reflect.DeepEqual(got, []string{"coding2", "fast"}) {
 		t.Fatalf("Candidates = %v, want the enabled aliases only, disabled coding excluded", got)
 	}
 }
