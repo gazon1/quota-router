@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -25,45 +26,6 @@ import (
 const tsLayout = "2006-01-02T15:04:05.000000000Z"
 
 func ts(t time.Time) string { return t.UTC().Format(tsLayout) }
-
-// SaveQuotaSnapshot appends one snapshot with its windows.
-func (s *Store) SaveQuotaSnapshot(ctx context.Context, snap QuotaSnapshot) error {
-	if err := snap.Validate(); err != nil {
-		return fmt.Errorf("quota snapshot: %w", err)
-	}
-	var reason *string
-	if snap.UnknownReason != nil {
-		r := string(*snap.UnknownReason)
-		reason = &r
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx,
-			`INSERT INTO quota_snapshots (provider, state, unknown_reason, source, confidence, observed_at, error)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			snap.Provider, snap.State, reason, snap.Source, snap.Confidence, ts(snap.ObservedAt), nullString(snap.Error))
-		if err != nil {
-			return classify(err)
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return classify(err)
-		}
-		for _, w := range snap.Windows {
-			var resetAt *string
-			if w.ResetAt != nil {
-				r := ts(*w.ResetAt)
-				resetAt = &r
-			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO quota_windows (snapshot_id, window, unit, limit_value, used_value, remaining_value, reset_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				id, w.Window, nullString(w.Unit), w.Limit, w.Used, w.Remaining, resetAt); err != nil {
-				return classify(err)
-			}
-		}
-		return nil
-	})
-}
 
 // SaveUsageRecord appends one request attempt. A report for an attempt that is
 // already stored is ignored when the event content is identical, so a retried
@@ -192,51 +154,6 @@ func intFromNull(v *sql.NullInt64) *int {
 	return &n
 }
 
-// SaveProviderHealth appends one health observation.
-func (s *Store) SaveProviderHealth(ctx context.Context, h HealthRecord) error {
-	if err := h.Validate(); err != nil {
-		return fmt.Errorf("provider health: %w", err)
-	}
-	var cooldownUntil *string
-	if h.CooldownUntil != nil && !h.CooldownUntil.IsZero() {
-		v := ts(*h.CooldownUntil)
-		cooldownUntil = &v
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO provider_health (provider, state, observed_at, error, cooldown_until) VALUES (?, ?, ?, ?, ?)`,
-			h.Provider, h.State, ts(h.ObservedAt), nullString(h.Error), cooldownUntil)
-		return classify(err)
-	})
-}
-
-// SavePollState records when a provider was last polled and, when the attempt
-// established quota, when it last did. A zero successAt leaves the recorded
-// success alone: a failure must not erase when quota was last known good, and
-// the two timestamps are read independently.
-func (s *Store) SavePollState(ctx context.Context, provider string, attemptAt, successAt time.Time) error {
-	if provider == "" {
-		return errors.New("poll state: provider must not be empty")
-	}
-	if attemptAt.IsZero() {
-		return errors.New("poll state: attempt time must be set")
-	}
-	var success *string
-	if !successAt.IsZero() {
-		v := ts(successAt)
-		success = &v
-	}
-	return s.tx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO poll_state (provider, last_attempt_at, last_success_at) VALUES (?, ?, ?)
-			 ON CONFLICT (provider) DO UPDATE SET
-			   last_attempt_at = excluded.last_attempt_at,
-			   last_success_at = COALESCE(excluded.last_success_at, poll_state.last_success_at)`,
-			provider, ts(attemptAt), success)
-		return classify(err)
-	})
-}
-
 // PollState reports when a provider was last polled and last succeeded. A zero
 // success time means no attempt has established quota yet.
 func (s *Store) PollState(ctx context.Context, provider string) (attemptAt, successAt time.Time, err error) {
@@ -351,13 +268,52 @@ func (s *Store) PollCycles(ctx context.Context) (map[string]PollCycle, error) {
 		return nil, classify(err)
 	}
 	rows.Close()
-	for _, p := range order {
-		windows, err := windows(ctx, tx, ids[p])
-		if err != nil {
-			return nil, err
+	windowsBySnapshot := map[int64][]QuotaWindow{}
+	if len(order) > 0 {
+		args := make([]any, 0, len(order))
+		placeholders := make([]string, len(order))
+		for i, p := range order {
+			placeholders[i] = "?"
+			args = append(args, ids[p])
 		}
+		rows2, err := tx.QueryContext(ctx,
+			`SELECT snapshot_id, window, unit, limit_value, used_value, remaining_value, reset_at
+			 FROM quota_windows WHERE snapshot_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY snapshot_id, window`,
+			args...)
+		if err != nil {
+			return nil, classify(err)
+		}
+		for rows2.Next() {
+			var (
+				snapshotID int64
+				w          QuotaWindow
+				unit       sql.NullString
+				resetAt    sql.NullString
+			)
+			if err := rows2.Scan(&snapshotID, &w.Window, &unit, &w.Limit, &w.Used, &w.Remaining, &resetAt); err != nil {
+				rows2.Close()
+				return nil, classify(err)
+			}
+			w.Unit = unit.String
+			if resetAt.Valid {
+				t, err := parseTS(resetAt.String)
+				if err != nil {
+					rows2.Close()
+					return nil, err
+				}
+				w.ResetAt = &t
+			}
+			windowsBySnapshot[snapshotID] = append(windowsBySnapshot[snapshotID], w)
+		}
+		if err := rows2.Err(); err != nil {
+			rows2.Close()
+			return nil, classify(err)
+		}
+		rows2.Close()
+	}
+	for _, p := range order {
 		c := cycles[p]
-		c.Snapshot.Windows = windows
+		c.Snapshot.Windows = windowsBySnapshot[ids[p]]
 		cycles[p] = c
 	}
 
@@ -440,6 +396,9 @@ func (s *Store) SavePollResult(ctx context.Context, provider string, snap QuotaS
 	}
 	if attemptAt.IsZero() {
 		return errors.New("poll result: attempt time must be set")
+	}
+	if !successAt.IsZero() && successAt.After(attemptAt) {
+		return fmt.Errorf("poll result: success time %s is after the attempt time %s", successAt.UTC(), attemptAt.UTC())
 	}
 	if err := snap.Validate(); err != nil {
 		return fmt.Errorf("quota snapshot: %w", err)

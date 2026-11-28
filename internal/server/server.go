@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gazon1/quota-router/internal/application"
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/quota"
 	"github.com/gazon1/quota-router/internal/routing"
@@ -50,24 +51,23 @@ type Server struct {
 	store     StateStore
 	decisions DecisionStore
 	usage     UsageSink
-	// sessions serializes the read-decide-write of one session's route pin
-	// against a release of the same session. Per session, so unrelated sessions
-	// do not contend.
-	sessions sessionLocks
+	routes    *application.RouteService
 	// token is the bearer token the API routes require. Empty disables them:
 	// the health route stays open, every other route refuses.
 	token string
 }
 
 // Options carries what the routes read. A nil Usage or an empty Token leaves
-// the usage route registered but refusing every report. A nil Store leaves the
-// routing, status and session release routes registered but returning 503:
-// affinity is routing state, so the store that holds it also ends route use.
+// the usage route registered but refusing every report. Nil Store/Decisions
+// leave the routing, status and session release routes registered but
+// returning 503: affinity is routing state, so the store that holds it also
+// ends route use.
 type Options struct {
 	Usage     UsageSink
 	AuthToken string
 	Config    config.Config
-	Store     *store.Store
+	Store     StateStore
+	Decisions DecisionStore
 }
 
 // New creates a server with registered routes.
@@ -87,10 +87,22 @@ func New(log *slog.Logger, opts Options) *Server {
 		usage:    opts.Usage,
 		token:    opts.AuthToken,
 	}
-	if opts.Store != nil {
-		s.store = opts.Store
-		s.decisions = opts.Store
+	s.store = opts.Store
+	s.decisions = opts.Decisions
+	if s.decisions == nil {
+		if ds, ok := opts.Store.(DecisionStore); ok {
+			s.decisions = ds
+		}
 	}
+	var (
+		state    application.StateReader
+		affinity application.AffinityStore
+	)
+	if s.store != nil {
+		state = s.store
+		affinity = s.store
+	}
+	s.routes = application.NewRouteService(s.cfg, s.selector, state, affinity, s.decisions)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/route", s.handleSelect)
@@ -211,12 +223,6 @@ const maxSelectBody = 64 << 10
 // and an error message.
 const maxSessionIDLength = 256
 
-// sessionAffinityTTL is how long a pin outlives its last use. Long enough that a
-// working session keeps its model across a pause, short enough that an abandoned
-// session stops being pinned without anyone releasing it. It is deliberately not
-// configurable yet: nothing has measured a better value.
-const sessionAffinityTTL = 24 * time.Hour
-
 type selectResponse struct {
 	Decision routing.Decision `json:"decision"`
 }
@@ -255,12 +261,7 @@ func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// One session, one route decision at a time. The read of the pin, the decision
-	// and the write of the pin are one logical operation: a release that lands
-	// between them would be undone by the write, and two concurrent decisions for
-	// one session could each pin a different route. The lock is per session, so it
-	// costs nothing to unrelated traffic.
-	decision, err := s.routeSession(r.Context(), req)
+	decision, err := s.routes.Route(r.Context(), req)
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "route session", "error", err, "session_id", req.SessionID)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, err.Error(), true)
@@ -299,15 +300,15 @@ func (s *Server) handleDecisions(w http.ResponseWriter, r *http.Request) {
 		Decision         json.RawMessage `json:"decision"`
 	}
 	out := make([]item, 0, len(records))
-	for _, r := range records {
+	for _, rec := range records {
 		out = append(out, item{
-			DecisionID:       r.DecisionID,
-			PolicyVersion:    r.PolicyVersion,
-			SessionID:        r.SessionID,
-			SelectedAlias:    r.SelectedAlias,
-			SelectedProvider: r.SelectedProvider,
-			CreatedAt:        r.CreatedAt,
-			Decision:         json.RawMessage(r.Payload),
+			DecisionID:       rec.DecisionID,
+			PolicyVersion:    rec.PolicyVersion,
+			SessionID:        rec.SessionID,
+			SelectedAlias:    rec.SelectedAlias,
+			SelectedProvider: rec.SelectedProvider,
+			CreatedAt:        rec.CreatedAt,
+			Decision:         json.RawMessage(rec.Payload),
 		})
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"decisions": out})
@@ -469,6 +470,110 @@ func statusWindows(ws []quota.Window) []statusWindow {
 	return out
 }
 
+func staleAfter(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 90 * time.Second
+	}
+	return 3 * interval
+}
+
+// quotaAt maps one persisted quota row onto the actionable domain snapshot at
+// now, applying the freshness bound. The bound is anchored to the last poll
+// attempt behind the row, not only to the observation: a row written while quota
+// was fresh reads as stale once that attempt is past the bound, which is what a
+// process crash or a polling stop leaves behind. A row whose poll state is
+// missing is treated exactly like an expired one: no durably anchored attempt
+// backs it, so it stays stale instead of becoming current.
+func (s *Server) quotaAt(snap store.QuotaSnapshot, anchor time.Time, now time.Time, maxAge time.Duration) quota.Snapshot {
+	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
+	if anchor.IsZero() || now.Sub(anchor) > maxAge {
+		q.Stale = true
+	}
+	return q
+}
+
+// quotaSnapshotFromStore converts one persisted quota row for status use. An
+// unknown row keeps the closed reason it failed with; a stale-observation row
+// that still carries windows is re-opened as a last-known-good copy marked stale,
+// so the diagnostic stays observable without ever becoming actionable.
+func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Snapshot {
+	windows := make([]quota.Window, 0, len(s.Windows))
+	for _, w := range s.Windows {
+		win := quota.Window{Name: w.Window, Limit: w.Limit, Used: w.Used, Remaining: w.Remaining}
+		if w.ResetAt != nil {
+			win.ResetsAt = *w.ResetAt
+		}
+		windows = append(windows, win)
+	}
+	if s.State == store.QuotaUnknown {
+		reason := quotaUnknownReasonFromStore(s.UnknownReason)
+		snap := quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
+		if reason == quota.StaleObservation && len(windows) > 0 {
+			snap = quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
+			snap.Stale = true
+		}
+		return snap
+	}
+	snap := quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
+	return snap
+}
+
+// quotaUnknownReasonFromStore maps a stored unknown reason onto the actionable
+// one. A nil reason is treated as a malformed response: nothing was reported, so
+// the closed reason must not be guessed at.
+func quotaUnknownReasonFromStore(r *store.UnknownReason) quota.UnknownReason {
+	if r == nil {
+		return quota.MalformedResponse
+	}
+	switch *r {
+	case store.ReasonUnsupported:
+		return quota.UnsupportedNoQuotaAPI
+	case store.ReasonFetchFailed:
+		return quota.TransientFetchFailure
+	case store.ReasonStale:
+		return quota.StaleObservation
+	case store.ReasonMalformed:
+		return quota.MalformedResponse
+	case store.ReasonAuth:
+		return quota.AuthFailure
+	case store.ReasonNotObserved:
+		return quota.NotYetObserved
+	default:
+		return quota.MalformedResponse
+	}
+}
+
+// providerStateFromStore converts one persisted provider health row onto the
+// actionable provider state. A stored error may be a legacy free-form
+// description; it is mapped onto the closed reason set rather than echoed.
+func providerStateFromStore(h store.HealthRecord) quota.ProviderState {
+	state := quota.Health(strings.ToUpper(string(h.State)))
+	reason := quota.ReasonNone
+	switch strings.ToUpper(h.Error) {
+	case string(quota.ReasonAuthFailed):
+		reason = quota.ReasonAuthFailed
+	case string(quota.ReasonTimeout):
+		reason = quota.ReasonTimeout
+	case string(quota.ReasonRateLimited):
+		reason = quota.ReasonRateLimited
+	case string(quota.ReasonServerError):
+		reason = quota.ReasonServerError
+	case string(quota.ReasonUnreachable):
+		reason = quota.ReasonUnreachable
+	case string(quota.ReasonNotProbed):
+		reason = quota.ReasonNotProbed
+	case "":
+		reason = quota.ReasonNone
+	default:
+		reason = quota.ReasonServerError
+	}
+	st := quota.NewProviderState(h.Provider, state, reason, h.ObservedAt)
+	if h.CooldownUntil != nil {
+		st.CooldownUntil = *h.CooldownUntil
+	}
+	return st
+}
+
 // Session release ends one agent session's route use: the pin is deleted, so the
 // next decision for that session starts from the normal candidate set. Deleting
 // an absent pin is not an error, which is what makes a repeat release safe. It
@@ -492,12 +597,8 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, errorCodeInvalidRequest, "session_id must be at most 256 bytes", false)
 		return
 	}
-	// The same lock selection takes: without it a decision that read the pin just
-	// before this delete could write it back and silently undo the release.
-	unlock := s.sessions.lock(id)
-	defer unlock()
 
-	pin, released, err := s.deleteAffinity(r.Context(), id)
+	pin, released, err := s.routes.Release(r.Context(), id)
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "release session", "error", err, "session_id", id)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "session release could not be stored", true)
@@ -544,219 +645,4 @@ func isSessionReleasePath(path string) bool {
 func isMaxBytesError(err error) bool {
 	var maxErr *http.MaxBytesError
 	return errors.As(err, &maxErr)
-}
-
-// deleteAffinity removes a session's pin and reports the route that was there, so
-// a caller learns which session actually moved. An absent pin is not an error.
-func (s *Server) deleteAffinity(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error) {
-	pin, ok, err := s.store.SessionAffinity(ctx, sessionID)
-	if err != nil {
-		return store.SessionAffinity{}, false, err
-	}
-	if err := s.store.DeleteSessionAffinity(ctx, sessionID); err != nil {
-		return store.SessionAffinity{}, false, err
-	}
-	return pin, ok, nil
-}
-
-// routeSession performs the whole session-routing operation under the session's
-// lock: read state, decide, audit the decision, pin the route. It returns the
-// error the caller should report, so each failure keeps its own message.
-func (s *Server) routeSession(ctx context.Context, req routing.RouteRequest) (routing.Decision, error) {
-	unlock := s.sessions.lock(req.SessionID)
-	defer unlock()
-
-	state, err := s.loadSelectState(ctx, req.SessionID)
-	if err != nil {
-		return routing.Decision{}, errors.New("routing state unavailable")
-	}
-	decision := s.selector.Select(req, state)
-	if err := s.persistDecision(ctx, decision); err != nil {
-		return routing.Decision{}, errors.New("routing decision audit persistence failed")
-	}
-	// The pin is written after the decision is audited: a decision that cannot be
-	// stored is not returned as success, and a route that was never recorded must
-	// not persist as the session's. This is a deliberate two-write sequence, not
-	// one transaction: the audit log records what was decided, the pin records
-	// what will be used, and a failure here leaves a decision that was reported as
-	// failed. Every decision with a route writes the pin, including one that just
-	// kept it, so the TTL is measured from the last use and an active session does
-	// not lose its route while it is still being used.
-	if err := s.pinAffinity(ctx, req.SessionID, decision, state.Now); err != nil {
-		return routing.Decision{}, errors.New("session affinity could not be stored")
-	}
-	return decision, nil
-}
-
-// loadSelectState reads what selection needs for one session: quota and health
-// observations plus that session's route pin, if it has a live one. An expired
-// pin is dropped here as well as in the selector, so the decision explanation
-// and the stored state agree on what the session is pinned to. Performance
-// tie-breaks are implemented in the selector but no observation store feeds them
-// yet; they stay unused rather than being loaded from nothing.
-// quotaAt maps one persisted quota row onto the actionable domain snapshot at
-// now, applying the freshness bound. The bound is anchored to the last poll
-// attempt behind the row, not only to the observation: a row written while quota
-// was fresh reads as stale once that attempt is past the bound, which is what a
-// process crash or a polling stop leaves behind. A row whose poll state is
-// missing is treated exactly like an expired one: no durably anchored attempt
-// backs it, so it stays stale instead of becoming current.
-func (s *Server) quotaAt(snap store.QuotaSnapshot, anchor time.Time, now time.Time, maxAge time.Duration) quota.Snapshot {
-	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-	if anchor.IsZero() || now.Sub(anchor) > maxAge {
-		q.Stale = true
-	}
-	return q
-}
-
-func (s *Server) loadSelectState(ctx context.Context, sessionID string) (routing.SelectState, error) {
-	now := time.Now().UTC()
-	freshness := staleAfter(s.cfg.Polling.Interval)
-	state := routing.SelectState{
-		Now:          now,
-		Quota:        map[string]quota.Snapshot{},
-		Health:       map[string]quota.ProviderState{},
-		QuotaMaxAge:  freshness,
-		HealthMaxAge: freshness,
-	}
-	if s.store == nil {
-		return routing.SelectState{}, fmt.Errorf("routing state store unavailable")
-	}
-	cycles, err := s.store.PollCycles(ctx)
-	if err != nil {
-		return routing.SelectState{}, err
-	}
-	for provider, c := range cycles {
-		state.Quota[provider] = s.quotaAt(c.Snapshot, c.AttemptAt, now, freshness)
-		state.Health[provider] = providerStateFromStore(c.Health)
-	}
-	pin, ok, err := s.store.SessionAffinity(ctx, sessionID)
-	if err != nil {
-		return routing.SelectState{}, err
-	}
-	if ok && pin.ExpiresAt.After(now) {
-		state.Affinity = &routing.Affinity{SessionID: pin.SessionID, Alias: pin.Alias, ExpiresAt: pin.ExpiresAt}
-	}
-	return state, nil
-}
-
-// pinAffinity records the route the session is now on. The write is one upsert
-// and the store keeps an existing created_at, so an active session shows when its
-// pin started while updated_at and the TTL move with each decision. A decision
-// with no route pins nothing: there is no route to keep.
-func (s *Server) pinAffinity(ctx context.Context, sessionID string, d routing.Decision, now time.Time) error {
-	if s.store == nil {
-		return fmt.Errorf("routing state store unavailable")
-	}
-	if d.SelectedAlias == "" {
-		return nil
-	}
-	return s.store.SaveSessionAffinity(ctx, store.SessionAffinity{
-		SessionID: sessionID,
-		Alias:     d.SelectedAlias,
-		CreatedAt: now,
-		UpdatedAt: now,
-		ExpiresAt: now.Add(sessionAffinityTTL),
-	})
-}
-
-func staleAfter(interval time.Duration) time.Duration {
-	if interval <= 0 {
-		return 90 * time.Second
-	}
-	return 3 * interval
-}
-
-func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Snapshot {
-	windows := make([]quota.Window, 0, len(s.Windows))
-	for _, w := range s.Windows {
-		win := quota.Window{Name: w.Window, Limit: w.Limit, Used: w.Used, Remaining: w.Remaining}
-		if w.ResetAt != nil {
-			win.ResetsAt = *w.ResetAt
-		}
-		windows = append(windows, win)
-	}
-	if s.State == store.QuotaUnknown {
-		reason := quotaUnknownReasonFromStore(s.UnknownReason)
-		snap := quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
-		if reason == quota.StaleObservation && len(windows) > 0 {
-			snap = quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
-			snap.Stale = true
-		}
-		return snap
-	}
-	snap := quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
-	return snap
-}
-
-func quotaUnknownReasonFromStore(r *store.UnknownReason) quota.UnknownReason {
-	if r == nil {
-		return quota.MalformedResponse
-	}
-	switch *r {
-	case store.ReasonUnsupported:
-		return quota.UnsupportedNoQuotaAPI
-	case store.ReasonFetchFailed:
-		return quota.TransientFetchFailure
-	case store.ReasonStale:
-		return quota.StaleObservation
-	case store.ReasonMalformed:
-		return quota.MalformedResponse
-	case store.ReasonAuth:
-		return quota.AuthFailure
-	case store.ReasonNotObserved:
-		return quota.NotYetObserved
-	default:
-		return quota.MalformedResponse
-	}
-}
-
-func providerStateFromStore(h store.HealthRecord) quota.ProviderState {
-	state := quota.Health(strings.ToUpper(string(h.State)))
-	reason := quota.ReasonNone
-	switch strings.ToUpper(h.Error) {
-	case string(quota.ReasonAuthFailed):
-		reason = quota.ReasonAuthFailed
-	case string(quota.ReasonTimeout):
-		reason = quota.ReasonTimeout
-	case string(quota.ReasonRateLimited):
-		reason = quota.ReasonRateLimited
-	case string(quota.ReasonServerError):
-		reason = quota.ReasonServerError
-	case string(quota.ReasonUnreachable):
-		reason = quota.ReasonUnreachable
-	case string(quota.ReasonNotProbed):
-		reason = quota.ReasonNotProbed
-	case "":
-		reason = quota.ReasonNone
-	default:
-		// Stored error may be a legacy free-form description; keep it out of the
-		// typed reason field.
-		reason = quota.ReasonServerError
-	}
-	st := quota.NewProviderState(h.Provider, state, reason, h.ObservedAt)
-	if h.CooldownUntil != nil {
-		st.CooldownUntil = *h.CooldownUntil
-	}
-	return st
-}
-
-func (s *Server) persistDecision(ctx context.Context, d routing.Decision) error {
-	if s.decisions == nil {
-		return fmt.Errorf("decision store unavailable")
-	}
-	payload, err := json.Marshal(d)
-	if err != nil {
-		return err
-	}
-	rec := store.RoutingDecisionRecord{
-		DecisionID:       d.DecisionID,
-		PolicyVersion:    d.PolicyVersion,
-		SessionID:        d.Request.SessionID,
-		SelectedAlias:    d.SelectedAlias,
-		SelectedProvider: d.SelectedProvider,
-		Payload:          string(payload),
-		CreatedAt:        time.Now().UTC(),
-	}
-	return s.decisions.SaveRoutingDecision(ctx, rec)
 }

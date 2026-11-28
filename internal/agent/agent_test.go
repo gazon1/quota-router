@@ -430,22 +430,15 @@ func (h *harness) seed(t *testing.T, provider string, state store.QuotaState, re
 	limit := 100.0
 	used := limit - remaining
 	reset := time.Now().Add(time.Hour).UTC()
-	if err := h.store.SaveQuotaSnapshot(context.Background(), store.QuotaSnapshot{
+	now := time.Now().UTC()
+	if err := h.store.SavePollResult(context.Background(), provider, store.QuotaSnapshot{
 		Provider: provider, State: state, Source: "test", Confidence: store.Reported,
-		ObservedAt: time.Now().UTC(),
+		ObservedAt: now,
 		Windows:    []store.QuotaWindow{{Window: "5h", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
-	}); err != nil {
-		t.Fatalf("SaveQuotaSnapshot: %v", err)
-	}
-	if err := h.store.SaveProviderHealth(context.Background(), store.HealthRecord{
-		Provider: provider, State: store.Healthy, ObservedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("SaveProviderHealth: %v", err)
-	}
-	// Polling would have anchored the observation with the poll-state write;
-	// without it the row cannot be read as fresh quota.
-	if err := h.store.SavePollState(context.Background(), provider, time.Now().UTC(), time.Now().UTC()); err != nil {
-		t.Fatalf("SavePollState: %v", err)
+	}, store.HealthRecord{
+		Provider: provider, State: store.Healthy, ObservedAt: now,
+	}, now, now); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
 	}
 }
 

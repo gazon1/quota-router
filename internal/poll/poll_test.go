@@ -686,11 +686,8 @@ func TestOutcomesSurviveStoreValidation(t *testing.T) {
 				t.Fatalf("health record does not validate: %v", err)
 			}
 			// And the store accepts it, constraints included.
-			if err := st.SaveQuotaSnapshot(context.Background(), snapshot); err != nil {
-				t.Fatalf("SaveQuotaSnapshot: %v", err)
-			}
-			if err := st.SaveProviderHealth(context.Background(), health("minimax", a.state)); err != nil {
-				t.Fatalf("SaveProviderHealth: %v", err)
+			if err := st.SavePollResult(context.Background(), "minimax", snapshot, health("minimax", a.state), time.Now().UTC(), snapshot.ObservedAt); err != nil {
+				t.Fatalf("SavePollResult: %v", err)
 			}
 		})
 	}
