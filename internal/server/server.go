@@ -67,10 +67,10 @@ type Options struct {
 	Decisions DecisionStore
 }
 
-
 func settingsCatalogue(cfg config.Config) settings.Catalogue {
 	return settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}
 }
+
 // New creates a server with registered routes.
 func New(log *slog.Logger, opts Options) *Server {
 	if log == nil {

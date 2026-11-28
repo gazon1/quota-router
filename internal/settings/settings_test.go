@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSecretRedaction(t *testing.T) {
@@ -40,5 +41,36 @@ func TestSecretRedaction(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "sk-live") {
 		t.Fatalf("json.Marshal leaked the secret: %s", encoded)
+	}
+}
+
+func TestSettingsRuntimeTypesUsableWithoutConfigLoader(t *testing.T) {
+	enabled := true
+	m := Model{
+		Model:        "provider/model",
+		Enabled:      &enabled,
+		ContextLimit: 128000,
+		Capabilities: Capabilities{Streaming: CapabilitySupported},
+		Tasks:        []string{"coding"},
+		Unavailable: &Unavailable{
+			Timezone: "UTC",
+			Windows:  []UnavailableWindow{{Days: []string{"monday"}, Start: "00:00", End: "01:00"}},
+		},
+	}
+	if !m.IsEnabled() || m.Provider() != "provider" {
+		t.Fatalf("model = %+v", m)
+	}
+	if _, ok := m.Unavailable.WindowAt(time.Date(2026, time.November, 30, 0, 30, 0, 0, time.UTC)); !ok {
+		t.Fatal("expected window to match")
+	}
+
+	cat := Catalogue{ModelAliases: map[string]Model{"m": m}, Routing: Routing{LowQuotaThreshold: 0.1}}
+	if got := cat.Candidates(Requirements{Streaming: true, Tasks: []string{"coding"}}); len(got) != 1 || got[0] != "m" {
+		t.Fatalf("Candidates = %v", got)
+	}
+
+	var sec Secret = "sk-test"
+	if string(sec) != "sk-test" || strings.Contains(sec.String(), "sk-test") {
+		t.Fatalf("secret redaction/runtime behavior broken: %q %q", string(sec), sec.String())
 	}
 }

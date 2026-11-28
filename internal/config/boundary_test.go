@@ -39,14 +39,19 @@ func TestRoutingAndAgentDoNotImportConfig(t *testing.T) {
 	}
 }
 
-func TestSettingsHasNoKoanfDependency(t *testing.T) {
+func TestSettingsHasNoConfigLoaderDependency(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "github.com/gazon1/quota-router/internal/settings").CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list deps: %v\n%s", err, out)
 	}
-	for _, bad := range []string{"koanf", "mapstructure", "viper", "env.Provider"} {
-		if strings.Contains(strings.ToLower(string(out)), strings.ToLower(bad)) {
+	lower := strings.ToLower(string(out))
+	for _, bad := range []string{"koanf", "mapstructure", "viper"} {
+		if strings.Contains(lower, bad) {
 			t.Fatalf("settings depends on %s:\n%s", bad, out)
 		}
 	}
+	// Architectural exception: runtime settings currently carry koanf/validate
+	// struct tags for config decoding/validation. Tags do not create runtime
+	// dependencies, but they are format metadata; moving them to config-owned
+	// DTO/schema types is a separate refactor.
 }

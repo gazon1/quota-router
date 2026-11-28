@@ -14,7 +14,6 @@ import (
 
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/routing"
-	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/gazon1/quota-router/internal/store"
 )
 

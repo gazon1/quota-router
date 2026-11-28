@@ -148,89 +148,230 @@ func TestWindowAtAbsentConfigurationNeverRestricts(t *testing.T) {
 func TestUnavailableValidation(t *testing.T) {
 	for _, tt := range []struct {
 		name string
-		u    *Unavailable
+		yaml string
 		want string
 	}{
-		{"valid", &Unavailable{Timezone: "Asia/Yerevan", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, ""},
-		{"valid overnight", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "23:00", End: "02:00"}}}, ""},
-		{"no windows", &Unavailable{Timezone: "Nowhere/Invalid"}, ""},
-		{"missing timezone", &Unavailable{Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, "timezone must name an IANA time zone"},
-		{"unknown timezone", &Unavailable{Timezone: "Nowhere/Invalid", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, "timezone must name an IANA time zone"},
-		// Go resolves Local to the host's zone, which would make the same config
-		// cover different hours on different machines.
-		{"Local is not IANA", &Unavailable{Timezone: "Local", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, "timezone must name an IANA time zone"},
-		{"UTC is IANA", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, ""},
-		{"real IANA name", &Unavailable{Timezone: "Asia/Yerevan", Windows: []UnavailableWindow{{Days: []string{"saturday"}, Start: "02:00", End: "06:00"}}}, ""},
-		{"unknown weekday", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"funday"}, Start: "02:00", End: "06:00"}}}, "days must name weekdays"},
-		{"no weekday", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Start: "02:00", End: "06:00"}}}, "days must name at least one weekday"},
-		{"malformed start", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"monday"}, Start: "2am", End: "06:00"}}}, "start must be a 24-hour HH:MM time"},
-		{"out of range end", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"monday"}, Start: "02:00", End: "24:00"}}}, "end must be a 24-hour HH:MM time"},
-		{"equal boundaries", &Unavailable{Timezone: "UTC", Windows: []UnavailableWindow{{Days: []string{"monday"}, Start: "02:00", End: "02:00"}}}, "start and end must differ"},
+		{
+			name: "valid",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: Asia/Yerevan
+        windows:
+          - days: [saturday]
+            start: "02:00"
+            end: "06:00"
+`,
+		},
+		{
+			name: "valid overnight",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - days: [saturday]
+            start: "23:00"
+            end: "02:00"
+`,
+		},
+		{
+			name: "no windows",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: Nowhere/Invalid
+`,
+		},
+		{
+			name: "missing timezone",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        windows:
+          - days: [saturday]
+            start: "02:00"
+            end: "06:00"
+`,
+			want: "timezone must name an IANA time zone",
+		},
+		{
+			name: "unknown timezone",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: Nowhere/Invalid
+        windows:
+          - days: [saturday]
+            start: "02:00"
+            end: "06:00"
+`,
+			want: "timezone must name an IANA time zone",
+		},
+		{
+			// Go resolves Local to the host's zone, which would make the same config
+			// cover different hours on different machines.
+			name: "Local is not IANA",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: Local
+        windows:
+          - days: [saturday]
+            start: "02:00"
+            end: "06:00"
+`,
+			want: "timezone must name an IANA time zone",
+		},
+		{
+			name: "UTC is IANA",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - days: [saturday]
+            start: "02:00"
+            end: "06:00"
+`,
+		},
+		{
+			name: "real IANA name",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: Asia/Yerevan
+        windows:
+          - days: [saturday]
+            start: "02:00"
+            end: "06:00"
+`,
+		},
+		{
+			name: "unknown weekday",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - days: [funday]
+            start: "02:00"
+            end: "06:00"
+`,
+			want: "days must name weekdays",
+		},
+		{
+			name: "no weekday",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - start: "02:00"
+            end: "06:00"
+`,
+			want: "days must name at least one weekday",
+		},
+		{
+			name: "malformed start",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - days: [monday]
+            start: "2am"
+            end: "06:00"
+`,
+			want: "start must be a 24-hour HH:MM time",
+		},
+		{
+			name: "out of range end",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - days: [monday]
+            start: "02:00"
+            end: "24:00"
+`,
+			want: "end must be a 24-hour HH:MM time",
+		},
+		{
+			name: "equal boundaries",
+			yaml: `
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+      unavailable:
+        timezone: UTC
+        windows:
+          - days: [monday]
+            start: "02:00"
+            end: "02:00"
+`,
+			want: "start and end must differ",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := validateUnavailableConfig(tt.u)
+			cleanEnv(t)
+			t.Setenv(ConfigFileEnv, writeConfig(t, tt.yaml))
+			_, err := Load()
 			if tt.want == "" {
-				if len(errs) != 0 {
-					t.Fatalf("errors = %v, want none", errs)
+				if err != nil {
+					t.Fatalf("Load() error = %v, want none", err)
 				}
 				return
 			}
-			var got []string
-			for _, err := range errs {
-				got = append(got, err.Error())
+			if err == nil {
+				t.Fatal("Load() error = nil, want validation error")
 			}
-			if !strings.Contains(strings.Join(got, "; "), tt.want) {
-				t.Fatalf("errors = %v, want one naming %q", got, tt.want)
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want one naming %q", err, tt.want)
 			}
-			for _, msg := range got {
-				if !strings.HasPrefix(msg, "litellm.model_aliases.free-coding.unavailable") {
-					t.Fatalf("%q must name the setting path", msg)
-				}
+			if !strings.Contains(err.Error(), "litellm.model_aliases.free-coding.unavailable") {
+				t.Fatalf("error = %v, want it to name the unavailable setting path", err)
 			}
 		})
 	}
-}
-
-func validateUnavailableConfig(u *Unavailable) []error {
-	c := Default()
-	c.LiteLLM.ModelAliases = map[string]Model{
-		"free-coding": {Model: "commandcode/stealth/glyph-cluster:free", Unavailable: u},
-	}
-	err := c.validate()
-	if err == nil {
-		return nil
-	}
-	joined, ok := unwrapJoinedConfigError(err)
-	if !ok {
-		return []error{err}
-	}
-	var out []error
-	for _, e := range joined {
-		if strings.Contains(e.Error(), "litellm.model_aliases.free-coding.unavailable") {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-func unwrapJoinedConfigError(err error) ([]error, bool) {
-	if err == nil {
-		return nil, false
-	}
-	type multiUnwrapper interface{ Unwrap() []error }
-	type singleUnwrapper interface{ Unwrap() error }
-
-	var walk func(error) ([]error, bool)
-	walk = func(e error) ([]error, bool) {
-		if u, ok := e.(multiUnwrapper); ok {
-			return u.Unwrap(), true
-		}
-		if u, ok := e.(singleUnwrapper); ok {
-			return walk(u.Unwrap())
-		}
-		return nil, false
-	}
-	return walk(err)
 }
 
 // The setting is file-configured only: a nested list has no honest environment
