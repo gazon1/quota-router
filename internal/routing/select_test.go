@@ -5,12 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/gazon1/quota-router/internal/quota"
+	"github.com/gazon1/quota-router/internal/settings"
 )
 
 var selNow = time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
-
 
 func defaultCatalogue() settings.Catalogue {
 	return settings.Catalogue{

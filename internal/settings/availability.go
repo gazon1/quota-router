@@ -14,24 +14,23 @@ import (
 // registry, and it has no stored state: availability is a pure function of the
 // configuration and the instant a decision is made.
 type Unavailable struct {
-	// Timezone is the IANA zone the windows are written in. Required when
-	// Windows is not empty; the schedule must not depend on the host's zone.
-	Timezone string `koanf:"timezone"`
+	// Timezone is the IANA zone the windows are written in.
+	Timezone string
 	// Windows are recurring weekly intervals. An empty list means no
 	// time-based restriction.
-	Windows []UnavailableWindow `koanf:"windows" validate:"dive"`
+	Windows []UnavailableWindow
 }
 
 // UnavailableWindow is one recurring weekly interval in local wall-clock time.
 // Days name the weekday the window starts on, Start is inclusive and End is
 // exclusive. Start after End is an overnight window that runs into the
 // following day, so [saturday 23:00, 02:00] covers Saturday night up to Sunday
-// 02:00. Equal Start and End is rejected: it names an empty or endless window,
-// never a useful one.
+// 02:00. Equal Start and End is rejected by the loader: it names an empty or
+// endless window, never a useful one.
 type UnavailableWindow struct {
-	Days  []string `koanf:"days" validate:"required,dive,weekday"`
-	Start string   `koanf:"start" validate:"required,clock_hhmm"`
-	End   string   `koanf:"end" validate:"required,clock_hhmm"`
+	Days  []string
+	Start string
+	End   string
 }
 
 // WindowAt returns the configured window containing instant now, if any. now is

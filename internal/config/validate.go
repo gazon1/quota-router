@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/go-playground/validator/v10"
 )
 
@@ -90,7 +89,7 @@ func formatValidationError(fe validator.FieldError) error {
 			return fmt.Errorf("%s must be debug, info, warn or error, got %q", path, fe.Value())
 		}
 		if strings.Contains(path, ".capabilities.") {
-			return fmt.Errorf("%s must be %q, %q or absent, got %q", path, settings.CapabilitySupported, settings.CapabilityUnsupported, fe.Value())
+			return fmt.Errorf("%s must be %q, %q or absent, got %q", path, CapabilitySupported, CapabilityUnsupported, fe.Value())
 		}
 		return fmt.Errorf("%s must be one of [%s], got %v", path, fe.Param(), fe.Value())
 	case "http_url":
@@ -166,6 +165,12 @@ func httpURLValidationError(path, raw string) error {
 	if u.User != nil {
 		return fmt.Errorf("%s: must not embed credentials in the URL; use the api_key or token setting instead", path)
 	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return fmt.Errorf("%s: must not contain a query string", path)
+	}
+	if u.Fragment != "" || strings.HasSuffix(raw, "#") {
+		return fmt.Errorf("%s: must not contain a fragment", path)
+	}
 	return fmt.Errorf("%s: must be an absolute http:// or https:// URL", path)
 }
 
@@ -222,7 +227,7 @@ func validateProviderRoutingStruct(sl validator.StructLevel) {
 }
 
 func validateModelStruct(sl validator.StructLevel) {
-	m := sl.Current().Interface().(settings.Model)
+	m := sl.Current().Interface().(Model)
 	for i, task := range m.Tasks {
 		if strings.TrimSpace(task) == "" {
 			sl.ReportError(task, fmt.Sprintf("tasks[%d]", i), "tasks", "nonempty_task", "")
@@ -234,7 +239,7 @@ func validateModelStruct(sl validator.StructLevel) {
 }
 
 func validateUnavailableStruct(sl validator.StructLevel) {
-	u := sl.Current().Interface().(settings.Unavailable)
+	u := sl.Current().Interface().(Unavailable)
 	if len(u.Windows) == 0 {
 		return
 	}
@@ -252,7 +257,7 @@ func validateUnavailableStruct(sl validator.StructLevel) {
 }
 
 func validateUnavailableWindowStruct(sl validator.StructLevel) {
-	w := sl.Current().Interface().(settings.UnavailableWindow)
+	w := sl.Current().Interface().(UnavailableWindow)
 	start, err1 := timeParseHHMM(w.Start)
 	end, err2 := timeParseHHMM(w.End)
 	if err1 == nil && err2 == nil && start == end {
@@ -273,9 +278,10 @@ func validateRoutingCatalogue(c Config) []error {
 		return nil
 	}
 	var errs []error
+	cat := c.Catalogue()
 	byProvider := map[string][]string{}
 	for _, alias := range sortedAliases(c.LiteLLM.ModelAliases) {
-		m := c.LiteLLM.ModelAliases[alias]
+		m := cat.ModelAliases[alias]
 		if !m.IsEnabled() {
 			continue
 		}
@@ -301,7 +307,7 @@ func validateRoutingCatalogue(c Config) []error {
 
 		for _, alias := range sortedModelPriorities(rp.Models) {
 			mWhere := where + ".models." + alias
-			m, exists := c.LiteLLM.ModelAliases[alias]
+			m, exists := cat.ModelAliases[alias]
 			if !exists {
 				errs = append(errs, fmt.Errorf("%s references unknown catalogue alias %q", mWhere, alias))
 				continue

@@ -10,7 +10,6 @@ import (
 
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/routing"
-	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/gazon1/quota-router/internal/store"
 )
 
@@ -145,7 +144,7 @@ func newTestService() (*RouteService, *fakeState, *fakeAffinity, *fakeDecisions)
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
-	svc := NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, state, aff, dec)
+	svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, aff, dec)
 	return svc, state, aff, dec
 }
 
@@ -173,7 +172,7 @@ func TestRoutePersistsDecisionBeforeAffinity(t *testing.T) {
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
 	order := &orderStore{fakeAffinity: &fakeAffinity{m: map[string]store.SessionAffinity{}}, fakeDecisions: &fakeDecisions{}}
-	svc := NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, state, order, order)
+	svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, order, order)
 
 	if _, err := svc.Route(context.Background(), routeReq("s1")); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -245,7 +244,7 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
-	svc := NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, state, aff, dec)
+	svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, aff, dec)
 
 	done1 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
@@ -327,7 +326,7 @@ func TestRouteDifferentSessionsConcurrent(t *testing.T) {
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
-	svc := NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, state, aff, dec)
+	svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, aff, dec)
 
 	done1 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
@@ -422,25 +421,25 @@ func TestRouteMissingDependenciesReturnErrors(t *testing.T) {
 	}{
 		{
 			name: "route missing state",
-			svc:  NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, nil, aff, dec),
+			svc:  NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, nil, aff, dec),
 			call: func(s *RouteService) error { _, err := s.Route(context.Background(), routeReq("s1")); return err },
 			want: "routing state unavailable",
 		},
 		{
 			name: "route missing affinity",
-			svc:  NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, state, nil, dec),
+			svc:  NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, nil, dec),
 			call: func(s *RouteService) error { _, err := s.Route(context.Background(), routeReq("s1")); return err },
 			want: "routing state unavailable",
 		},
 		{
 			name: "route missing decisions",
-			svc:  NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, state, aff, nil),
+			svc:  NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, aff, nil),
 			call: func(s *RouteService) error { _, err := s.Route(context.Background(), routeReq("s1")); return err },
 			want: "routing decision audit persistence failed",
 		},
 		{
 			name: "release missing affinity",
-			svc:  NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, state, nil, dec),
+			svc:  NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, nil, dec),
 			call: func(s *RouteService) error { _, _, err := s.Release(context.Background(), "s1"); return err },
 			want: "session affinity store unavailable",
 		},
@@ -466,20 +465,20 @@ func TestRouteDependencyFailuresReturnErrors(t *testing.T) {
 
 	t.Run("affinity read failure", func(t *testing.T) {
 		aff := &fakeAffinity{m: map[string]store.SessionAffinity{}, readErr: errors.New("boom")}
-		svc := NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, baseState(), aff, &fakeDecisions{})
+		svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, baseState(), aff, &fakeDecisions{})
 		if _, err := svc.Route(context.Background(), routeReq("s1")); err == nil || err.Error() != "routing state unavailable" {
 			t.Fatalf("err=%v", err)
 		}
 	})
 	t.Run("affinity delete failure", func(t *testing.T) {
 		aff := &fakeAffinity{m: map[string]store.SessionAffinity{"s1": {SessionID: "s1", Alias: "cc-coding", CreatedAt: time.Now(), UpdatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}}, delErr: errors.New("boom")}
-		svc := NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, baseState(), aff, &fakeDecisions{})
+		svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, baseState(), aff, &fakeDecisions{})
 		if _, _, err := svc.Release(context.Background(), "s1"); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 	t.Run("decision persistence failure", func(t *testing.T) {
-		svc := NewRouteService(cfg, routing.Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}}, baseState(), &fakeAffinity{m: map[string]store.SessionAffinity{}}, &fakeDecisions{err: errors.New("boom")})
+		svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, baseState(), &fakeAffinity{m: map[string]store.SessionAffinity{}}, &fakeDecisions{err: errors.New("boom")})
 		if _, err := svc.Route(context.Background(), routeReq("s1")); err == nil || err.Error() != "routing decision audit persistence failed" {
 			t.Fatalf("err=%v", err)
 		}

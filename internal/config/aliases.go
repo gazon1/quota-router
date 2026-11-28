@@ -2,20 +2,15 @@ package config
 
 import "github.com/gazon1/quota-router/internal/settings"
 
-// Temporary compatibility aliases: canonical runtime types live in
-// internal/settings. Keep these aliases to avoid avoidable churn while callers
-// migrate; do not add new behavior here.
+// Tag-free runtime types are re-exported so config's own API keeps naming them
+// without a settings import at every call site. Types that carry the
+// configuration shape (Model, Capabilities, Routing, ProviderRouting, Provider,
+// Unavailable, UnavailableWindow) are declared here instead, in model.go and
+// routing.go.
 type (
-	Secret            = settings.Secret
-	Model             = settings.Model
-	Capability        = settings.Capability
-	Capabilities      = settings.Capabilities
-	Requirements      = settings.Requirements
-	Unavailable       = settings.Unavailable
-	UnavailableWindow = settings.UnavailableWindow
-	Routing           = settings.Routing
-	ProviderRouting   = settings.ProviderRouting
-	Provider          = settings.Provider
+	Secret       = settings.Secret
+	Capability   = settings.Capability
+	Requirements = settings.Requirements
 )
 
 const (

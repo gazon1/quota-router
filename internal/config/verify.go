@@ -1,14 +1,13 @@
 package config
 
 import (
-	"github.com/gazon1/quota-router/internal/settings"
-
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -113,5 +112,10 @@ func (c Config) liteLLMModels(ctx context.Context, client *http.Client) (map[str
 
 // sortedAliases returns catalogue aliases in a stable order.
 func sortedAliases(models map[string]Model) []string {
-	return settings.SortedAliases(models)
+	aliases := make([]string, 0, len(models))
+	for alias := range models {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	return aliases
 }

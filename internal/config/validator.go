@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/go-playground/validator/v10"
 )
 
@@ -44,9 +43,9 @@ func newValidator() *validator.Validate {
 	v.RegisterStructValidation(validateConfigStruct, Config{})
 	v.RegisterStructValidation(validateRoutingStruct, Routing{})
 	v.RegisterStructValidation(validateProviderRoutingStruct, ProviderRouting{})
-	v.RegisterStructValidation(validateModelStruct, settings.Model{})
-	v.RegisterStructValidation(validateUnavailableStruct, settings.Unavailable{})
-	v.RegisterStructValidation(validateUnavailableWindowStruct, settings.UnavailableWindow{})
+	v.RegisterStructValidation(validateModelStruct, Model{})
+	v.RegisterStructValidation(validateUnavailableStruct, Unavailable{})
+	v.RegisterStructValidation(validateUnavailableWindowStruct, UnavailableWindow{})
 	return v
 }
 
@@ -65,7 +64,11 @@ func validateHTTPURL(fl validator.FieldLevel) bool {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return false
 	}
-	return u.User == nil
+	// The endpoint is built by appending a path to this value, so a query or
+	// fragment would swallow it: https://proxy?x=1/v1/models is not the route.
+	// ForceQuery catches a bare trailing "?"; url.Parse drops a bare trailing
+	// "#", so the raw value is the only witness for that one.
+	return u.User == nil && u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && !strings.HasSuffix(raw, "#")
 }
 
 func validateSQLitePath(fl validator.FieldLevel) bool {

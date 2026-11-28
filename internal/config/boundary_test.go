@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,9 +23,8 @@ func TestCatalogueBoundary(t *testing.T) {
 	if len(cat.ModelAliases) != len(cfg.LiteLLM.ModelAliases) {
 		t.Fatalf("aliases len = %d, want %d", len(cat.ModelAliases), len(cfg.LiteLLM.ModelAliases))
 	}
-	// Canonical types: a settings.Model is assignable from config.Model (alias).
-	var _ settings.Model = cfg.LiteLLM.ModelAliases["x"]
-	var _ settings.Routing = cfg.Routing
+	// The runtime catalogue is the tag-free shape routing reads, so it is not
+	// assignable from the configuration DTOs.
 	var _ settings.Secret = cfg.Auth.Token
 }
 
@@ -50,8 +51,30 @@ func TestSettingsHasNoConfigLoaderDependency(t *testing.T) {
 			t.Fatalf("settings depends on %s:\n%s", bad, out)
 		}
 	}
-	// Architectural exception: runtime settings currently carry koanf/validate
-	// struct tags for config decoding/validation. Tags do not create runtime
-	// dependencies, but they are format metadata; moving them to config-owned
-	// DTO/schema types is a separate refactor.
+}
+
+// The runtime types carry no configuration-format metadata: koanf names and
+// validate rules live on the config DTOs, which Catalogue converts.
+func TestSettingsCarriesNoConfigFormatTags(t *testing.T) {
+	files, err := filepath.Glob(filepath.Join("..", "settings", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no settings sources found")
+	}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tag := range []string{`koanf:"`, `validate:"`} {
+			if strings.Contains(string(src), tag) {
+				t.Fatalf("%s carries %s; that is config-format metadata", path, tag)
+			}
+		}
+	}
 }

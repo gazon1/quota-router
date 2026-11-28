@@ -67,18 +67,17 @@ type LiteLLM struct {
 	ModelAliases map[string]Model `koanf:"model_aliases" validate:"dive,keys,alias_name,endkeys,required"`
 }
 
-// Model, Capabilities, Capability, Provider, Routing, ProviderRouting, and
-// Unavailable runtime types are defined in internal/settings and aliased from
-// config for compatibility.
+// Provider is one quota provider the controller polls directly.
+type Provider struct {
+	BaseURL string `koanf:"base_url" validate:"required,http_url"`
+	APIKey  Secret `koanf:"api_key"`
+}
 
 // Polling configures the quota polling loop.
 type Polling struct {
 	Interval       time.Duration `koanf:"interval" validate:"gt=0"`
 	RequestTimeout time.Duration `koanf:"request_timeout" validate:"gt=0"`
 }
-
-// Routing and ProviderRouting are defined in internal/settings; config keeps
-// koanf-loaded aliases for compatibility and loading.
 
 // SQLite configures quota snapshot persistence.
 type SQLite struct {

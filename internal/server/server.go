@@ -18,7 +18,6 @@ import (
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/quota"
 	"github.com/gazon1/quota-router/internal/routing"
-	"github.com/gazon1/quota-router/internal/settings"
 	"github.com/gazon1/quota-router/internal/store"
 )
 
@@ -67,10 +66,6 @@ type Options struct {
 	Decisions DecisionStore
 }
 
-func settingsCatalogue(cfg config.Config) settings.Catalogue {
-	return settings.Catalogue{ModelAliases: cfg.LiteLLM.ModelAliases, Routing: cfg.Routing}
-}
-
 // New creates a server with registered routes.
 func New(log *slog.Logger, opts Options) *Server {
 	if log == nil {
@@ -84,7 +79,7 @@ func New(log *slog.Logger, opts Options) *Server {
 		log:      log,
 		mux:      http.NewServeMux(),
 		cfg:      cfg,
-		selector: routing.Selector{Catalogue: settingsCatalogue(cfg)},
+		selector: routing.Selector{Catalogue: cfg.Catalogue()},
 		usage:    opts.Usage,
 		token:    opts.AuthToken,
 	}
@@ -414,7 +409,7 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 	for n := range byHealth {
 		add(n)
 	}
-	for _, m := range s.cfg.LiteLLM.ModelAliases {
+	for _, m := range s.selector.Catalogue.ModelAliases {
 		add(m.Provider())
 	}
 	sort.Strings(names)

@@ -15,4 +15,19 @@ func TestCatalogueCandidatesConservative(t *testing.T) {
 	}
 }
 
+func TestSatisfiedByIsConservative(t *testing.T) {
+	unknown := Model{Model: "p/m"}
+	for _, req := range []Requirements{
+		{Streaming: true}, {ToolCalling: true}, {StructuredOutput: true}, {Tasks: []string{"coding"}},
+	} {
+		if req.SatisfiedBy(unknown) {
+			t.Fatalf("%+v was satisfied by a model that never claimed it", req)
+		}
+	}
+	// Enabled is opt-out, so a model without the field is usable.
+	if !unknown.IsEnabled() {
+		t.Error("a model without the enabled field must be enabled")
+	}
+}
+
 func boolPtr(v bool) *bool { return &v }

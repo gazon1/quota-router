@@ -1,10 +1,12 @@
 // Package settings holds dependency-light runtime data types shared outside
-// configuration loading: model catalogue, routing policy, provider connection
-// settings, and the Secret wrapper.
+// configuration loading: model catalogue, routing policy, and the Secret
+// wrapper.
 //
-// It has no Koanf or environment-loading dependency. internal/config remains
+// It has no Koanf or environment-loading dependency, and no configuration
+// format metadata: no koanf or validate struct tags. internal/config remains
 // the single owner of loading, defaults, validation, normalization, and
-// secret-file resolution and produces these settings for the application.
+// secret-file resolution, and its Catalogue method converts its own
+// configuration types into these.
 package settings
 
 // Secret is a credential: an API key or token read from the config file,
@@ -27,7 +29,7 @@ func (Secret) LogValue() any { return redacted }
 // marshals a value that implements encoding.TextMarshaler as a JSON string.
 func (Secret) MarshalText() ([]byte, error) { return []byte(redacted), nil }
 
-// UnmarshalText lets koanf populate a Secret from a plain string value.
+// UnmarshalText lets the loader populate a Secret from a plain string value.
 func (s *Secret) UnmarshalText(b []byte) error {
 	*s = Secret(b)
 	return nil

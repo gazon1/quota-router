@@ -52,21 +52,6 @@ func TestCandidatesFiltersCapabilitiesAndDisabled(t *testing.T) {
 	}
 }
 
-func TestSatisfiedByIsConservative(t *testing.T) {
-	unknown := Model{Model: "p/m"}
-	for _, req := range []Requirements{
-		{Streaming: true}, {ToolCalling: true}, {StructuredOutput: true}, {Tasks: []string{"coding"}},
-	} {
-		if req.SatisfiedBy(unknown) {
-			t.Fatalf("%+v was satisfied by a model that never claimed it", req)
-		}
-	}
-	// Enabled is opt-out, so a model without the field is usable.
-	if !unknown.IsEnabled() {
-		t.Error("a model without the enabled field must be enabled")
-	}
-}
-
 func TestLoadRejectsInvalidCatalogue(t *testing.T) {
 	for _, tt := range []struct{ name, body, want string }{
 		{"alias with a slash", `
@@ -152,7 +137,7 @@ litellm:
 		t.Fatalf("Load() error = %v", err)
 	}
 	// The short form still loads, so an existing file did not break.
-	if got := cfg.LiteLLM.ModelAliases["fast"]; got.Model != "minimax/MiniMax-M2.7" || !got.IsEnabled() || got.ContextLimit != 0 {
+	if got := cfg.Catalogue().ModelAliases["fast"]; got.Model != "minimax/MiniMax-M2.7" || !got.IsEnabled() || got.ContextLimit != 0 {
 		t.Fatalf("fast = %+v, want the model and nothing claimed", got)
 	}
 	want := Model{
@@ -227,6 +212,28 @@ func TestVerifyCatalogue(t *testing.T) {
 				t.Fatalf("error = %v, but a mismatch must not read as unavailable", err)
 			}
 		})
+	}
+}
+
+// A proxy mounted under a path prefix is a base path, not a query: the check
+// must keep it and append the endpoint below it.
+func TestVerifyCatalogueKeepsBasePath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"data":[{"id":"minimax/MiniMax-M2.7"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := catalogue(map[string]Model{"fast": {Model: "minimax/MiniMax-M2.7"}})
+	cfg.LiteLLM.BaseURL = srv.URL + "/litellm"
+	cfg.LiteLLM.APIKey = Secret("master-key")
+
+	if err := cfg.VerifyCatalogue(context.Background(), srv.Client()); err != nil {
+		t.Fatalf("error = %v, want the check to pass", err)
+	}
+	if gotPath != "/litellm/v1/models" {
+		t.Fatalf("path = %q, want the base path kept with the endpoint appended", gotPath)
 	}
 }
 

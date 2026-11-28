@@ -19,9 +19,9 @@ func (c Capability) Supported() bool { return c == CapabilitySupported }
 // tri-state and defaults to CapabilityUnknown, so a model that never claimed a
 // capability is not treated as supporting it.
 type Capabilities struct {
-	Streaming        Capability `koanf:"streaming" validate:"omitempty,oneof=unknown supported unsupported"`
-	ToolCalling      Capability `koanf:"tool_calling" validate:"omitempty,oneof=unknown supported unsupported"`
-	StructuredOutput Capability `koanf:"structured_output" validate:"omitempty,oneof=unknown supported unsupported"`
+	Streaming        Capability
+	ToolCalling      Capability
+	StructuredOutput Capability
 }
 
 // Model is one catalogue entry: the model an alias resolves to and what was
@@ -32,21 +32,21 @@ type Capabilities struct {
 type Model struct {
 	// Model is LiteLLM's model_name, exactly "<provider>/<model>" as the proxy
 	// lists and resolves it.
-	Model string `koanf:"model" validate:"required,model_id"`
+	Model string
 	// Enabled reports whether routing may use this entry. Absent means enabled,
 	// so listing a model is enough to use it.
-	Enabled *bool `koanf:"enabled"`
+	Enabled *bool
 	// ContextLimit is the verified input context window in tokens. Zero means
 	// unverified; a request constraint never relies on it then.
-	ContextLimit int          `koanf:"context_limit" validate:"gte=0"`
-	Capabilities Capabilities `koanf:"capabilities"`
+	ContextLimit int
+	Capabilities Capabilities
 	// Tasks are the task classes this model is suitable for, for example
 	// "coding" or "reasoning".
-	Tasks []string `koanf:"tasks" validate:"dive,required"`
+	Tasks []string
 	// Unavailable is an optional recurring weekly schedule during which routing
 	// must not select this model, in the model's own local time. Absent or empty
 	// means no time-based restriction.
-	Unavailable *Unavailable `koanf:"unavailable" validate:"omitempty"`
+	Unavailable *Unavailable
 }
 
 // IsEnabled reports whether routing may use this entry. Listing a model is
@@ -58,14 +58,6 @@ func (m Model) IsEnabled() bool { return m.Enabled == nil || *m.Enabled }
 func (m Model) Provider() string {
 	p, _, _ := strings.Cut(m.Model, "/")
 	return p
-}
-
-// UnmarshalText accepts the short form the catalogue shipped with
-// (`fast: minimax/MiniMax-M2.7`) as a model id with everything else unknown, so
-// widening the entry did not break an existing configuration file.
-func (m *Model) UnmarshalText(b []byte) error {
-	m.Model = string(b)
-	return nil
 }
 
 // Requirements are the capabilities and task classes a request needs.
