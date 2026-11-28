@@ -99,7 +99,7 @@ func affinityEliminations(cs []candidate, selected string) []RejectedCandidate {
 		if c.Alias == selected {
 			continue
 		}
-		elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "session_affinity", Reason: "session affinity retained another viable route"})
+		elim = append(elim, RejectedCandidate{Alias: c.Alias, Provider: c.Provider, Stage: "session_affinity", Code: ReasonNotSelectedByAffinity, Reason: "session affinity retained another viable route"})
 	}
 	return elim
 }

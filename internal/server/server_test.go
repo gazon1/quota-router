@@ -309,7 +309,20 @@ func TestDecisionsEndpoint(t *testing.T) {
 		Decisions []map[string]any `json:"decisions"`
 	}
 	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &resp))
-	assert.Len(t, resp.Decisions, 1)
+	require.Len(t, resp.Decisions, 1)
+
+	// The candidate set travels with the decision payload: the evaluated
+	// candidates, their order and their stable reason codes.
+	decision, ok := resp.Decisions[0]["decision"].(map[string]any)
+	require.True(t, ok, "the decision payload must be present")
+	candidates, ok := decision["candidates"].([]any)
+	require.True(t, ok, "the decision payload must carry the candidate set")
+	require.Len(t, candidates, 2)
+	first, ok := candidates[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "cc-coding", first["alias"])
+	assert.Equal(t, "selected_by_preference", first["reason_code"])
+	assert.Equal(t, float64(1), first["ordinal"])
 }
 
 func TestSelectEndpointStateLoadError(t *testing.T) {

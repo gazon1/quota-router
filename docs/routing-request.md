@@ -74,8 +74,11 @@ coordinated agent/controller deployment and an explicit policy decision in #17.
 
 `POST /v1/route` (alias of `POST /v1/routing/select`) evaluates a
 `RouteRequest` and returns a routing decision. `GET /v1/routing/decisions` returns
-recent decision audit records. Both endpoints require the configured bearer
-token (`QUOTA_ROUTER_AUTH__TOKEN` / `auth.token`), same as `POST /v1/usage`; when
+recent decision audit records, including the evaluated candidate set and the
+stable reason codes behind it
+([docs/routing-decision-history.md](./routing-decision-history.md)). Both
+endpoints require the configured bearer token
+(`QUOTA_ROUTER_AUTH__TOKEN` / `auth.token`), same as `POST /v1/usage`; when
 no token is configured, requests are refused.
 
 `/v1/route` is the issue-named spelling of the decision boundary

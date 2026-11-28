@@ -37,6 +37,11 @@ type Decision struct {
 	Rejected []RejectedCandidate `json:"rejected,omitempty"`
 	// Stages records per-stage outcomes for explanation.
 	Stages []StageOutcome `json:"stages,omitempty"`
+	// Candidates is the evaluated candidate set in evaluation order: every
+	// candidate the selector looked at, with the stable reason code that
+	// decided its fate and the observations the hard checks read. It is empty
+	// when the request was rejected before any candidate was evaluated.
+	Candidates []CandidateEvaluation `json:"candidates,omitempty"`
 	// AffinityInfluenced reports whether session affinity kept the selected
 	// candidate.
 	AffinityInfluenced bool `json:"affinity_influenced"`
@@ -66,11 +71,24 @@ type Decision struct {
 // about the route — holding a session on it would send the conversation's
 // requests into the very rate limiting the cooldown exists to avoid.
 type RejectedCandidate struct {
-	Alias     string `json:"alias"`
-	Provider  string `json:"provider"`
-	Stage     string `json:"stage"`
-	Reason    string `json:"reason"`
-	Transient bool   `json:"transient,omitempty"`
+	Alias    string `json:"alias"`
+	Provider string `json:"provider"`
+	Stage    string `json:"stage"`
+	// Code is the stable reason code of the elimination. The prose below is
+	// for a human and may be reworded; the code is what a consumer branches on.
+	Code      ReasonCode `json:"code"`
+	Reason    string     `json:"reason"`
+	Transient bool       `json:"transient,omitempty"`
+}
+
+// PrimaryReason is the one-line explanation of a decision: the first reason
+// the selector recorded. The full list stays in the decision; this is the line
+// an operator or a stored row reads first.
+func (d Decision) PrimaryReason() string {
+	if len(d.Reasons) == 0 {
+		return ""
+	}
+	return d.Reasons[0]
 }
 
 // StageOutcome summarizes one decision stage.
@@ -144,15 +162,31 @@ func (s Selector) Select(req RouteRequest, state SelectState) Decision {
 	if state.HealthMaxAge <= 0 {
 		state.HealthMaxAge = state.QuotaMaxAge
 	}
+	if err := req.Validate(); err != nil {
+		// An invalid request is refused before any candidate is looked at, so
+		// the decision carries no candidate set: nothing was considered.
+		d := Decision{
+			Request:           req,
+			PolicyVersion:     PolicyVersion,
+			OverrideRequested: req.Override != nil,
+			Reasons:           []string{fmt.Sprintf("request invalid: %v", err)},
+		}
+		d.DecisionID = decisionID(req, state, d, s.Catalogue)
+		return d
+	}
+	d := s.selectRoute(req, state)
+	d.Candidates = s.evaluateCandidates(d, state)
+	return d
+}
+
+// selectRoute runs the decision stages. Select wraps it, because the evaluated
+// candidate set is assembled from what the stages decided and from the state
+// they read.
+func (s Selector) selectRoute(req RouteRequest, state SelectState) Decision {
 	d := Decision{
 		Request:           req,
 		PolicyVersion:     PolicyVersion,
 		OverrideRequested: req.Override != nil,
-	}
-	if err := req.Validate(); err != nil {
-		d.Reasons = []string{fmt.Sprintf("request invalid: %v", err)}
-		d.DecisionID = decisionID(req, state, d, s.Catalogue)
-		return d
 	}
 
 	candidates, configElim := s.initialCandidates()
@@ -322,7 +356,7 @@ func (s Selector) initialCandidates() ([]candidate, []RejectedCandidate) {
 	for _, alias := range aliases {
 		m := s.Catalogue.ModelAliases[alias]
 		if !m.IsEnabled() {
-			elim = append(elim, RejectedCandidate{Alias: alias, Provider: m.Provider(), Stage: "configuration", Reason: "model disabled"})
+			elim = append(elim, RejectedCandidate{Alias: alias, Provider: m.Provider(), Stage: "configuration", Code: ReasonModelDisabled, Reason: "model disabled"})
 			continue
 		}
 		out = append(out, candidate{Alias: alias, Provider: m.Provider(), Model: m})

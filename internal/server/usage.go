@@ -43,7 +43,13 @@ type usageReport struct {
 	Source       string `json:"source"`
 	Outcome      string `json:"outcome"`
 	DecisionID   string `json:"decision_id"`
-	ObservedAt   string `json:"observed_at"`
+	// LatencyMS is how long the attempt took. Absent stays absent: it is
+	// never stored as zero.
+	LatencyMS *int `json:"latency_ms"`
+	// ErrorClass is the normalized class of a failed attempt. A raw error
+	// message is refused here rather than stored.
+	ErrorClass string `json:"error_class"`
+	ObservedAt string `json:"observed_at"`
 }
 
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +134,8 @@ func (r usageReport) record(now time.Time) (store.UsageRecord, error) {
 		Source:             strings.TrimSpace(r.Source),
 		Outcome:            store.Outcome(r.Outcome),
 		DecisionID:         strings.TrimSpace(r.DecisionID),
+		LatencyMS:          r.LatencyMS,
+		ErrorClass:         store.ErrorClass(strings.TrimSpace(r.ErrorClass)),
 		ObservedAt:         observedAt,
 		ObservedAtReported: observedAtReported,
 	}

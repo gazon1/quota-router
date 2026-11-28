@@ -175,7 +175,7 @@ func TestUsageRejectsUnrepresentableValues(t *testing.T) {
 		rec  UsageRecord
 	}{
 		{"negative attempt", UsageRecord{Attempt: -1, Provider: "p", Source: "s", Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
-		{"unknown outcome", UsageRecord{Provider: "p", Source: "s", Provenance: Reported, Outcome: "TIMEOUT", ObservedAt: now}},
+		{"unknown outcome", UsageRecord{Provider: "p", Source: "s", Provenance: Reported, Outcome: "MAYBE", ObservedAt: now}},
 		{"missing source", UsageRecord{Provider: "p", Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
 		{"negative tokens", UsageRecord{Provider: "p", Source: "s", InputTokens: intPtr(-1), Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
 		{"oversized request id", UsageRecord{RequestID: string(make([]byte, maxKey+1)), Provider: "p", Source: "s", Provenance: Reported, Outcome: OutcomeSuccess, ObservedAt: now}},
@@ -256,6 +256,7 @@ func TestUsageMigrationDownKeepsFirstAttempts(t *testing.T) {
 		"0004_routing_decisions.sql",
 		"0005_provider_cooldown.sql",
 		"0006_session_affinity.sql",
+		"0007_routing_decision_candidates.sql",
 	} {
 		apply(t, dir, f, readMigration(t, f))
 	}

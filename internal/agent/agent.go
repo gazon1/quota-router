@@ -31,6 +31,19 @@ const (
 	OutcomeFailedBeforeFirstToken = "FAILED_BEFORE_FIRST_TOKEN"
 	OutcomePartialStream          = "PARTIAL_STREAM"
 	OutcomeCancelled              = "CANCELLED"
+	OutcomeTimeout                = "TIMEOUT"
+)
+
+// Error classes the usage endpoint accepts. Only the class is reported: a raw
+// provider message can carry a credential, so it stays in the caller's logs.
+const (
+	ErrorClassTimeout        = "TIMEOUT"
+	ErrorClassRateLimited    = "RATE_LIMITED"
+	ErrorClassAuthentication = "AUTHENTICATION_OR_PERMISSION_FAILURE"
+	ErrorClassProviderError  = "PROVIDER_ERROR"
+	ErrorClassUnreachable    = "UNREACHABLE"
+	ErrorClassClientError    = "CLIENT_ERROR"
+	ErrorClassUnknown        = "UNKNOWN"
 )
 
 // Provenance values the usage endpoint accepts. Nothing here estimates, so the
@@ -125,6 +138,12 @@ type Reply struct {
 	// Outcome is SUCCESS for a 2xx response and FAILED_BEFORE_FIRST_TOKEN
 	// otherwise: a complete response cannot end in a partial stream.
 	Outcome string
+	// LatencyMS is how long the call took, in milliseconds. It is measured,
+	// not estimated, and zero is a real measurement.
+	LatencyMS *int
+	// ErrorClass is the normalized class of a failed call, empty for a
+	// successful one.
+	ErrorClass string
 }
 
 // Attempt is one finished attempt as the usage endpoint records it.
@@ -140,11 +159,16 @@ type Attempt struct {
 	// for a count this installation derived, for example by counting tokens on a
 	// stream that returned no usage object.
 	Provenance string
+	// LatencyMS is how long the attempt took. Nil stays missing, never zero.
+	LatencyMS *int
+	// ErrorClass is the normalized class of a failed attempt. Empty means the
+	// attempt did not fail.
+	ErrorClass string
 }
 
 // Attempt turns a complete reply into the attempt a report carries.
 func (r Reply) Attempt(number int) Attempt {
-	a := Attempt{Number: number, Outcome: r.Outcome}
+	a := Attempt{Number: number, Outcome: r.Outcome, LatencyMS: r.LatencyMS, ErrorClass: r.ErrorClass}
 	if r.Usage != nil {
 		a.InputTokens = r.Usage.InputTokens
 		a.OutputTokens = r.Usage.OutputTokens
@@ -276,6 +300,7 @@ func (c *Client) Chat(ctx context.Context, routed Routed, body []byte) (Reply, e
 	if err != nil {
 		return Reply{}, err
 	}
+	start := time.Now()
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return Reply{}, fmt.Errorf("agent: call proxy: %w", err)
@@ -285,11 +310,43 @@ func (c *Client) Chat(ctx context.Context, routed Routed, body []byte) (Reply, e
 	if err != nil {
 		return Reply{}, fmt.Errorf("agent: read proxy response: %w", err)
 	}
+	latency := int(time.Since(start).Milliseconds())
 	outcome := OutcomeFailedBeforeFirstToken
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		outcome = OutcomeSuccess
+	case resp.StatusCode == http.StatusRequestTimeout, resp.StatusCode == http.StatusGatewayTimeout:
+		// A timeout is its own outcome: it says the deadline passed, which is
+		// not the same as a request that failed for another reason.
+		outcome = OutcomeTimeout
 	}
-	return Reply{Status: resp.StatusCode, Body: payload, Usage: parseUsage(payload), Outcome: outcome}, nil
+	return Reply{
+		Status:     resp.StatusCode,
+		Body:       payload,
+		Usage:      parseUsage(payload),
+		Outcome:    outcome,
+		LatencyMS:  &latency,
+		ErrorClass: errorClass(resp.StatusCode),
+	}, nil
+}
+
+// errorClass normalizes an HTTP status into the closed error-class vocabulary
+// the usage endpoint accepts. Only the class leaves this client: the response
+// body can carry a credential, and it never becomes part of a usage report.
+func errorClass(status int) string {
+	switch {
+	case status == http.StatusUnauthorized, status == http.StatusForbidden:
+		return ErrorClassAuthentication
+	case status == http.StatusRequestTimeout, status == http.StatusGatewayTimeout:
+		return ErrorClassTimeout
+	case status == http.StatusTooManyRequests:
+		return ErrorClassRateLimited
+	case status >= 500:
+		return ErrorClassProviderError
+	case status >= 400:
+		return ErrorClassClientError
+	}
+	return ""
 }
 
 // Report sends one finished attempt to the controller, correlated by the ids
@@ -319,6 +376,8 @@ func (c *Client) Report(ctx context.Context, routed Routed, attempt Attempt) err
 		Source:       Source,
 		Outcome:      attempt.Outcome,
 		DecisionID:   routed.DecisionID,
+		LatencyMS:    attempt.LatencyMS,
+		ErrorClass:   attempt.ErrorClass,
 	})
 	if err != nil {
 		return fmt.Errorf("agent: encode usage report: %w", err)
@@ -360,6 +419,8 @@ type usageBody struct {
 	Source       string `json:"source"`
 	Outcome      string `json:"outcome,omitempty"`
 	DecisionID   string `json:"decision_id,omitempty"`
+	LatencyMS    *int   `json:"latency_ms,omitempty"`
+	ErrorClass   string `json:"error_class,omitempty"`
 }
 
 func (c *Client) unavailable(id string, cause error) (Routed, error) {

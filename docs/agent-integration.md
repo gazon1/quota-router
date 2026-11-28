@@ -100,6 +100,13 @@ zero: leave `InputTokens`/`OutputTokens` nil. Only a count the response actually
 returned is `provenance: "reported"`; anything this installation counted itself
 is `provenance: "estimated"`, and the two are never promoted into each other.
 
+`Client.Chat` measures the call and reports the latency, and normalizes the HTTP
+status into the closed error-class vocabulary (`TIMEOUT`, `RATE_LIMITED`,
+`AUTHENTICATION_OR_PERMISSION_FAILURE`, `PROVIDER_ERROR`, `UNREACHABLE`,
+`CLIENT_ERROR`). Only the class leaves this client: the response body can carry
+a credential, so it never becomes part of a usage report. A streaming caller sets
+`LatencyMS` and `ErrorClass` on its own `Attempt` the same way.
+
 ## When the controller is unavailable
 
 The rule is **fail closed, with one explicit and auditable exception**:

@@ -110,7 +110,11 @@ mandatory.
 
 ### `GET /v1/routing/decisions`
 
-Auth required. Returns recent decisions, newest first.
+Auth required. Returns recent decisions, newest first. Each record carries the
+stored decision payload, which includes the evaluated candidate set: the order
+the candidates were considered in, which one was selected, which were rejected
+and why — with a stable reason code beside the prose. See
+[docs/routing-decision-history.md](./routing-decision-history.md).
 
 ### `POST /v1/usage`
 
