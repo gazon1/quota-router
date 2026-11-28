@@ -42,8 +42,8 @@ func TestMigrateCreatesSchemaAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 6 {
-		t.Fatalf("version = %d, want 6", v)
+	if v != 7 {
+		t.Fatalf("version = %d, want 7", v)
 	}
 
 	// A restart must not re-apply or fail: this is the existing-database path.
@@ -1236,8 +1236,8 @@ func TestMigrationLockIsExclusiveAcrossHandles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v != 6 {
-		t.Fatalf("version = %d, want 6", v)
+	if v != 7 {
+		t.Fatalf("version = %d, want 7", v)
 	}
 	var applied int
 	if err := first.db.QueryRow("SELECT COUNT(*) FROM goose_db_version WHERE version_id = 1 AND is_applied = 1").Scan(&applied); err != nil {
@@ -1635,6 +1635,93 @@ func TestPollCyclesReturnsSnapshotHealthAndAnchorTogether(t *testing.T) {
 	}
 	if got := cycle.Health.ObservedAt; !got.Equal(first) {
 		t.Fatalf("cycle health observed_at = %s, want %s", got, first)
+	}
+}
+
+// The latest cycle is one unit: a later cycle that committed a stale (cached)
+// observation must come back as that cycle's snapshot, health and anchor
+// together, so the freshness bound judges the stale observation and not the
+// older committed cycle's snapshot wearing the newer anchor.
+func TestPollCyclesKeepsSnapshotHealthAndAnchorInOneCycle(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "test", Confidence: Reported, ObservedAt: first,
+		Windows: []QuotaWindow{{Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}, first, first); err != nil {
+		t.Fatalf("SavePollResult cycle A: %v", err)
+	}
+	staleReason := ReasonStale
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaUnknown, UnknownReason: &staleReason, Source: "test", Confidence: Reported, ObservedAt: first.Add(-2 * time.Hour),
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: second}, second, time.Time{}); err != nil {
+		t.Fatalf("SavePollResult cycle B: %v", err)
+	}
+
+	cycles, err := s.PollCycles(ctx)
+	if err != nil {
+		t.Fatalf("PollCycles: %v", err)
+	}
+	cycle, ok := cycles["minimax"]
+	if !ok {
+		t.Fatalf("PollCycles = %v, want a cycle for minimax", cycles)
+	}
+	if cycle.Snapshot.State != QuotaUnknown {
+		t.Fatalf("cycle snapshot state = %s, want UNKNOWN for the stale cycle B", cycle.Snapshot.State)
+	}
+	if cycle.Snapshot.UnknownReason == nil || *cycle.Snapshot.UnknownReason != ReasonStale {
+		t.Fatalf("cycle snapshot unknown_reason = %v, want %s", cycle.Snapshot.UnknownReason, ReasonStale)
+	}
+	if !cycle.AttemptAt.Equal(second) {
+		t.Fatalf("cycle attempt_at = %s, want the anchor of cycle B at %s", cycle.AttemptAt, second)
+	}
+	if cycle.Health.State != Healthy {
+		t.Fatalf("cycle health state = %s, want HEALTHY of cycle B", cycle.Health.State)
+	}
+	if got := cycle.Health.ObservedAt; !got.Equal(second) {
+		t.Fatalf("cycle health observed_at = %s, want %s", got, second)
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(second) || !success.Equal(first) {
+		t.Fatalf("PollState = %s/%s (err %v), want the attempt of cycle B and the success of cycle A", attempt, success, err)
+	}
+}
+
+// A cycle that reports an older observation must not move the durable last
+// success backwards: the last success only ever moves forward.
+func TestSavePollResultKeepsLastSuccessFromMovingBackwards(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "test", Confidence: Reported, ObservedAt: first,
+		Windows: []QuotaWindow{{Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}, first, first); err != nil {
+		t.Fatalf("SavePollResult cycle A: %v", err)
+	}
+	// Cycle B attempts later but observes an older timestamp (a cached copy) and
+	// reports that older success: the stored last success must not regress.
+	if err := s.SavePollResult(ctx, "minimax", QuotaSnapshot{
+		Provider: "minimax", State: QuotaAvailable, Source: "test", Confidence: Reported, ObservedAt: first.Add(-time.Hour),
+		Windows: []QuotaWindow{{Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: second}, second, first.Add(-time.Hour)); err != nil {
+		t.Fatalf("SavePollResult cycle B: %v", err)
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(second) || !success.Equal(first) {
+		t.Fatalf("PollState = %s/%s (err %v), want the attempt of cycle B and the success of cycle A, not an older one", attempt, success, err)
 	}
 }
 

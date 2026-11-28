@@ -411,6 +411,25 @@ func TestRouteRenewsAffinityTTL(t *testing.T) {
 		t.Fatalf("created_at changed: %v != %v", pin2.CreatedAt, pin1.CreatedAt)
 	}
 }
+
+// A future freshness anchor cannot prove freshness: clock skew or a bad write
+// must not turn into actionable quota.
+func TestRouteServiceQuotaAtFutureAnchorIsStale(t *testing.T) {
+	svc, _, _, _ := newTestService()
+	now := time.Now().UTC()
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := now.Add(time.Hour)
+	q := svc.quotaAt(store.QuotaSnapshot{
+		Provider: "minimax", State: store.QuotaAvailable, Source: "test", Confidence: store.Reported, ObservedAt: now,
+		Windows: []store.QuotaWindow{{Window: "5h", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset}},
+	}, now.Add(time.Minute), now, time.Hour)
+	if !q.Stale {
+		t.Fatalf("quotaAt stale = %t, want true for a future anchor", q.Stale)
+	}
+}
+
 func TestSessionLockIsPerSession(t *testing.T) {
 	var l sessionLocks
 	unlockA := l.lock("a")

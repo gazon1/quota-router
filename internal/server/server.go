@@ -483,10 +483,16 @@ func staleAfter(interval time.Duration) time.Duration {
 // was fresh reads as stale once that attempt is past the bound, which is what a
 // process crash or a polling stop leaves behind. A row whose poll state is
 // missing is treated exactly like an expired one: no durably anchored attempt
-// backs it, so it stays stale instead of becoming current.
+// backs it, so it stays stale instead of becoming current. A future anchor is not
+// fresh either: it cannot prove an observation happened, so clock skew or a bad
+// write must not turn into actionable quota.
 func (s *Server) quotaAt(snap store.QuotaSnapshot, anchor time.Time, now time.Time, maxAge time.Duration) quota.Snapshot {
 	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-	if anchor.IsZero() || now.Sub(anchor) > maxAge {
+	if anchor.IsZero() {
+		q.Stale = true
+		return q
+	}
+	if age := now.Sub(anchor); age < 0 || age > maxAge {
 		q.Stale = true
 	}
 	return q

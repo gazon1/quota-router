@@ -208,7 +208,9 @@ func (s *Store) PollStates(ctx context.Context) (map[string]time.Time, error) {
 // committed, the health observation that came with it and the attempt anchor
 // that backs the snapshot's freshness. A cycle is persisted in one transaction
 // and read back in one, so a snapshot can never be paired with an anchor or a
-// health observation from a different cycle.
+// health observation from a different cycle. The three rows of a cycle share
+// one poll_cycle_id, which is how the read picks them: the latest committed
+// cycle of a provider, not three independently "newest" rows.
 type PollCycle struct {
 	Snapshot  QuotaSnapshot
 	Health    HealthRecord
@@ -220,8 +222,10 @@ type PollCycle struct {
 // inside a single read transaction, so a cycle that SavePollResult committed
 // atomically is observed atomically here too: a reader cannot pair a snapshot
 // with an anchor from a later cycle, which is what would let an older snapshot
-// look fresh again. A provider without a committed cycle is absent from the map,
-// and readers treat absence as stale.
+// look fresh again. The snapshot and the health observation are the rows of the
+// cycle with the highest poll_cycle_id for the provider, and the anchor is that
+// cycle's poll_state row, so all three belong to one cycle. A provider without a
+// committed cycle is absent from the map, and readers treat absence as stale.
 func (s *Store) PollCycles(ctx context.Context) (map[string]PollCycle, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -233,7 +237,8 @@ func (s *Store) PollCycles(ctx context.Context) (map[string]PollCycle, error) {
 
 	rows, err := tx.QueryContext(ctx,
 		`SELECT id, provider, state, unknown_reason, source, confidence, observed_at, error
-		 FROM quota_snapshots WHERE `+newestPerProvider("quota_snapshots", true))
+		 FROM quota_snapshots s
+		 WHERE s.poll_cycle_id = (SELECT MAX(c.poll_cycle_id) FROM quota_snapshots c WHERE c.provider = s.provider)`)
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -344,7 +349,10 @@ func (s *Store) PollCycles(ctx context.Context) (map[string]PollCycle, error) {
 	}
 	pollRows.Close()
 
-	healthRows, err := tx.QueryContext(ctx, `SELECT provider, state, observed_at, error, cooldown_until FROM provider_health WHERE `+newestPerProvider("provider_health", true))
+	healthRows, err := tx.QueryContext(ctx,
+		`SELECT h.provider, h.state, h.observed_at, h.error, h.cooldown_until
+		 FROM provider_health h
+		 WHERE h.poll_cycle_id = (SELECT MAX(c.poll_cycle_id) FROM provider_health c WHERE c.provider = h.provider)`)
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -390,6 +398,11 @@ func (s *Store) PollCycles(ctx context.Context) (map[string]PollCycle, error) {
 // and the poll-state anchor — inside a single transaction, so a cycle is never
 // observable half-written: either all three land, or none do and the cycle fails
 // without advancing the freshness anchor behind a snapshot that was not stored.
+// The snapshot, its health observation and the poll-state anchor of the cycle
+// share one poll_cycle_id, so a reader can always tell which cycle a row of each
+// kind belongs to instead of re-deriving recency per table. last_success_at never
+// moves backwards: a cycle that does not establish quota keeps the success time of
+// the cycle before it.
 func (s *Store) SavePollResult(ctx context.Context, provider string, snap QuotaSnapshot, health HealthRecord, attemptAt, successAt time.Time) error {
 	if provider == "" {
 		return errors.New("poll result: provider must not be empty")
@@ -425,10 +438,16 @@ func (s *Store) SavePollResult(ctx context.Context, provider string, snap QuotaS
 		cooldownUntil = &v
 	}
 	return s.tx(ctx, func(tx *sql.Tx) error {
+		var cycleID int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(poll_cycle_id), 0) + 1 FROM quota_snapshots WHERE provider = ?`, provider,
+		).Scan(&cycleID); err != nil {
+			return classify(err)
+		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO quota_snapshots (provider, state, unknown_reason, source, confidence, observed_at, error)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			snap.Provider, snap.State, reason, snap.Source, snap.Confidence, ts(snap.ObservedAt), nullString(snap.Error))
+			`INSERT INTO quota_snapshots (provider, poll_cycle_id, state, unknown_reason, source, confidence, observed_at, error)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			snap.Provider, cycleID, snap.State, reason, snap.Source, snap.Confidence, ts(snap.ObservedAt), nullString(snap.Error))
 		if err != nil {
 			return classify(err)
 		}
@@ -453,16 +472,22 @@ func (s *Store) SavePollResult(ctx context.Context, provider string, snap QuotaS
 			return fmt.Errorf("provider health: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO provider_health (provider, state, observed_at, error, cooldown_until) VALUES (?, ?, ?, ?, ?)`,
-			health.Provider, health.State, ts(health.ObservedAt), nullString(health.Error), cooldownUntil); err != nil {
+			`INSERT INTO provider_health (provider, poll_cycle_id, state, observed_at, error, cooldown_until) VALUES (?, ?, ?, ?, ?, ?)`,
+			health.Provider, cycleID, health.State, ts(health.ObservedAt), nullString(health.Error), cooldownUntil); err != nil {
 			return classify(err)
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO poll_state (provider, last_attempt_at, last_success_at) VALUES (?, ?, ?)
+			`INSERT INTO poll_state (provider, poll_cycle_id, last_attempt_at, last_success_at) VALUES (?, ?, ?, ?)
 			 ON CONFLICT (provider) DO UPDATE SET
+			   poll_cycle_id = excluded.poll_cycle_id,
 			   last_attempt_at = excluded.last_attempt_at,
-			   last_success_at = COALESCE(excluded.last_success_at, poll_state.last_success_at)`,
-			provider, ts(attemptAt), success)
+			   last_success_at = CASE
+				   WHEN excluded.last_success_at IS NULL THEN poll_state.last_success_at
+				   WHEN poll_state.last_success_at IS NULL OR excluded.last_success_at > poll_state.last_success_at
+					   THEN excluded.last_success_at
+				   ELSE poll_state.last_success_at
+			   END`,
+			provider, cycleID, ts(attemptAt), success)
 		return classify(err)
 	})
 }

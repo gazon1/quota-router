@@ -420,6 +420,33 @@ func TestStaleTransitionIsPersistedAsUnknown(t *testing.T) {
 	}
 }
 
+// A stale observation — past the freshness bound or retained after a failed
+// refresh — is persisted as UNKNOWN and is not a success: it cannot become the
+// provider's last success or reset the failure history, because it proves nothing
+// about current quota.
+func TestStaleObservationIsNotASuccess(t *testing.T) {
+	rec := newRecorder()
+	src := &scripted{}
+	src.answers = []answer{{
+		snap:  quota.Observed("minimax", "test", time.Now().Add(-2*time.Hour).UTC(), windows(80), 0.1),
+		state: healthy(),
+	}}
+	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
+	p.StaleAfter = time.Hour
+	p.poll(context.Background(), p.Targets[0], &loopState{})
+
+	snaps := rec.snapshots()
+	if len(snaps) != 1 {
+		t.Fatalf("persisted %d snapshots, want 1", len(snaps))
+	}
+	if snaps[0].State != store.QuotaUnknown {
+		t.Fatalf("state = %s, want UNKNOWN for a stale observation", snaps[0].State)
+	}
+	if got := rec.successAt("minimax"); !got.IsZero() {
+		t.Fatalf("last success = %s, want none: a stale observation must not establish quota", got)
+	}
+}
+
 // A poll slower than the interval must not overlap the next one: one poll at a
 // time per provider, with the next one starting only after the previous returns.
 func TestNoOverlappingPolls(t *testing.T) {

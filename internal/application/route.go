@@ -163,7 +163,16 @@ func (s *RouteService) loadSelectState(ctx context.Context, sessionID string) (r
 // backs it, so it stays stale instead of becoming current.
 func (s *RouteService) quotaAt(snap store.QuotaSnapshot, anchor time.Time, now time.Time, maxAge time.Duration) quota.Snapshot {
 	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-	if anchor.IsZero() || now.Sub(anchor) > maxAge {
+	if anchor.IsZero() {
+		// No durably anchored attempt backs the row, so no cycle ever committed
+		// for it: it must not be actionable.
+		q.Stale = true
+		return q
+	}
+	// A future anchor cannot prove freshness either — clock skew or a bad write
+	// may push an attempt into tomorrow — so only a past observation inside the
+	// bound is fresh quota.
+	if age := now.Sub(anchor); age < 0 || age > maxAge {
 		q.Stale = true
 	}
 	return q

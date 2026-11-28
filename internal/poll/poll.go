@@ -171,16 +171,20 @@ func (p *Poller) record(ctx context.Context, provider string, st *loopState, sna
 		return
 	}
 	at := time.Now().UTC()
-	// Success means the attempt produced an observation the provider stands
-	// behind, not that quota is AVAILABLE: an unusable or retained copy is not a
-	// success, and its state is still derived from the windows below.
-	success := snap.Confidence != quota.ConfidenceNone && !snap.Stale
+	// The observation the poller hands to the sink is mapped through StateAt
+	// here, so staleness relative to the freshness bound is part of the
+	// classification a success is measured against. Success means the attempt
+	// produced an observation the provider stands behind and that is still inside
+	// the bound — not that quota is AVAILABLE: an unusable or retained copy is
+	// not a success, and its state is the one derived from the windows.
+	persisted := observation(provider, snap, p.StaleAfter, at)
+	success := persisted.State != store.QuotaUnknown
 	var successAt time.Time
 	if success {
-		successAt = snap.ObservedAt
+		successAt = persisted.ObservedAt
 	}
 	var cycleErr error
-	if err := p.Sink.SavePollResult(ctx, provider, observation(provider, snap, p.StaleAfter, at), health(provider, state), at, successAt); err != nil {
+	if err := p.Sink.SavePollResult(ctx, provider, persisted, health(provider, state), at, successAt); err != nil {
 		cycleErr = err
 		p.Log.Error("persist poll result", "provider", provider, "error", cycleErr)
 	}

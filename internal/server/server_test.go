@@ -800,6 +800,7 @@ func TestFreshnessBoundCombinesAnchorAndObservation(t *testing.T) {
 		{"stale anchor marks the row stale", now.Add(-2 * time.Hour), now.Add(-2 * time.Hour), true, store.QuotaUnknown, "STALE_OBSERVATION"},
 		{"missing anchor marks the row stale", time.Time{}, now, true, store.QuotaUnknown, "STALE_OBSERVATION"},
 		{"stale observation is stale even with a fresh anchor", now, now.Add(-2 * time.Hour), false, store.QuotaUnknown, "STALE_OBSERVATION"},
+		{"future anchor and future observation are not fresh", now.Add(2 * time.Minute), now.Add(3 * time.Minute), true, store.QuotaUnknown, "STALE_OBSERVATION"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
