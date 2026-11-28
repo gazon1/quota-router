@@ -210,8 +210,8 @@ the request path is **Python regardless of `LITELLM_RUST`**, because the route i
 Setting `LITELLM_RUST=true` adds Rust to Anthropic `messages`; that is untested
 here and should be measured before adoption.
 
-`Dockerfile.controller` builds against the `go 1.23.0` / `toolchain go1.24.0`
-directive in `go.mod` (koanf v2 requires 1.23) and pins `golang:1.24-alpine`.
+`Dockerfile.controller` builds against the `go 1.23.0` / `toolchain go1.27.4`
+directive in `go.mod` (koanf v2 requires 1.23) and pins `golang:1.27.4-alpine`.
 
 ## Backup and recovery
 
