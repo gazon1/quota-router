@@ -76,6 +76,13 @@ type Poller struct {
 	// scheduling is deterministic instead of sleep-driven.
 	wait   func(ctx context.Context, d time.Duration) bool
 	jitter func(time.Duration) time.Duration
+
+	// consecutiveFailures counts attempts that did not establish quota; the
+	// per-attempt debug log reports it, the retry count and the duration, so a
+	// provider outage is diagnosable from logs alone. lastSuccessAt is the newest
+	// attempt that did.
+	consecutiveFailures int
+	lastSuccessAt       time.Time
 }
 
 // New builds a poller with the production defaults for retry.
@@ -134,8 +141,9 @@ func (p *Poller) loop(ctx context.Context, t Target) {
 // even when the poll never succeeds, while last-success keeps its own value.
 func (p *Poller) poll(ctx context.Context, t Target) {
 	for attempt := 1; ; attempt++ {
+		started := time.Now().UTC()
 		snap, state := t.Source.Fetch(ctx)
-		p.record(ctx, t.Name, snap, state)
+		p.record(ctx, t.Name, snap, state, attempt, started)
 
 		if attempt >= p.attempts() || !retryable(snap, state) {
 			return
@@ -148,7 +156,7 @@ func (p *Poller) poll(ctx context.Context, t Target) {
 
 // record persists one attempt. A cancelled context is not an observation: the
 // attempt was cut short by shutdown, so it must not be stored as a failure.
-func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapshot, state quota.ProviderState) {
+func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapshot, state quota.ProviderState, attempt int, started time.Time) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -161,19 +169,39 @@ func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapsho
 	if success {
 		successAt = snap.ObservedAt
 	}
+	if success {
+		p.consecutiveFailures = 0
+		p.lastSuccessAt = successAt
+	} else {
+		p.consecutiveFailures++
+	}
 
-	if err := p.Sink.SaveQuotaSnapshot(ctx, observation(provider, snap, p.StaleAfter, at)); err != nil {
-		p.Log.Error("persist quota snapshot", "provider", provider, "error", err)
+	var snapshotErr error
+	if snapshotErr = p.Sink.SaveQuotaSnapshot(ctx, observation(provider, snap, p.StaleAfter, at)); snapshotErr != nil {
+		p.Log.Error("persist quota snapshot", "provider", provider, "error", snapshotErr)
 	}
-	if err := p.Sink.SaveProviderHealth(ctx, health(provider, state)); err != nil {
-		p.Log.Error("persist provider health", "provider", provider, "error", err)
+	var healthErr error
+	if healthErr = p.Sink.SaveProviderHealth(ctx, health(provider, state)); healthErr != nil {
+		p.Log.Error("persist provider health", "provider", provider, "error", healthErr)
 	}
-	if err := p.Sink.SavePollState(ctx, provider, at, successAt); err != nil {
-		p.Log.Error("persist poll state", "provider", provider, "error", err)
+	var cycleErr error = snapshotErr
+	if healthErr != nil {
+		cycleErr = healthErr
+	}
+	var pollErr error
+	if cycleErr == nil {
+		pollErr = p.Sink.SavePollState(ctx, provider, at, successAt)
+	}
+	if pollErr != nil {
+		cycleErr = pollErr
+		p.Log.Error("persist poll state", "provider", provider, "error", pollErr)
 	}
 
 	p.Log.Debug("polled provider", "provider", provider,
-		"health", state.Health, "reason", state.Reason(), "fresh", success)
+		"health", state.Health, "reason", state.Reason(), "fresh", success,
+		"attempt", attempt, "retries", attempt-1, "duration_ms", time.Since(started).Milliseconds(),
+		"consecutive_failures", p.consecutiveFailures, "last_success_at", p.lastSuccessAt.UTC().Format(time.RFC3339Nano),
+		"last_attempt_at", at.UTC().Format(time.RFC3339Nano), "persist_ok", cycleErr == nil)
 }
 
 // attempts is the retry bound in the form the loop needs: at least one attempt.

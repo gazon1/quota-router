@@ -95,6 +95,9 @@ type fakeStore struct {
 	saveErr     error
 	affinity    map[string]store.SessionAffinity
 	affinityErr error
+	// lastAttempt is the per-provider freshness anchor the status and selection
+	// reads compare the persisted observation against.
+	lastAttempt map[string]time.Time
 }
 
 func (f *fakeStore) SessionAffinity(_ context.Context, sessionID string) (store.SessionAffinity, bool, error) {
@@ -135,6 +138,16 @@ func (f *fakeStore) LatestProviderHealth(context.Context) ([]store.HealthRecord,
 		return nil, f.healthErr
 	}
 	return f.health, nil
+}
+
+// PollState reports the last attempt the fake store recorded per provider; an
+// absent provider means no attempt was ever made, so nothing may be fresh.
+func (f *fakeStore) PollState(_ context.Context, provider string) (time.Time, time.Time, error) {
+	at, ok := f.lastAttempt[provider]
+	if !ok {
+		return time.Time{}, time.Time{}, nil
+	}
+	return at, time.Time{}, nil
 }
 func (f *fakeStore) SaveRoutingDecision(_ context.Context, r store.RoutingDecisionRecord) error {
 	if f.saveErr != nil {
@@ -278,6 +291,40 @@ func TestSelectEndpointNoEligible(t *testing.T) {
 	}
 	if len(resp.Decision.Rejected) == 0 {
 		t.Fatal("expected rejections")
+	}
+}
+
+// A quota row persisted before polling stopped or the process crashed must not
+// be routed on: the freshness bound is anchored to the last poll attempt, and a
+// stale row is rejected before a candidate can be selected.
+func TestSelectEndpointDoesNotRouteOnStalePollStateQuota(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:       []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+		health:      []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+		lastAttempt: map[string]time.Time{"commandcode": time.Now().UTC().Add(-2 * time.Hour)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+	srv.decisions = st
+	srv.selector = routing.Selector{Config: cfg}
+
+	body := `{"version":1,"session_id":"s1","capabilities":{"tool_calling":true},"task_class":"coding"}`
+	w := postSelect(t, srv, testRoutingToken, body)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409 when a persisted poll is stale", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Decision routing.Decision `json:"decision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Decision.SelectedAlias != "" {
+		t.Fatalf("selected=%q, want none for a stale quota row", resp.Decision.SelectedAlias)
+	}
+	if len(resp.Decision.Rejected) == 0 {
+		t.Fatal("expected the stale quota row to be rejected")
 	}
 }
 
@@ -553,6 +600,50 @@ func TestStatusEndpoint(t *testing.T) {
 	}
 	if found.Health.State != "HEALTHY" {
 		t.Fatalf("health state = %q, want HEALTHY", found.Health.State)
+	}
+}
+
+// A persisted quota row from before a process crash or a polling stop reads as
+// stale at the status boundary: the freshness bound is anchored to the last poll
+// attempt, not only to the observation it left behind.
+func TestStatusEndpointStaleQuotaAfterPollingStopped(t *testing.T) {
+	cfg := testRoutingConfig()
+	st := &fakeStore{
+		snaps:       []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
+		health:      []store.HealthRecord{healthRec("minimax", store.Healthy)},
+		lastAttempt: map[string]time.Time{"minimax": time.Now().UTC().Add(-2 * time.Hour)},
+	}
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
+	srv.store = st
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp statusResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found *statusProvider
+	for i := range resp.Providers {
+		if resp.Providers[i].Provider == "minimax" {
+			found = &resp.Providers[i]
+		}
+	}
+	if found == nil || found.Quota == nil {
+		t.Fatalf("providers=%+v quota=%+v", resp.Providers, found)
+	}
+	if found.Quota.State != "UNKNOWN" {
+		t.Fatalf("quota state = %q, want UNKNOWN for a stale post-stop row", found.Quota.State)
+	}
+	if found.Quota.UnknownReason != "STALE_OBSERVATION" {
+		t.Fatalf("unknown reason = %q, want STALE_OBSERVATION", found.Quota.UnknownReason)
+	}
+	if got := len(found.Quota.Windows); got != 1 {
+		t.Fatalf("windows = %d, want the stale last-known window retained for diagnostics", got)
 	}
 }
 

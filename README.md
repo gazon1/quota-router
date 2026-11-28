@@ -171,10 +171,24 @@ adapter.
   rejected credential or an unusable body — are persisted and not retried.
 - Each attempt persists the observation, its health and `poll_state`: last
   attempt always moves, last success only on an attempt that established quota.
+- A cycle commits its last-attempt anchor only when the snapshot, health and
+  poll-state writes all succeed; a failed write marks the cycle unsuccessful and
+  leaves the prior anchor in place, so partial writes are not read as a
+  successful poll.
 - The persisted state comes from `Snapshot.StateAt`, so a success is not
   `AVAILABLE` by default: an exhausted provider stays `EXHAUSTED`, and an
   observation older than three intervals becomes `UNKNOWN` / `stale` with its
   windows kept for diagnostics.
+
+The freshness policy is explicit rather than configurable yet. The actionable
+bound is three polling intervals (90s at the default 30s interval), and it is a
+local conservative policy rather than a statement about the provider's own
+freshness guarantee. A retry delay, a request timeout and a polling interval are
+operational scheduling values, not proof of how current a reported figure is;
+the provider may refresh, reset or lag independently of them. Until that trade-off
+is measured, the bound stays fixed at three intervals and a row left in place by
+a process crash or polling stop is judged stale through the persisted
+`poll_state.last_attempt_at` at read time.
 
 A configured provider this build has no adapter for, or one with no `api_key`,
 is a startup error rather than a silently unmonitored provider. Polling is

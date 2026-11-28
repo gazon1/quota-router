@@ -35,6 +35,10 @@ type StateStore interface {
 	SessionAffinity(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error)
 	SaveSessionAffinity(ctx context.Context, a store.SessionAffinity) error
 	DeleteSessionAffinity(ctx context.Context, sessionID string) error
+	// PollState reports when a provider was last polled and last succeeded; the
+	// last attempt is the freshness anchor runtime consumers compare the
+	// observation against.
+	PollState(ctx context.Context, provider string) (attemptAt, successAt time.Time, err error)
 }
 
 // Server wires HTTP routes and handlers.
@@ -333,7 +337,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, statusResponse{Providers: s.statusProviders(snaps, healths)})
+	providers, err := s.statusProviders(r.Context(), snaps, healths)
+	if err != nil {
+		s.log.ErrorContext(r.Context(), "read status providers", "error", err)
+		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, statusResponse{Providers: providers})
 }
 
 // statusResponse is the GET /v1/status payload: one entry per provider the
@@ -383,8 +393,10 @@ type statusHealth struct {
 // statusProviders builds the status rows. Observed providers come first in the
 // map iteration order of the reads; the union with configured catalogue providers
 // keeps a freshly started controller from reporting an empty status before its
-// first poll.
-func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.HealthRecord) []statusProvider {
+// first poll. The per-provider quota is judged at now against the freshness bound
+// anchored to the last poll attempt, so a row that was fresh when written reads
+// as stale once polling has not run within the bound.
+func (s *Server) statusProviders(ctx context.Context, snaps []store.QuotaSnapshot, healths []store.HealthRecord) ([]statusProvider, error) {
 	byQuota := make(map[string]store.QuotaSnapshot, len(snaps))
 	for _, sn := range snaps {
 		byQuota[sn.Provider] = sn
@@ -415,11 +427,15 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 
 	out := make([]statusProvider, 0, len(names))
 	now := time.Now().UTC()
+	bound := staleAfter(s.cfg.Polling.Interval)
 	for _, n := range names {
 		p := statusProvider{Provider: n}
 		if snap, ok := byQuota[n]; ok {
-			q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-			state, reason := q.StateAt(now, staleAfter(s.cfg.Polling.Interval))
+			q, err := s.quotaAt(ctx, snap, now, bound)
+			if err != nil {
+				return nil, err
+			}
+			state, reason := q.StateAt(now, bound)
 			p.Quota = &statusQuota{
 				State:         string(state),
 				UnknownReason: string(reason),
@@ -435,7 +451,7 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 			// Status reads apply the same freshness bound as the selector: an
 			// observation that is absent or older than the bound is not
 			// actionable, so the provider must not be reported healthy.
-			if ps.ObservedAt.IsZero() || now.Sub(ps.ObservedAt) > staleAfter(s.cfg.Polling.Interval) {
+			if ps.ObservedAt.IsZero() || now.Sub(ps.ObservedAt) > bound {
 				health = quota.HealthUnknown
 			}
 			cooldown := ""
@@ -451,7 +467,7 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 		}
 		out = append(out, p)
 	}
-	return out
+	return out, nil
 }
 
 func statusWindows(ws []quota.Window) []statusWindow {
@@ -600,6 +616,23 @@ func (s *Server) routeSession(ctx context.Context, req routing.RouteRequest) (ro
 // and the stored state agree on what the session is pinned to. Performance
 // tie-breaks are implemented in the selector but no observation store feeds them
 // yet; they stay unused rather than being loaded from nothing.
+// quotaAt maps one persisted quota row onto the actionable domain snapshot at
+// now, applying the freshness bound. The bound is anchored to the last poll
+// attempt behind the row, not only to the observation: a row written while quota
+// was fresh reads as stale once that attempt is past the bound, which is what a
+// process crash or a polling stop leaves behind.
+func (s *Server) quotaAt(ctx context.Context, snap store.QuotaSnapshot, now time.Time, maxAge time.Duration) (quota.Snapshot, error) {
+	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
+	attemptAt, _, err := s.store.PollState(ctx, snap.Provider)
+	if err != nil {
+		return quota.Snapshot{}, err
+	}
+	if !attemptAt.IsZero() && now.Sub(attemptAt) > maxAge {
+		q.Stale = true
+	}
+	return q, nil
+}
+
 func (s *Server) loadSelectState(ctx context.Context, sessionID string) (routing.SelectState, error) {
 	now := time.Now().UTC()
 	freshness := staleAfter(s.cfg.Polling.Interval)
@@ -618,7 +651,11 @@ func (s *Server) loadSelectState(ctx context.Context, sessionID string) (routing
 		return routing.SelectState{}, err
 	}
 	for _, snap := range snaps {
-		state.Quota[snap.Provider] = quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
+		q, err := s.quotaAt(ctx, snap, now, freshness)
+		if err != nil {
+			return routing.SelectState{}, err
+		}
+		state.Quota[snap.Provider] = q
 	}
 	health, err := s.store.LatestProviderHealth(ctx)
 	if err != nil {
@@ -676,9 +713,10 @@ func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Sn
 	if s.State == store.QuotaUnknown {
 		reason := quotaUnknownReasonFromStore(s.UnknownReason)
 		snap := quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
-		// Keep windows for diagnostics? Failed() carries no windows by design;
-		// StateAt will return unknown with the same reason, which is correct.
-		_ = windows
+		if reason == quota.StaleObservation && len(windows) > 0 {
+			snap = quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
+			snap.Stale = true
+		}
 		return snap
 	}
 	snap := quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
