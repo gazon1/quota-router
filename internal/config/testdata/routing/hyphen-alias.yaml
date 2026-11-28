@@ -1,0 +1,10 @@
+litellm:
+  model_aliases:
+    free-coding:
+      model: commandcode/stealth/glyph-cluster:free
+routing:
+  providers:
+    commandcode:
+      priority: 1
+      models:
+        free-coding: 1

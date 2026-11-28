@@ -236,7 +236,21 @@ environment, which is how [deploy/compose.yaml](./deploy/compose.yaml) runs it.
 ### Environment variables
 
 Prefix `QUOTA_ROUTER_`; `__` separates YAML nesting levels, so a single
-underscore stays available inside a field name.
+underscore stays available inside a field name. A hyphen inside one level is
+written as `_H_`, so `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FREE_H_CODING__MODEL`
+declares the alias `free-coding`. Names are lowercased, and `_H_` is the one
+reserved sequence, so an alias that itself contains `_H_` can only be set from
+a file.
+
+The environment is decoded and normalized before it is merged with the file, so
+a variable reaches the same configuration key a file key does and wins over it.
+File keys are literal: a file names an alias exactly as the catalogue does.
+
+A routing alias in the environment may also be written with underscores
+(`FREE_CODING`); it then addresses the catalogue alias `free-coding`, but only
+when that alias exists and `free_coding` is not an alias itself. Two variables
+that address one key are a startup error that names both, so no winner is picked
+by environment order.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -249,7 +263,7 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_SERVER__IDLE_TIMEOUT` | `60s` | HTTP idle timeout |
 | `QUOTA_ROUTER_LITELLM__BASE_URL` | `http://127.0.0.1:4000` | LiteLLM proxy URL |
 | `QUOTA_ROUTER_LITELLM__API_KEY` | unset | LiteLLM master key, used to verify the catalogue (secret) |
-| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__MODEL` | unset | Routing alias → `<provider>/<model>` id |
+| `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__MODEL` | unset | Routing alias → `<provider>/<model>` id. A hyphen in the alias is written as `_H_` (`FREE_H_CODING` for alias `free-coding`). |
 | `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__ENABLED` | `true` | `false` keeps the entry out of routing |
 | `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CONTEXT_LIMIT` | `0` | Verified input window in tokens (`0` unverified) |
 | `QUOTA_ROUTER_LITELLM__MODEL_ALIASES__<ALIAS>__CAPABILITIES__STREAMING` | unverified | `supported` or `unsupported` |
@@ -264,7 +278,7 @@ underscore stays available inside a field name.
 | `QUOTA_ROUTER_ROUTING__LOW_QUOTA_THRESHOLD` | `0.1` | Scarce-quota fraction, in `(0, 1]` |
 | `QUOTA_ROUTER_ROUTING__RESERVE_FRACTION` | `0` | Remaining-quota fraction reserved for reasoning/coding workloads, in `[0, 1]`; `0` disables it. Must be `0` or `>= low_quota_threshold`. |
 | `QUOTA_ROUTER_ROUTING__PROVIDERS__<PROVIDER>__PRIORITY` | unset | Static provider preference rank; lower positive integer means higher preference |
-| `QUOTA_ROUTER_ROUTING__PROVIDERS__<PROVIDER>__MODELS__<ALIAS>` | unset | Per-provider model alias preference rank; lower positive integer means higher preference, scoped to that provider. Hyphenated aliases can be written with literal hyphens in env var names; in shells that disallow hyphens, use underscores and the loader maps it to the hyphenated catalogue alias only when unambiguous. |
+| `QUOTA_ROUTER_ROUTING__PROVIDERS__<PROVIDER>__MODELS__<ALIAS>` | unset | Per-provider model alias preference rank; lower positive integer means higher preference, scoped to that provider. The alias may be written with literal hyphens, with the `_H_` escape (`FREE_H_CODING` for alias `free-coding`) or with underscores (`FREE_CODING`), which the loader maps to the hyphenated catalogue alias only when unambiguous. Two variables that address one alias are rejected at startup. |
 | `QUOTA_ROUTER_SQLITE__PATH` | `quota-router.db` | SQLite file path |
 | `QUOTA_ROUTER_SQLITE__BUSY_TIMEOUT` | `5s` | SQLite busy timeout |
 | `QUOTA_ROUTER_SQLITE__RETENTION__QUOTA_SNAPSHOTS` | `720h` | Keep quota snapshots this long (`0` keeps all) |
