@@ -33,11 +33,6 @@ type DecisionWriter interface {
 	SaveRoutingDecision(ctx context.Context, r store.RoutingDecisionRecord) error
 }
 
-// DecisionReader reads persisted routing decisions.
-type DecisionReader interface {
-	LatestRoutingDecisions(ctx context.Context, limit int) ([]store.RoutingDecisionRecord, error)
-}
-
 // RouteService owns the route use case: loading state, selecting a route,
 // auditing the decision, and pinning session affinity. It is constructible with
 // interfaces so tests can exercise it without HTTP or SQLite.
@@ -66,27 +61,11 @@ func NewRouteService(log *slog.Logger, cfg config.Config, selector routing.Selec
 	}
 }
 
-// Update replaces the service dependencies while preserving the session lock.
-func (s *RouteService) Update(log *slog.Logger, cfg config.Config, selector routing.Selector, state StateReader, affinity AffinityStore, decisions DecisionWriter) {
-	if log == nil {
-		log = slog.Default()
-	}
-	s.log = log
-	s.cfg = cfg
-	s.selector = selector
-	s.state = state
-	s.affinity = affinity
-	s.decisions = decisions
-}
-
 // sessionAffinityTTL is how long a pin outlives its last use. Long enough that a
 // working session keeps its model across a pause, short enough that an abandoned
 // session stops being pinned without anyone releasing it. It is deliberately not
 // configurable yet: nothing has measured a better value.
 const sessionAffinityTTL = 24 * time.Hour
-
-// SessionAffinityTTL exposes the pin TTL for tests and HTTP compatibility checks.
-func SessionAffinityTTL() time.Duration { return sessionAffinityTTL }
 
 // Route performs the whole session-routing operation under the session's lock:
 // read state, decide, audit the decision, pin the route. It returns the
@@ -218,9 +197,6 @@ func (s *RouteService) persistDecision(ctx context.Context, d routing.Decision) 
 	}
 	return s.decisions.SaveRoutingDecision(ctx, rec)
 }
-
-// StaleAfter returns the freshness bound derived from a polling interval.
-func StaleAfter(interval time.Duration) time.Duration { return staleAfter(interval) }
 
 func staleAfter(interval time.Duration) time.Duration {
 	if interval <= 0 {

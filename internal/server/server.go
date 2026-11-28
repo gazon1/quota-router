@@ -54,14 +54,16 @@ type Server struct {
 }
 
 // Options carries what the routes read. A nil Usage or an empty Token leaves
-// the usage route registered but refusing every report. A nil Store leaves the
-// routing, status and session release routes registered but returning 503:
-// affinity is routing state, so the store that holds it also ends route use.
+// the usage route registered but refusing every report. Nil Store/Decisions
+// leave the routing, status and session release routes registered but
+// returning 503: affinity is routing state, so the store that holds it also
+// ends route use.
 type Options struct {
 	Usage     UsageSink
 	AuthToken string
 	Config    config.Config
-	Store     *store.Store
+	Store     StateStore
+	Decisions DecisionStore
 }
 
 // New creates a server with registered routes.
@@ -81,11 +83,22 @@ func New(log *slog.Logger, opts Options) *Server {
 		usage:    opts.Usage,
 		token:    opts.AuthToken,
 	}
-	if opts.Store != nil {
-		s.store = opts.Store
-		s.decisions = opts.Store
+	s.store = opts.Store
+	s.decisions = opts.Decisions
+	if s.decisions == nil {
+		if ds, ok := opts.Store.(DecisionStore); ok {
+			s.decisions = ds
+		}
 	}
-	s.routes = s.newRouteService()
+	var (
+		state    application.StateReader
+		affinity application.AffinityStore
+	)
+	if s.store != nil {
+		state = s.store
+		affinity = s.store
+	}
+	s.routes = application.NewRouteService(s.log, s.cfg, s.selector, state, affinity, s.decisions)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/route", s.handleSelect)
@@ -98,45 +111,6 @@ func New(log *slog.Logger, opts Options) *Server {
 	// envelope as every handler-level error.
 	s.mux.HandleFunc("/", s.handleFallback)
 	return s
-}
-
-func (s *Server) newRouteService() *application.RouteService {
-	var (
-		state     application.StateReader
-		affinity  application.AffinityStore
-		decisions application.DecisionWriter
-	)
-	if s.store != nil {
-		state = s.store
-		affinity = s.store
-	}
-	if s.decisions != nil {
-		decisions = s.decisions
-	}
-	return application.NewRouteService(s.log, s.cfg, s.selector, state, affinity, decisions)
-}
-
-func (s *Server) routeService() *application.RouteService {
-	if s.routes == nil {
-		s.routes = s.newRouteService()
-	}
-	s.routes.Update(s.log, s.cfg, s.selector, func() application.StateReader {
-		if s.store != nil {
-			return s.store
-		}
-		return nil
-	}(), func() application.AffinityStore {
-		if s.store != nil {
-			return s.store
-		}
-		return nil
-	}(), func() application.DecisionWriter {
-		if s.decisions != nil {
-			return s.decisions
-		}
-		return nil
-	}())
-	return s.routes
 }
 
 // Handler returns the root HTTP handler. It wraps the mux with the per-request
@@ -283,7 +257,7 @@ func (s *Server) handleSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decision, err := s.routeService().Route(r.Context(), req)
+	decision, err := s.routes.Route(r.Context(), req)
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "route session", "error", err, "session_id", req.SessionID)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, err.Error(), true)
@@ -446,7 +420,7 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 		p := statusProvider{Provider: n}
 		if snap, ok := byQuota[n]; ok {
 			q := application.QuotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
-			state, reason := q.StateAt(now, application.StaleAfter(s.cfg.Polling.Interval))
+			state, reason := q.StateAt(now, staleAfter(s.cfg.Polling.Interval))
 			p.Quota = &statusQuota{
 				State:         string(state),
 				UnknownReason: string(reason),
@@ -462,7 +436,7 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 			// Status reads apply the same freshness bound as the selector: an
 			// observation that is absent or older than the bound is not
 			// actionable, so the provider must not be reported healthy.
-			if ps.ObservedAt.IsZero() || now.Sub(ps.ObservedAt) > application.StaleAfter(s.cfg.Polling.Interval) {
+			if ps.ObservedAt.IsZero() || now.Sub(ps.ObservedAt) > staleAfter(s.cfg.Polling.Interval) {
 				health = quota.HealthUnknown
 			}
 			cooldown := ""
@@ -502,6 +476,13 @@ func statusWindows(ws []quota.Window) []statusWindow {
 	return out
 }
 
+func staleAfter(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 90 * time.Second
+	}
+	return 3 * interval
+}
+
 // Session release ends one agent session's route use: the pin is deleted, so the
 // next decision for that session starts from the normal candidate set. Deleting
 // an absent pin is not an error, which is what makes a repeat release safe. It
@@ -526,7 +507,7 @@ func (s *Server) handleRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pin, released, err := s.routeService().Release(r.Context(), id)
+	pin, released, err := s.routes.Release(r.Context(), id)
 	if err != nil {
 		s.log.ErrorContext(r.Context(), "release session", "error", err, "session_id", id)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "session release could not be stored", true)

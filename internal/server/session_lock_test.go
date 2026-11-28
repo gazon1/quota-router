@@ -44,8 +44,8 @@ func TestReleaseIsNotUndoneByInFlightSelection(t *testing.T) {
 		affinity: map[string]store.SessionAffinity{"sess-1": pin("sess-1", "cc-coding", time.Now().UTC())},
 	}
 	gated := &gatedStore{fakeStore: base, read: make(chan struct{}), gate: make(chan struct{})}
-	srv := affinityServer(t, base)
-	srv.store = gated
+	cfg := testRoutingConfig()
+	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: gated, Decisions: gated})
 
 	// Start the selection; it will block holding the session lock, right after
 	// reading the pin.
