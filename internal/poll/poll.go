@@ -76,13 +76,18 @@ type Poller struct {
 	// scheduling is deterministic instead of sleep-driven.
 	wait   func(ctx context.Context, d time.Duration) bool
 	jitter func(time.Duration) time.Duration
+}
 
+// loopState owns the retry counters for one provider loop. Each loop owns its
+// own state, so providers polled concurrently never share a counter and never
+// mix one provider's attempts into another's history.
+type loopState struct {
 	// consecutiveFailures counts attempts that did not establish quota; the
 	// per-attempt debug log reports it, the retry count and the duration, so a
-	// provider outage is diagnosable from logs alone. lastSuccessAt is the newest
-	// attempt that did.
+	// provider outage is diagnosable from logs alone.
 	consecutiveFailures int
-	lastSuccessAt       time.Time
+	// lastSuccessAt is the newest attempt that did establish quota.
+	lastSuccessAt time.Time
 }
 
 // New builds a poller with the production defaults for retry.
@@ -128,8 +133,9 @@ func (p *Poller) Run(ctx context.Context) {
 // that took longer than expected — resumes with exactly one poll and no burst of
 // catch-up polls for the ticks that passed.
 func (p *Poller) loop(ctx context.Context, t Target) {
+	var st loopState
 	for {
-		p.poll(ctx, t)
+		p.poll(ctx, t, &st)
 		if !p.wait(ctx, p.Interval) {
 			return
 		}
@@ -139,11 +145,11 @@ func (p *Poller) loop(ctx context.Context, t Target) {
 // poll performs one poll: an attempt, and retries while the adapter classified
 // the failure as transient. Every attempt is persisted, so last-attempt moves
 // even when the poll never succeeds, while last-success keeps its own value.
-func (p *Poller) poll(ctx context.Context, t Target) {
+func (p *Poller) poll(ctx context.Context, t Target, st *loopState) {
 	for attempt := 1; ; attempt++ {
 		started := time.Now().UTC()
 		snap, state := t.Source.Fetch(ctx)
-		p.record(ctx, t.Name, snap, state, attempt, started)
+		p.record(ctx, t.Name, st, snap, state, attempt, started)
 
 		if attempt >= p.attempts() || !retryable(snap, state) {
 			return
@@ -156,7 +162,7 @@ func (p *Poller) poll(ctx context.Context, t Target) {
 
 // record persists one attempt. A cancelled context is not an observation: the
 // attempt was cut short by shutdown, so it must not be stored as a failure.
-func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapshot, state quota.ProviderState, attempt int, started time.Time) {
+func (p *Poller) record(ctx context.Context, provider string, st *loopState, snap quota.Snapshot, state quota.ProviderState, attempt int, started time.Time) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -169,11 +175,16 @@ func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapsho
 	if success {
 		successAt = snap.ObservedAt
 	}
+	// consecutiveFailures counts attempts that did not establish quota; the
+	// per-attempt debug log reports it, the retry count and the duration, so a
+	// provider outage is diagnosable from logs alone. It counts fetch outcomes
+	// only: the persistence result of the same cycle is reported separately as
+	// persist_ok, so the two failures are never conflated.
 	if success {
-		p.consecutiveFailures = 0
-		p.lastSuccessAt = successAt
+		st.consecutiveFailures = 0
+		st.lastSuccessAt = successAt
 	} else {
-		p.consecutiveFailures++
+		st.consecutiveFailures++
 	}
 
 	var snapshotErr error
@@ -197,10 +208,13 @@ func (p *Poller) record(ctx context.Context, provider string, snap quota.Snapsho
 		p.Log.Error("persist poll state", "provider", provider, "error", pollErr)
 	}
 
+	// started precedes the fetch and the persistence below, so the duration
+	// covers the whole attempt — provider response and sink writes — not just
+	// the provider call.
 	p.Log.Debug("polled provider", "provider", provider,
 		"health", state.Health, "reason", state.Reason(), "fresh", success,
-		"attempt", attempt, "retries", attempt-1, "duration_ms", time.Since(started).Milliseconds(),
-		"consecutive_failures", p.consecutiveFailures, "last_success_at", p.lastSuccessAt.UTC().Format(time.RFC3339Nano),
+		"attempt", attempt, "retries", attempt-1, "attempt_duration_ms", time.Since(started).Milliseconds(),
+		"consecutive_failures", st.consecutiveFailures, "last_success_at", st.lastSuccessAt.UTC().Format(time.RFC3339Nano),
 		"last_attempt_at", at.UTC().Format(time.RFC3339Nano), "persist_ok", cycleErr == nil)
 }
 

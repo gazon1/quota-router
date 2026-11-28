@@ -208,6 +208,51 @@ func TestProviderIsolation(t *testing.T) {
 	<-done
 }
 
+// Retry counters belong to one provider loop, so concurrently polled providers
+// keep independent failure history instead of racing on or sharing one counter.
+func TestRetryCountersStayPerProvider(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	rec := newRecorder()
+	p := New(time.Hour, 3*time.Hour, log, rec,
+		Target{Name: "alpha", Source: SourceFunc(func(context.Context) (quota.Snapshot, quota.ProviderState) {
+			a := transient()
+			return a.snap, a.state
+		})},
+		Target{Name: "beta", Source: SourceFunc(func(context.Context) (quota.Snapshot, quota.ProviderState) {
+			return good(), healthy()
+		})},
+	)
+	p.wait = func(ctx context.Context, _ time.Duration) bool { return ctx.Err() == nil }
+	p.jitter = func(d time.Duration) time.Duration { return d }
+	p.Attempts = 1 // one attempt per poll, so each counter settles deterministically
+
+	ctx := context.Background()
+	var alphaSt, betaSt loopState
+	p.poll(ctx, p.Targets[0], &alphaSt) // alpha: transient failure
+	p.poll(ctx, p.Targets[1], &betaSt)  // beta: success
+	p.poll(ctx, p.Targets[0], &alphaSt) // alpha: second transient failure
+
+	alphaLine, betaLine := "", ""
+	for _, line := range strings.Split(buf.String(), "\n") {
+		switch {
+		case strings.Contains(line, "provider=alpha"):
+			alphaLine = line
+		case strings.Contains(line, "provider=beta"):
+			betaLine = line
+		}
+	}
+	if !strings.Contains(alphaLine, "consecutive_failures=2") {
+		t.Fatalf("alpha log %q: its own second transient failure must count as 2", alphaLine)
+	}
+	if !strings.Contains(alphaLine, "last_success_at=0001-01-01T00:00:00Z") {
+		t.Fatalf("alpha log %q: a provider that never succeeded must keep last_success unset", alphaLine)
+	}
+	if !strings.Contains(betaLine, "consecutive_failures=0") {
+		t.Fatalf("beta log %q: want its own success to reset its counter", betaLine)
+	}
+}
+
 // A cancelled context stops the poller without leaking a goroutine that would
 // later write to a closed store.
 func TestStopsOnCancellation(t *testing.T) {
@@ -251,7 +296,7 @@ func TestTransientFailureIsRetriedAndCapped(t *testing.T) {
 	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p.poll(ctx, p.Targets[0])
+	p.poll(ctx, p.Targets[0], &loopState{})
 
 	if got := src.callCount(); got != defaultAttempts {
 		t.Fatalf("attempts = %d, want the cap of %d", got, defaultAttempts)
@@ -284,7 +329,7 @@ func TestPermanentFailureIsNotRetried(t *testing.T) {
 			src.answers = []answer{{snap: tc.snap, state: tc.state}}
 			p := newTestPoller(rec, Target{Name: "minimax", Source: src})
 
-			p.poll(context.Background(), p.Targets[0])
+			p.poll(context.Background(), p.Targets[0], &loopState{})
 			if got := src.callCount(); got != 1 {
 				t.Fatalf("attempts = %d, want 1: a permanent failure is not retried", got)
 			}
@@ -308,12 +353,12 @@ func TestAttemptAndSuccessTimestampsAreIndependent(t *testing.T) {
 	src.answers[1].state = quota.NewProviderState("minimax", quota.Unavailable, quota.ReasonTimeout, time.Now().UTC())
 	src.mu.Unlock()
 
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 	if got := rec.successAt("minimax"); !got.Equal(succeededAt) {
 		t.Fatalf("last success = %s, want the observation time %s", got, succeededAt)
 	}
 
-	p.poll(context.Background(), p.Targets[0]) // fails
+	p.poll(context.Background(), p.Targets[0], &loopState{}) // fails
 	if got := rec.successAt("minimax"); !got.Equal(succeededAt) {
 		t.Fatalf("a failure overwrote last success: %s, want %s", got, succeededAt)
 	}
@@ -332,7 +377,7 @@ func TestSuccessDoesNotImplyAvailable(t *testing.T) {
 		state: healthy(),
 	}}
 	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 
 	snaps := rec.snapshots()
 	if len(snaps) != 1 {
@@ -348,7 +393,7 @@ func TestSuccessDoesNotImplyAvailable(t *testing.T) {
 	src.answers = []answer{{snap: quota.Failed("minimax", "test", time.Now().UTC(), quota.MalformedResponse), state: healthy()}}
 	p = newTestPoller(rec, Target{Name: "minimax", Source: src})
 	p.Attempts = 1
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 	snaps = rec.snapshots()
 	if len(snaps) != 1 || snaps[0].State != store.QuotaUnknown {
 		t.Fatalf("state = %+v, want UNKNOWN for a body with no usable quota", snaps)
@@ -369,7 +414,7 @@ func TestStaleTransitionIsPersistedAsUnknown(t *testing.T) {
 	}}
 	p := newTestPoller(rec, Target{Name: "minimax", Source: src})
 	p.StaleAfter = time.Hour
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 
 	snaps := rec.snapshots()
 	if len(snaps) != 1 {
@@ -550,7 +595,7 @@ func TestPersistenceFailuresAreLoggedAndPollStateNotCommitted(t *testing.T) {
 			p := New(time.Hour, 3*time.Hour, log, rec, Target{Name: "minimax", Source: &scripted{}})
 			p.Attempts = 1
 
-			p.poll(context.Background(), p.Targets[0])
+			p.poll(context.Background(), p.Targets[0], &loopState{})
 			logged := buf.String()
 			if !strings.Contains(logged, tc.persist) {
 				t.Fatalf("failure not logged: log = %q, want it to contain %q", logged, tc.persist)
@@ -571,7 +616,7 @@ func TestPersistenceFailuresAreLoggedAndPollStateNotCommitted(t *testing.T) {
 			// The next poll runs: a logged write failure is not a stop condition.
 			rec.fail = false
 			rec.failOp = ""
-			p.poll(context.Background(), p.Targets[0])
+			p.poll(context.Background(), p.Targets[0], &loopState{})
 			if got := len(rec.snapshots()); got != tc.snapshots+1 {
 				t.Fatalf("persisted %d snapshots after a failed write and a retry, want %d", got, tc.snapshots+1)
 			}
@@ -591,9 +636,9 @@ func TestPollLogsDurationRetriesAndOutcome(t *testing.T) {
 	p.Attempts = defaultAttempts
 	p.BaseDelay, p.MaxDelay = time.Millisecond, 2*time.Millisecond
 
-	p.poll(context.Background(), p.Targets[0])
+	p.poll(context.Background(), p.Targets[0], &loopState{})
 	logged := buf.String()
-	for _, want := range []string{"duration_ms", "retries", "consecutive_failures", "last_success_at", "last_attempt_at", "persist_ok"} {
+	for _, want := range []string{"attempt_duration_ms", "retries", "consecutive_failures", "last_success_at", "last_attempt_at", "persist_ok"} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("poll log %q missing %q", logged, want)
 		}

@@ -442,6 +442,11 @@ func (h *harness) seed(t *testing.T, provider string, state store.QuotaState, re
 	}); err != nil {
 		t.Fatalf("SaveProviderHealth: %v", err)
 	}
+	// Polling would have anchored the observation with the poll-state write;
+	// without it the row cannot be read as fresh quota.
+	if err := h.store.SavePollState(context.Background(), provider, time.Now().UTC(), time.Now().UTC()); err != nil {
+		t.Fatalf("SavePollState: %v", err)
+	}
 }
 
 func (h *harness) decisionID(t *testing.T) string {

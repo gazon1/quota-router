@@ -620,14 +620,16 @@ func (s *Server) routeSession(ctx context.Context, req routing.RouteRequest) (ro
 // now, applying the freshness bound. The bound is anchored to the last poll
 // attempt behind the row, not only to the observation: a row written while quota
 // was fresh reads as stale once that attempt is past the bound, which is what a
-// process crash or a polling stop leaves behind.
+// process crash or a polling stop leaves behind. A row whose poll state is
+// missing is treated exactly like an expired one: no durably anchored attempt
+// backs it, so it stays stale instead of becoming current.
 func (s *Server) quotaAt(ctx context.Context, snap store.QuotaSnapshot, now time.Time, maxAge time.Duration) (quota.Snapshot, error) {
 	q := quotaSnapshotFromStore(snap, s.cfg.Routing.LowQuotaThreshold)
 	attemptAt, _, err := s.store.PollState(ctx, snap.Provider)
 	if err != nil {
 		return quota.Snapshot{}, err
 	}
-	if !attemptAt.IsZero() && now.Sub(attemptAt) > maxAge {
+	if attemptAt.IsZero() || now.Sub(attemptAt) > maxAge {
 		q.Stale = true
 	}
 	return q, nil
