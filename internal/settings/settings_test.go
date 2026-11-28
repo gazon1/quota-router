@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSecretRedaction(t *testing.T) {
@@ -19,29 +22,19 @@ func TestSecretRedaction(t *testing.T) {
 		"String()":    s.String(),
 		"GoString()":  s.GoString(),
 	} {
-		if strings.Contains(got, "sk-live") {
-			t.Fatalf("%s = %q, leaked the secret", name, got)
-		}
+		assert.NotContains(t, got, "sk-live", "%s leaked the secret", name)
 	}
 
 	var buf strings.Builder
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("loaded", "token", s)
-	if strings.Contains(buf.String(), "sk-live") {
-		t.Fatalf("slog output leaked the secret: %s", buf.String())
-	}
+	assert.NotContains(t, buf.String(), "sk-live", "slog output leaked the secret")
 
 	buf.Reset()
 	slog.New(slog.NewJSONHandler(&buf, nil)).Info("loaded", "token", s)
-	if strings.Contains(buf.String(), "sk-live") {
-		t.Fatalf("JSON log output leaked the secret: %s", buf.String())
-	}
+	assert.NotContains(t, buf.String(), "sk-live", "JSON log output leaked the secret")
 	encoded, err := json.Marshal(struct{ T Secret }{T: s})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), "sk-live") {
-		t.Fatalf("json.Marshal leaked the secret: %s", encoded)
-	}
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "sk-live", "json.Marshal leaked the secret")
 }
 
 func TestSettingsRuntimeTypesUsableWithoutConfigLoader(t *testing.T) {
@@ -57,20 +50,17 @@ func TestSettingsRuntimeTypesUsableWithoutConfigLoader(t *testing.T) {
 			Windows:  []UnavailableWindow{{Days: []string{"monday"}, Start: "00:00", End: "01:00"}},
 		},
 	}
-	if !m.IsEnabled() || m.Provider() != "provider" {
-		t.Fatalf("model = %+v", m)
-	}
-	if _, ok := m.Unavailable.WindowAt(time.Date(2026, time.November, 30, 0, 30, 0, 0, time.UTC)); !ok {
-		t.Fatal("expected window to match")
-	}
+	assert.True(t, m.IsEnabled(), "model = %+v", m)
+	assert.Equal(t, "provider", m.Provider(), "model = %+v", m)
+	_, ok := m.Unavailable.WindowAt(time.Date(2026, time.November, 30, 0, 30, 0, 0, time.UTC))
+	assert.True(t, ok, "expected window to match")
 
 	cat := Catalogue{ModelAliases: map[string]Model{"m": m}, Routing: Routing{LowQuotaThreshold: 0.1}}
-	if got := cat.Candidates(Requirements{Streaming: true, Tasks: []string{"coding"}}); len(got) != 1 || got[0] != "m" {
-		t.Fatalf("Candidates = %v", got)
-	}
+	got := cat.Candidates(Requirements{Streaming: true, Tasks: []string{"coding"}})
+	assert.Len(t, got, 1)
+	assert.Equal(t, "m", got[0])
 
 	var sec Secret = "sk-test"
-	if string(sec) != "sk-test" || strings.Contains(sec.String(), "sk-test") {
-		t.Fatalf("secret redaction/runtime behavior broken: %q %q", string(sec), sec.String())
-	}
+	assert.Equal(t, "sk-test", string(sec))
+	assert.NotContains(t, sec.String(), "sk-test", "secret redaction/runtime behavior broken")
 }

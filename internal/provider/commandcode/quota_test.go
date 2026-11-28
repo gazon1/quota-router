@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gazon1/quota-router/internal/quota"
+	"github.com/stretchr/testify/assert"
 )
 
 // TestFetchReportsUnsupportedNotZero is the acceptance criterion of #11: with no
@@ -14,28 +15,23 @@ import (
 func TestFetchReportsUnsupportedNotZero(t *testing.T) {
 	snap, state := Adapter{}.Fetch(context.Background())
 
-	if got, reason := snap.State(); got != quota.QuotaUnknown || reason != quota.UnsupportedNoQuotaAPI {
-		t.Fatalf("State() = %s/%s, want UNKNOWN/%s", got, reason, quota.UnsupportedNoQuotaAPI)
-	}
-	if snap.Windows != nil || snap.Confidence != quota.ConfidenceNone {
-		t.Fatalf("Fetch() = %+v, want no windows and no confidence", snap)
-	}
-	if snap.Provider != Provider || snap.Source != Source {
-		t.Fatalf("Provider/Source = %s/%s, want %s/%s", snap.Provider, snap.Source, Provider, Source)
-	}
+	got, reason := snap.State()
+	assert.Equal(t, quota.QuotaUnknown, got)
+	assert.Equal(t, quota.UnsupportedNoQuotaAPI, reason)
+	assert.Nil(t, snap.Windows)
+	assert.Equal(t, quota.ConfidenceNone, snap.Confidence)
+	assert.Equal(t, Provider, snap.Provider)
+	assert.Equal(t, Source, snap.Source)
 	// Health must not borrow the quota verdict: nothing was probed, so it is
 	// Unknown/NotProbed, never Unavailable or Exhausted.
-	if state.Health != quota.HealthUnknown || state.Reason() != quota.ReasonNotProbed {
-		t.Fatalf("health = %s/%s, want UNKNOWN/%s", state.Health, state.Reason(), quota.ReasonNotProbed)
-	}
-	if state.CooldownActive(time.Now()) {
-		t.Error("CooldownActive = true, want no routing exclusion")
-	}
+	assert.Equal(t, quota.HealthUnknown, state.Health)
+	assert.Equal(t, quota.ReasonNotProbed, state.Reason())
+	assert.False(t, state.CooldownActive(time.Now()), "want no routing exclusion")
 	// A freshness bound must not turn the refusal into a different diagnosis.
 	for _, maxAge := range []time.Duration{time.Hour, 0, -time.Second} {
-		if got, reason := snap.StateAt(time.Now(), maxAge); got != quota.QuotaUnknown || reason != quota.UnsupportedNoQuotaAPI {
-			t.Errorf("StateAt(%s) = %s/%s, want UNKNOWN/%s", maxAge, got, reason, quota.UnsupportedNoQuotaAPI)
-		}
+		got, reason := snap.StateAt(time.Now(), maxAge)
+		assert.Equal(t, quota.QuotaUnknown, got, "StateAt(%s)", maxAge)
+		assert.Equal(t, quota.UnsupportedNoQuotaAPI, reason, "StateAt(%s)", maxAge)
 	}
 }
 

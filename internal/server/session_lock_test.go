@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/gazon1/quota-router/internal/store"
 )
 
@@ -71,15 +73,9 @@ func TestReleaseIsNotUndoneByInFlightSelection(t *testing.T) {
 	}
 
 	close(gated.gate)
-	if code := <-selectDone; code != 200 {
-		t.Fatalf("selection status = %d, want 200", code)
-	}
-	if code := <-releaseDone; code != 200 {
-		t.Fatalf("release status = %d, want 200", code)
-	}
+	assert.Equal(t, 200, <-selectDone, "selection status")
+	assert.Equal(t, 200, <-releaseDone, "release status")
 
 	// The release is the last word: the pin the selection wrote must be gone.
-	if _, ok := base.affinity["sess-1"]; ok {
-		t.Fatalf("pin = %+v survived the release: the in-flight selection undid it", base.affinity["sess-1"])
-	}
+	assert.NotContains(t, base.affinity, "sess-1", "pin = %+v survived the release: the in-flight selection undid it", base.affinity["sess-1"])
 }

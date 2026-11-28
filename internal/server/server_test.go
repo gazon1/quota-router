@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/routing"
 	"github.com/gazon1/quota-router/internal/store"
@@ -24,15 +27,9 @@ func TestHealth(t *testing.T) {
 
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
-	}
-	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-		t.Fatalf("Content-Type = %q, want application/json", ct)
-	}
-	if got := strings.TrimSpace(w.Body.String()); got != `{"status":"ok"}` {
-		t.Fatalf("body = %q, want %q", got, `{"status":"ok"}`)
-	}
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Equal(t, `{"status":"ok"}`, strings.TrimSpace(w.Body.String()))
 }
 
 func TestHealthMethodNotAllowed(t *testing.T) {
@@ -42,9 +39,7 @@ func TestHealthMethodNotAllowed(t *testing.T) {
 
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
-	}
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 }
 
 func TestUnknownRouteReturnsErrorEnvelope(t *testing.T) {
@@ -53,19 +48,11 @@ func TestUnknownRouteReturnsErrorEnvelope(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
-	}
+	assert.Equal(t, http.StatusNotFound, w.Code)
 	var body errorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Error.Code != errorCodeNotFound {
-		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeNotFound)
-	}
-	if body.Error.Retryable {
-		t.Fatal("retryable = true, want false for a not-found condition")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errorCodeNotFound, body.Error.Code)
+	assert.False(t, body.Error.Retryable, "retryable = true, want false for a not-found condition")
 }
 
 func TestWrongMethodReturnsMethodNotAllowed(t *testing.T) {
@@ -76,16 +63,10 @@ func TestWrongMethodReturnsMethodNotAllowed(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
-	}
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 	var body errorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Error.Code != errorCodeMethodNotAllowed {
-		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeMethodNotAllowed)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errorCodeMethodNotAllowed, body.Error.Code)
 }
 
 type fakeStore struct {
@@ -245,27 +226,16 @@ func TestSelectEndpoint(t *testing.T) {
 	body := `{"version":1,"session_id":"s1","capabilities":{"tool_calling":true},"task_class":"coding"}`
 	w := postSelect(t, srv, testRoutingToken, body)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	var resp struct {
 		Decision routing.Decision `json:"decision"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Decision.SelectedAlias != "cc-coding" {
-		t.Fatalf("selected=%q", resp.Decision.SelectedAlias)
-	}
-	if resp.Decision.DecisionID == "" || resp.Decision.PolicyVersion != routing.PolicyVersion {
-		t.Fatalf("decision metadata missing: %+v", resp.Decision)
-	}
-	if len(st.decisions) != 1 {
-		t.Fatalf("persisted decisions=%d", len(st.decisions))
-	}
-	if st.decisions[0].DecisionID != resp.Decision.DecisionID {
-		t.Fatalf("persisted id=%q want %q", st.decisions[0].DecisionID, resp.Decision.DecisionID)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "cc-coding", resp.Decision.SelectedAlias)
+	assert.NotEmpty(t, resp.Decision.DecisionID, "decision metadata missing: %+v", resp.Decision)
+	assert.Equal(t, routing.PolicyVersion, resp.Decision.PolicyVersion, "decision metadata missing: %+v", resp.Decision)
+	require.Len(t, st.decisions, 1, "persisted decisions")
+	assert.Equal(t, resp.Decision.DecisionID, st.decisions[0].DecisionID)
 }
 
 func TestSelectEndpointNoEligible(t *testing.T) {
@@ -278,21 +248,13 @@ func TestSelectEndpointNoEligible(t *testing.T) {
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
 	w := postSelect(t, srv, testRoutingToken, body)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusConflict, w.Code, "body=%s", w.Body.String())
 	var resp struct {
 		Decision routing.Decision `json:"decision"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Decision.SelectedAlias != "" {
-		t.Fatalf("selected=%q", resp.Decision.SelectedAlias)
-	}
-	if len(resp.Decision.Rejected) == 0 {
-		t.Fatal("expected rejections")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Empty(t, resp.Decision.SelectedAlias)
+	assert.NotEmpty(t, resp.Decision.Rejected, "expected rejections")
 }
 
 func TestSelectEndpointInvalidVersion(t *testing.T) {
@@ -303,25 +265,13 @@ func TestSelectEndpointInvalidVersion(t *testing.T) {
 	}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 	w := postSelect(t, srv, testRoutingToken, `{"version":2,"session_id":"s1","capabilities":{}}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
 	var body errorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Error.Code != errorCodeValidation {
-		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeValidation)
-	}
-	if !strings.Contains(body.Error.Message, "version must be 1") {
-		t.Fatalf("message = %q, want it to name the version error", body.Error.Message)
-	}
-	if body.Error.RequestID == "" {
-		t.Fatal("error response must carry the request id")
-	}
-	if body.Error.Retryable {
-		t.Fatal("retryable = true, want false for a validation failure")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errorCodeValidation, body.Error.Code)
+	assert.Contains(t, body.Error.Message, "version must be 1", "message = %q, want it to name the version error", body.Error.Message)
+	assert.NotEmpty(t, body.Error.RequestID, "error response must carry the request id")
+	assert.False(t, body.Error.Retryable, "retryable = true, want false for a validation failure")
 }
 
 func TestSelectEndpointPersistenceFailure(t *testing.T) {
@@ -335,9 +285,7 @@ func TestSelectEndpointPersistenceFailure(t *testing.T) {
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
 	w := postSelect(t, srv, testRoutingToken, body)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "body=%s", w.Body.String())
 }
 
 func TestDecisionsEndpoint(t *testing.T) {
@@ -350,26 +298,18 @@ func TestDecisionsEndpoint(t *testing.T) {
 
 	body := `{"version":1,"session_id":"s1","capabilities":{}}`
 	w := postSelect(t, srv, testRoutingToken, body)
-	if w.Code != http.StatusOK {
-		t.Fatalf("select status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "select body=%s", w.Body.String())
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/routing/decisions", nil)
 	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w2, req)
-	if w2.Code != http.StatusOK {
-		t.Fatalf("decisions status=%d body=%s", w2.Code, w2.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w2.Code, "decisions body=%s", w2.Body.String())
 	var resp struct {
 		Decisions []map[string]any `json:"decisions"`
 	}
-	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(resp.Decisions) != 1 {
-		t.Fatalf("decisions=%d", len(resp.Decisions))
-	}
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &resp))
+	assert.Len(t, resp.Decisions, 1)
 }
 
 func TestSelectEndpointStateLoadError(t *testing.T) {
@@ -378,25 +318,19 @@ func TestSelectEndpointStateLoadError(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "body=%s", w.Body.String())
 }
 
 func TestSelectEndpointInvalidJSON(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
 	w := postSelect(t, srv, testRoutingToken, `{`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
 }
 
 func TestSelectEndpointRejectsUnknownField(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{},"unknown":true}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
 }
 
 func TestSelectEndpointRequiresAuth(t *testing.T) {
@@ -419,9 +353,7 @@ func TestSelectEndpointRequiresAuth(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := postSelect(t, srv, tc.token, body)
-			if w.Code != tc.want {
-				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-			}
+			assert.Equal(t, tc.want, w.Code, "body=%s", w.Body.String())
 		})
 	}
 }
@@ -447,9 +379,7 @@ func TestDecisionsEndpointRequiresAuth(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(w, req)
-			if w.Code != tc.want {
-				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-			}
+			assert.Equal(t, tc.want, w.Code, "body=%s", w.Body.String())
 		})
 	}
 }
@@ -458,19 +388,11 @@ func TestSelectEndpointBodyLimit(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken, Store: &fakeStore{}, Decisions: &fakeStore{}})
 	huge := `{"version":1,"session_id":"s1","capabilities":{},"task_class":"` + strings.Repeat("x", maxSelectBody) + `"}`
 	w := postSelect(t, srv, testRoutingToken, huge)
-	if w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "body=%s", w.Body.String())
 	var body errorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Error.Code != errorCodePayloadTooLarge {
-		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodePayloadTooLarge)
-	}
-	if body.Error.Retryable {
-		t.Fatal("retryable = true, want false for a payload size failure")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errorCodePayloadTooLarge, body.Error.Code)
+	assert.False(t, body.Error.Retryable, "retryable = true, want false for a payload size failure")
 }
 
 // The size bound covers the whole body, including content appended after a
@@ -480,24 +402,16 @@ func TestSelectEndpointBodyLimitAfterValidJSON(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken, Store: &fakeStore{}, Decisions: &fakeStore{}})
 	body := `{"version":1,"session_id":"s1","capabilities":{}}` + `{"pad":"` + strings.Repeat("x", maxSelectBody) + `"}`
 	w := postSelect(t, srv, testRoutingToken, body)
-	if w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "body=%s", w.Body.String())
 }
 
 func TestSelectEndpointRejectsTrailingJSON(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}} {"unexpected":true}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusBadRequest, w.Code, "body=%s", w.Body.String())
 	var body errorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Error.Code != errorCodeInvalidRequest {
-		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeInvalidRequest)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errorCodeInvalidRequest, body.Error.Code)
 }
 
 // The status endpoint reports the actionable quota and health state per provider
@@ -514,37 +428,21 @@ func TestStatusEndpoint(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	var resp statusResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(resp.Providers) == 0 {
-		t.Fatal("status returned no providers")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.Providers, "status returned no providers")
 	var found *statusProvider
 	for i := range resp.Providers {
 		if resp.Providers[i].Provider == "minimax" {
 			found = &resp.Providers[i]
 		}
 	}
-	if found == nil {
-		t.Fatalf("providers = %+v", resp.Providers)
-	}
-	if found.Quota == nil {
-		t.Fatal("quota state missing")
-	}
-	if found.Quota.State != "AVAILABLE" {
-		t.Fatalf("quota state = %q, want AVAILABLE", found.Quota.State)
-	}
-	if found.Health == nil {
-		t.Fatal("health state missing")
-	}
-	if found.Health.State != "HEALTHY" {
-		t.Fatalf("health state = %q, want HEALTHY", found.Health.State)
-	}
+	require.NotNil(t, found, "providers = %+v", resp.Providers)
+	require.NotNil(t, found.Quota, "quota state missing")
+	assert.Equal(t, "AVAILABLE", found.Quota.State)
+	require.NotNil(t, found.Health, "health state missing")
+	assert.Equal(t, "HEALTHY", found.Health.State)
 }
 
 // The status endpoint applies the same freshness bound as the selector: a
@@ -565,24 +463,64 @@ func TestStatusEndpointStaleHealthNotHealthy(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	var resp statusResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	var found *statusProvider
 	for i := range resp.Providers {
 		if resp.Providers[i].Provider == "minimax" {
 			found = &resp.Providers[i]
 		}
 	}
-	if found == nil || found.Health == nil {
-		t.Fatalf("providers = %+v", resp.Providers)
+	require.NotNil(t, found, "providers = %+v", resp.Providers)
+	require.NotNil(t, found.Health, "providers = %+v", resp.Providers)
+	assert.NotEqual(t, "HEALTHY", found.Health.State, "stale health reported as HEALTHY, want a non-healthy actionable state")
+}
+
+// Status and routing must agree on what a fresh observation is: a
+// future-dated observation is no more actionable than a stale one, and a
+// current one is.
+func TestStatusEndpointHealthFreshnessMatchesRouting(t *testing.T) {
+	now := time.Now().UTC()
+	tests := []struct {
+		name       string
+		observedAt time.Time
+		want       string
+	}{
+		{"current", now.Add(-time.Minute), "HEALTHY"},
+		{"future-dated", now.Add(time.Minute), "UNKNOWN"},
+		{"stale", now.Add(-2 * time.Hour), "UNKNOWN"},
+		{"never observed", time.Time{}, "UNKNOWN"},
 	}
-	if found.Health.State == "HEALTHY" {
-		t.Fatalf("stale health reported as HEALTHY, want a non-healthy actionable state, got %q", found.Health.State)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testRoutingConfig()
+			srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: &fakeStore{
+				snaps: []store.QuotaSnapshot{quotaSnap("minimax", store.QuotaAvailable, 80)},
+				health: []store.HealthRecord{{
+					Provider:   "minimax",
+					State:      store.Healthy,
+					ObservedAt: tt.observedAt,
+				}},
+			}})
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+			req.Header.Set("Authorization", "Bearer "+testRoutingToken)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+			var resp statusResponse
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			var found *statusProvider
+			for i := range resp.Providers {
+				if resp.Providers[i].Provider == "minimax" {
+					found = &resp.Providers[i]
+				}
+			}
+			require.NotNil(t, found, "providers = %+v", resp.Providers)
+			require.NotNil(t, found.Health, "providers = %+v", resp.Providers)
+			assert.Equal(t, tt.want, found.Health.State)
+		})
 	}
 }
 
@@ -591,16 +529,10 @@ func TestStatusRequiresAuth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "body=%s", w.Body.String())
 	var body errorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Error.Code != errorCodeUnauthorized {
-		t.Fatalf("code = %q, want %q", body.Error.Code, errorCodeUnauthorized)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, errorCodeUnauthorized, body.Error.Code)
 }
 
 func TestStatusUnavailableWithoutStore(t *testing.T) {
@@ -609,9 +541,7 @@ func TestStatusUnavailableWithoutStore(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "body=%s", w.Body.String())
 }
 
 func TestStatusUnavailableOnStoreError(t *testing.T) {
@@ -621,9 +551,7 @@ func TestStatusUnavailableOnStoreError(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "body=%s", w.Body.String())
 }
 
 // The issue names the route-decision endpoint /v1/route; the repository also
@@ -637,18 +565,12 @@ func TestRouteAliasEndpoint(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
 	w := postRoute(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	var resp struct {
 		Decision routing.Decision `json:"decision"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Decision.DecisionID == "" {
-		t.Fatal("decision id missing")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.Decision.DecisionID, "decision id missing")
 }
 
 // Session release ends a session's route use and must be safely repeatable: the
@@ -660,67 +582,46 @@ func TestReleaseEndpoint(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken, Store: st})
 
 	w := postRelease(t, srv, testToken, "sess-1")
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	type releaseBody struct {
 		Status        string `json:"status"`
 		ReleasedAlias string `json:"released_alias"`
 	}
 	var body releaseBody
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Status != "released" {
-		t.Fatalf("status = %q, want released", body.Status)
-	}
-	if body.ReleasedAlias != "cc-coding" {
-		t.Fatalf("released_alias = %q, want the route that was let go", body.ReleasedAlias)
-	}
-	if _, ok := st.affinity["sess-1"]; ok {
-		t.Fatal("pin survived release")
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, "released", body.Status)
+	assert.Equal(t, "cc-coding", body.ReleasedAlias, "released_alias = %q, want the route that was let go", body.ReleasedAlias)
+	assert.NotContains(t, st.affinity, "sess-1", "pin survived release")
 
 	// A repeat release has nothing left to delete and must still succeed.
 	w = postRelease(t, srv, testToken, "sess-1")
-	if w.Code != http.StatusOK {
-		t.Fatalf("repeat release status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "repeat release body=%s", w.Body.String())
 	var repeat releaseBody
-	if err := json.Unmarshal(w.Body.Bytes(), &repeat); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if repeat.ReleasedAlias != "" {
-		t.Fatalf("released_alias = %q on a repeat release, want empty", repeat.ReleasedAlias)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &repeat))
+	assert.Empty(t, repeat.ReleasedAlias, "released_alias = %q on a repeat release, want empty", repeat.ReleasedAlias)
 }
 
 func TestReleaseEndpointValidation(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken, Store: &fakeStore{}})
 
-	if w := postRelease(t, srv, testToken, strings.Repeat("s", maxSessionIDLength+1)); w.Code != http.StatusBadRequest {
-		t.Fatalf("long session id status=%d body=%s", w.Code, w.Body.String())
-	}
-	if w := postRelease(t, srv, "", "sess-1"); w.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated release status=%d body=%s", w.Code, w.Body.String())
-	}
-	if w := postRelease(t, srv, testToken, "sess-1"); w.Code != http.StatusOK {
-		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
-	}
+	w := postRelease(t, srv, testToken, strings.Repeat("s", maxSessionIDLength+1))
+	assert.Equal(t, http.StatusBadRequest, w.Code, "long session id body=%s", w.Body.String())
+	w = postRelease(t, srv, "", "sess-1")
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "unauthenticated release body=%s", w.Body.String())
+	w = postRelease(t, srv, testToken, "sess-1")
+	assert.Equal(t, http.StatusOK, w.Code, "release body=%s", w.Body.String())
 }
 
 func TestReleaseEndpointUnavailableWithoutStore(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken})
-	if w := postRelease(t, srv, testToken, "sess-1"); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
-	}
+	w := postRelease(t, srv, testToken, "sess-1")
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "release body=%s", w.Body.String())
 }
 
 func TestReleaseEndpointUnavailableOnStoreError(t *testing.T) {
 	srv := New(nil, Options{AuthToken: testToken, Store: &fakeStore{affinityErr: context.DeadlineExceeded}})
-	if w := postRelease(t, srv, testToken, "sess-1"); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
-	}
+	w := postRelease(t, srv, testToken, "sess-1")
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "release body=%s", w.Body.String())
 }
 
 // A released session must not keep its retained affinity: release deletes the
@@ -735,16 +636,11 @@ func TestSelectEndpointHonorsSessionRelease(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
 	// Pinned to mm-fast, which the configured priority would not pick.
-	if got := selectAlias(t, srv, "sess-1"); got != "mm-fast" {
-		t.Fatalf("pinned alias = %q, want mm-fast", got)
-	}
+	assert.Equal(t, "mm-fast", selectAlias(t, srv, "sess-1"), "pinned alias")
 
-	if w := postRelease(t, srv, testRoutingToken, "sess-1"); w.Code != http.StatusOK {
-		t.Fatalf("release status=%d body=%s", w.Code, w.Body.String())
-	}
-	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
-		t.Fatalf("alias after release = %q, want the normally selected cc-coding", got)
-	}
+	w := postRelease(t, srv, testRoutingToken, "sess-1")
+	assert.Equal(t, http.StatusOK, w.Code, "release body=%s", w.Body.String())
+	assert.Equal(t, "cc-coding", selectAlias(t, srv, "sess-1"), "alias after release, want the normally selected cc-coding")
 }
 
 // pin builds a stored affinity row the way the selection path writes one.
@@ -756,15 +652,11 @@ func pin(sessionID, alias string, now time.Time) store.SessionAffinity {
 func selectAlias(t *testing.T, srv *Server, sessionID string) string {
 	t.Helper()
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"`+sessionID+`","capabilities":{}}`)
-	if w.Code != http.StatusOK {
-		t.Fatalf("select status=%d body=%s", w.Code, w.Body.String())
-	}
+	require.Equal(t, http.StatusOK, w.Code, "select body=%s", w.Body.String())
 	var resp struct {
 		Decision routing.Decision `json:"decision"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	return resp.Decision.SelectedAlias
 }
 
@@ -785,19 +677,11 @@ func TestSelectPinsAndKeepsTheRoute(t *testing.T) {
 	}
 	srv := affinityServer(t, st)
 
-	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
-		t.Fatalf("first selection = %q, want the ranked cc-coding", got)
-	}
+	assert.Equal(t, "cc-coding", selectAlias(t, srv, "sess-1"), "first selection, want the ranked cc-coding")
 	stored, ok := st.affinity["sess-1"]
-	if !ok {
-		t.Fatal("first selection did not persist a pin")
-	}
-	if stored.Alias != "cc-coding" {
-		t.Fatalf("stored alias = %q, want cc-coding", stored.Alias)
-	}
-	if !stored.ExpiresAt.After(stored.UpdatedAt) {
-		t.Fatalf("stored pin expires %s, not after its update %s", stored.ExpiresAt, stored.UpdatedAt)
-	}
+	require.True(t, ok, "first selection did not persist a pin")
+	assert.Equal(t, "cc-coding", stored.Alias)
+	assert.True(t, stored.ExpiresAt.After(stored.UpdatedAt), "stored pin expires %s, not after its update %s", stored.ExpiresAt, stored.UpdatedAt)
 
 	// The pinned route's quota observation goes stale. That says nothing about the
 	// route, so the session keeps it; an unpinned session, seeing the same state,
@@ -805,21 +689,13 @@ func TestSelectPinsAndKeepsTheRoute(t *testing.T) {
 	stale := quotaSnap("commandcode", store.QuotaAvailable, 80)
 	stale.ObservedAt = time.Now().UTC().Add(-time.Hour)
 	st.snaps = []store.QuotaSnapshot{stale, quotaSnap("minimax", store.QuotaAvailable, 80)}
-	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
-		t.Fatalf("selection through a transient exclusion = %q, want the held cc-coding", got)
-	}
-	if got := selectAlias(t, srv, "sess-2"); got != "mm-fast" {
-		t.Fatalf("unpinned session = %q, want mm-fast", got)
-	}
+	assert.Equal(t, "cc-coding", selectAlias(t, srv, "sess-1"), "selection through a transient exclusion, want the held cc-coding")
+	assert.Equal(t, "mm-fast", selectAlias(t, srv, "sess-2"), "unpinned session, want mm-fast")
 
 	// Exhausted quota is durable: the route is really gone, so the session moves.
 	st.snaps = []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaExhausted, 0), quotaSnap("minimax", store.QuotaAvailable, 80)}
-	if got := selectAlias(t, srv, "sess-1"); got != "mm-fast" {
-		t.Fatalf("selection after the pinned route was exhausted = %q, want mm-fast", got)
-	}
-	if got := st.affinity["sess-1"].Alias; got != "mm-fast" {
-		t.Fatalf("stored alias after the move = %q, want mm-fast", got)
-	}
+	assert.Equal(t, "mm-fast", selectAlias(t, srv, "sess-1"), "selection after the pinned route was exhausted, want mm-fast")
+	assert.Equal(t, "mm-fast", st.affinity["sess-1"].Alias, "stored alias after the move, want mm-fast")
 }
 
 // A stored pin that has expired must not decide anything: the session is
@@ -833,19 +709,11 @@ func TestSelectExpiredPinReevaluatesAndRepins(t *testing.T) {
 	}
 	srv := affinityServer(t, st)
 	// pin() computed its expiry from the old now, so it is already past.
-	if st.affinity["sess-1"].ExpiresAt.After(now) {
-		t.Fatal("fixture pin is not expired")
-	}
+	assert.False(t, st.affinity["sess-1"].ExpiresAt.After(now), "fixture pin is not expired")
 
-	if got := selectAlias(t, srv, "sess-1"); got != "cc-coding" {
-		t.Fatalf("expired pin selected %q, want a fresh cc-coding", got)
-	}
-	if got := st.affinity["sess-1"].Alias; got != "cc-coding" {
-		t.Fatalf("stored alias after re-pin = %q, want cc-coding", got)
-	}
-	if !st.affinity["sess-1"].ExpiresAt.After(now) {
-		t.Fatal("re-pin did not renew the expiry")
-	}
+	assert.Equal(t, "cc-coding", selectAlias(t, srv, "sess-1"), "expired pin, want a fresh cc-coding")
+	assert.Equal(t, "cc-coding", st.affinity["sess-1"].Alias, "stored alias after re-pin, want cc-coding")
+	assert.True(t, st.affinity["sess-1"].ExpiresAt.After(now), "re-pin did not renew the expiry")
 }
 
 // A manual override is the caller asking for another route, so it must re-pin
@@ -860,16 +728,10 @@ func TestSelectOverrideRepinsSession(t *testing.T) {
 	srv := affinityServer(t, st)
 
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{},"override":{"model_alias":"mm-fast"}}`)
-	if w.Code != http.StatusOK {
-		t.Fatalf("override status=%d body=%s", w.Code, w.Body.String())
-	}
-	if got := st.affinity["sess-1"].Alias; got != "mm-fast" {
-		t.Fatalf("stored alias after override = %q, want mm-fast", got)
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "override body=%s", w.Body.String())
+	assert.Equal(t, "mm-fast", st.affinity["sess-1"].Alias, "stored alias after override, want mm-fast")
 	// And the next plain request stays on the overridden route.
-	if got := selectAlias(t, srv, "sess-1"); got != "mm-fast" {
-		t.Fatalf("selection after override = %q, want mm-fast", got)
-	}
+	assert.Equal(t, "mm-fast", selectAlias(t, srv, "sess-1"), "selection after override, want mm-fast")
 }
 
 // An affinity write that fails must not let the caller believe the route stuck.
@@ -881,9 +743,8 @@ func TestSelectFailsWhenAffinityCannotBeStored(t *testing.T) {
 	srv := affinityServer(t, st)
 	st.affinityErr = context.DeadlineExceeded
 
-	if w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d body=%s, want 503 when the pin cannot be stored", w.Code, w.Body.String())
-	}
+	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "body=%s, want 503 when the pin cannot be stored", w.Body.String())
 }
 
 // A decision with no eligible route pins nothing: there is no route to keep.
@@ -894,12 +755,8 @@ func TestSelectWithoutCandidatePinsNothing(t *testing.T) {
 	}
 	srv := affinityServer(t, st)
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status=%d body=%s, want 409", w.Code, w.Body.String())
-	}
-	if len(st.affinity) != 0 {
-		t.Fatalf("affinity = %+v, want none pinned without a route", st.affinity)
-	}
+	assert.Equal(t, http.StatusConflict, w.Code, "body=%s, want 409", w.Body.String())
+	assert.Empty(t, st.affinity, "affinity = %+v, want none pinned without a route", st.affinity)
 }
 
 var _ = bytes.NewBuffer
@@ -933,33 +790,21 @@ func TestSelectHonorsUnavailableWindow(t *testing.T) {
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken, Store: st, Decisions: st})
 
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{}}`)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status=%d body=%s, want 409 while every route is in its window", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusConflict, w.Code, "body=%s, want 409 while every route is in its window", w.Body.String())
 	var body struct {
 		Decision routing.Decision `json:"decision"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if r, ok := findRejectedAlias(body.Decision, "cc-coding"); !ok || r.Stage != "model_availability" {
-		t.Fatalf("rejection = %+v ok=%v, want a model_availability explanation", r, ok)
-	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	r, ok := findRejectedAlias(body.Decision, "cc-coding")
+	require.True(t, ok, "rejection = %+v ok=%v, want a model_availability explanation", r, ok)
+	assert.Equal(t, "model_availability", r.Stage)
 
 	// The override names an otherwise valid alias and must still be refused.
 	w = postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"sess-1","capabilities":{},"override":{"model_alias":"mm-fast"}}`)
-	if w.Code != http.StatusConflict {
-		t.Fatalf("override status=%d body=%s, want 409", w.Code, w.Body.String())
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body.Decision.OverrideApplied {
-		t.Fatal("override was applied to a model inside its unavailable window")
-	}
-	if len(st.affinity) != 0 {
-		t.Fatalf("affinity = %+v, want nothing pinned without a route", st.affinity)
-	}
+	assert.Equal(t, http.StatusConflict, w.Code, "override body=%s, want 409", w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.False(t, body.Decision.OverrideApplied, "override was applied to a model inside its unavailable window")
+	assert.Empty(t, st.affinity, "affinity = %+v, want nothing pinned without a route", st.affinity)
 }
 
 func findRejectedAlias(d routing.Decision, alias string) (routing.RejectedCandidate, bool) {
@@ -1024,9 +869,7 @@ func TestConcurrentRouteAndReleaseHTTPHandlers(t *testing.T) {
 
 	// Release guarantee: release is idempotent and leaves no pin.
 	w := postRelease(t, srv, testRoutingToken, sameSession)
-	if w.Code != http.StatusOK {
-		t.Fatalf("final release status=%d body=%s", w.Code, w.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, w.Code, "final release body=%s", w.Body.String())
 	st.mu.Lock()
 	_, ok := st.affinity[sameSession]
 	st.mu.Unlock()
@@ -1035,14 +878,10 @@ func TestConcurrentRouteAndReleaseHTTPHandlers(t *testing.T) {
 		// have re-pinned after the final release completed. Verify release is
 		// still authoritative when serialized alone.
 		w = postRelease(t, srv, testRoutingToken, sameSession)
-		if w.Code != http.StatusOK {
-			t.Fatalf("second final release status=%d body=%s", w.Code, w.Body.String())
-		}
+		assert.Equal(t, http.StatusOK, w.Code, "second final release body=%s", w.Body.String())
 		st.mu.Lock()
 		_, ok = st.affinity[sameSession]
 		st.mu.Unlock()
-		if ok {
-			t.Fatal("pin survived serialized release after concurrent flood")
-		}
+		assert.False(t, ok, "pin survived serialized release after concurrent flood")
 	}
 }

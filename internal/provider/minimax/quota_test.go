@@ -8,13 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/quota"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const key = "sk-cp-fixture-token-plan-key"
@@ -24,18 +25,15 @@ var now = time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
 // fixture serves the sanitized live capture, so the tests parse the response the
 // documented endpoint actually returned rather than a hand-written shape.
 func fixture(t *testing.T) []byte {
+	t.Helper()
 	b, err := os.ReadFile("../../../docs/fixtures/minimax/token_plan_remains.json")
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
+	require.NoError(t, err, "read fixture")
 	var f struct {
 		Response struct {
 			Body json.RawMessage
 		}
 	}
-	if err := json.Unmarshal(b, &f); err != nil {
-		t.Fatalf("decode fixture: %v", err)
-	}
+	require.NoError(t, json.Unmarshal(b, &f), "decode fixture")
 	return f.Response.Body
 }
 
@@ -45,26 +43,16 @@ func TestParseLiveFixture(t *testing.T) {
 	// The capture reports general at 100% for the 5-hour window and 0% for the
 	// weekly one. Worst wins, so the snapshot is EXHAUSTED: this is the finding
 	// that a live 429 2056 refusal accompanies a "100%" 5-hour window.
-	if state, reason := s.State(); state != quota.Exhausted || reason != "" {
-		t.Fatalf("State() = %s/%s, want EXHAUSTED", state, reason)
-	}
+	state, reason := s.State()
+	assert.Equal(t, quota.Exhausted, state)
+	assert.Empty(t, reason)
 	// Neither count nor a used figure is reported, so the observation is usable
 	// but incomplete.
-	if s.Confidence != quota.ConfidenceLow {
-		t.Fatalf("Confidence = %s, want LOW", s.Confidence)
-	}
-	if len(s.Windows) != 4 {
-		t.Fatalf("Windows = %d, want 4 (5h+weekly for two model buckets)", len(s.Windows))
-	}
-	if got, want := s.Windows[1].ResetsAt, time.UnixMilli(1795996800000).UTC(); !got.Equal(want) {
-		t.Errorf("weekly ResetsAt = %s, want %s", got, want)
-	}
-	if got, want := s.Windows[0].Name, "general-5h"; got != want {
-		t.Errorf("Window name = %s, want %s", got, want)
-	}
-	if s.Provenance["remaining"] == "" {
-		t.Errorf("Provenance = %v, want the raw field names recorded", s.Provenance)
-	}
+	assert.Equal(t, quota.ConfidenceLow, s.Confidence)
+	assert.Len(t, s.Windows, 4, "want 4 (5h+weekly for two model buckets)")
+	assert.WithinDuration(t, time.UnixMilli(1795996800000).UTC(), s.Windows[1].ResetsAt, 0)
+	assert.Equal(t, "general-5h", s.Windows[0].Name)
+	assert.NotEmpty(t, s.Provenance["remaining"], "want the raw field names recorded")
 }
 
 func TestParseStates(t *testing.T) {
@@ -86,9 +74,10 @@ func TestParseStates(t *testing.T) {
 		{"threshold disabled", "1", quota.Available, 0},
 	}
 	for _, tc := range tests {
-		if got, _ := Parse(body(tc.pct), now, tc.limit).State(); got != tc.want {
-			t.Errorf("%s: State() = %s, want %s", tc.name, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := Parse(body(tc.pct), now, tc.limit).State()
+			assert.Equal(t, tc.want, got)
+		})
 	}
 }
 
@@ -110,13 +99,13 @@ func TestParseNeverInventsQuota(t *testing.T) {
 		{name: "empty body", body: ``},
 	}
 	for _, tc := range tests {
-		s := Parse([]byte(tc.body), now, 0.1)
-		if state, reason := s.State(); state != quota.QuotaUnknown || reason == "" {
-			t.Errorf("%s: State() = %s/%s, want UNKNOWN with a reason", tc.name, state, reason)
-		}
-		if s.Confidence != quota.ConfidenceNone {
-			t.Errorf("%s: Confidence = %s, want NONE on a body with no quota", tc.name, s.Confidence)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			s := Parse([]byte(tc.body), now, 0.1)
+			state, reason := s.State()
+			assert.Equal(t, quota.QuotaUnknown, state)
+			assert.NotEmpty(t, reason, "want UNKNOWN with a reason")
+			assert.Equal(t, quota.ConfidenceNone, s.Confidence, "want NONE on a body with no quota")
+		})
 	}
 }
 
@@ -135,10 +124,11 @@ func TestParseBusinessErrors(t *testing.T) {
 		{"9999", quota.MalformedResponse},
 	}
 	for _, tc := range tests {
-		body := []byte(`{"base_resp":{"status_code":` + tc.code + `,"status_msg":"x"}}`)
-		if _, reason := Parse(body, now, 0.1).State(); reason != tc.reason {
-			t.Errorf("status_code %s: State() reason = %s, want %s", tc.code, reason, tc.reason)
-		}
+		t.Run(tc.code, func(t *testing.T) {
+			body := []byte(`{"base_resp":{"status_code":` + tc.code + `,"status_msg":"x"}}`)
+			_, reason := Parse(body, now, 0.1).State()
+			assert.Equal(t, tc.reason, reason)
+		})
 	}
 }
 
@@ -162,25 +152,24 @@ func TestFetchStates(t *testing.T) {
 		{"garbage body", 200, []byte(`not json`), quota.QuotaUnknown, quota.MalformedResponse, quota.Degraded, quota.ReasonServerError},
 	}
 	for _, tc := range tests {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if got, want := r.Header.Get("Authorization"), "Bearer "+key; got != want {
-				t.Errorf("Authorization = %q, want the Token Plan key", got)
-			}
-			w.WriteHeader(tc.status)
-			if tc.body != nil {
-				_, _ = w.Write(tc.body)
-			}
-		}))
-		defer srv.Close()
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "Bearer "+key, r.Header.Get("Authorization"), "want the Token Plan key")
+				w.WriteHeader(tc.status)
+				if tc.body != nil {
+					_, _ = w.Write(tc.body)
+				}
+			}))
+			defer srv.Close()
 
-		a := &Adapter{URL: srv.URL, Key: config.Secret(key), LowFraction: 0.1}
-		snap, state := a.Fetch(context.Background())
-		if got, reason := snap.State(); got != tc.want || reason != tc.reason {
-			t.Errorf("%s: quota = %s/%s, want %s/%s", tc.name, got, reason, tc.want, tc.reason)
-		}
-		if state.Health != tc.health || state.Reason() != tc.healthR {
-			t.Errorf("%s: health = %s/%s, want %s/%s", tc.name, state.Health, state.Reason(), tc.health, tc.healthR)
-		}
+			a := &Adapter{URL: srv.URL, Key: config.Secret(key), LowFraction: 0.1}
+			snap, state := a.Fetch(context.Background())
+			got, reason := snap.State()
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.reason, reason)
+			assert.Equal(t, tc.health, state.Health)
+			assert.Equal(t, tc.healthR, state.Reason())
+		})
 	}
 }
 
@@ -195,12 +184,10 @@ func TestFetchHonoursDeadline(t *testing.T) {
 	defer cancel()
 
 	snap, state := a.Fetch(ctx)
-	if got, reason := snap.State(); got != quota.QuotaUnknown || reason != quota.TransientFetchFailure {
-		t.Errorf("quota = %s/%s, want UNKNOWN/TRANSIENT_FETCH_FAILURE", got, reason)
-	}
-	if state.Reason() != quota.ReasonTimeout {
-		t.Errorf("health reason = %s, want TIMEOUT", state.Reason())
-	}
+	got, reason := snap.State()
+	assert.Equal(t, quota.QuotaUnknown, got, "want UNKNOWN/TRANSIENT_FETCH_FAILURE")
+	assert.Equal(t, quota.TransientFetchFailure, reason, "want UNKNOWN/TRANSIENT_FETCH_FAILURE")
+	assert.Equal(t, quota.ReasonTimeout, state.Reason(), "want TIMEOUT")
 }
 
 func TestFetchUnreachable(t *testing.T) {
@@ -210,46 +197,42 @@ func TestFetchUnreachable(t *testing.T) {
 
 	a := &Adapter{URL: url, Key: config.Secret(key)}
 	_, state := a.Fetch(context.Background())
-	if state.Health != quota.Unavailable || state.Reason() != quota.ReasonUnreachable {
-		t.Errorf("health = %s/%s, want UNAVAILABLE/UNREACHABLE", state.Health, state.Reason())
-	}
+	assert.Equal(t, quota.Unavailable, state.Health, "want UNAVAILABLE/UNREACHABLE")
+	assert.Equal(t, quota.ReasonUnreachable, state.Reason(), "want UNAVAILABLE/UNREACHABLE")
 }
 
 // After a failed refresh the last usable observation is kept for diagnostics and
 // reads as UNKNOWN, so no consumer can route on it.
 func TestStaleLastKnownGood(t *testing.T) {
 	var fail atomic.Bool
+	body := fixture(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fail.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(fixture(t))
+		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
 	a := &Adapter{URL: srv.URL, Key: config.Secret(key), LowFraction: 0.1}
 	good, _ := a.Fetch(context.Background())
-	if state, _ := good.State(); state != quota.Exhausted || good.Stale {
-		t.Fatalf("first fetch = %s stale=%v, want EXHAUSTED and fresh", state, good.Stale)
-	}
+	state, _ := good.State()
+	assert.Equal(t, quota.Exhausted, state, "first fetch, want EXHAUSTED and fresh")
+	assert.False(t, good.Stale, "first fetch, want EXHAUSTED and fresh")
 
 	fail.Store(true)
 	stale, health := a.Fetch(context.Background())
-	if !stale.Stale {
-		t.Fatalf("second fetch Stale = false, want a stale last-known-good copy")
-	}
-	if got, reason := stale.StateAt(time.Now(), time.Hour); got != quota.QuotaUnknown || reason != quota.StaleObservation {
-		t.Errorf("StateAt() = %s/%s, want UNKNOWN/STALE_OBSERVATION", got, reason)
-	}
-	if state, _ := stale.State(); state != quota.Exhausted {
-		t.Errorf("raw State() = %s: diagnostics keep the values, only StateAt refuses them", state)
-	}
+	assert.True(t, stale.Stale, "want a stale last-known-good copy")
+	got, reason := stale.StateAt(time.Now(), time.Hour)
+	assert.Equal(t, quota.QuotaUnknown, got, "want UNKNOWN/STALE_OBSERVATION")
+	assert.Equal(t, quota.StaleObservation, reason, "want UNKNOWN/STALE_OBSERVATION")
+	state, _ = stale.State()
+	assert.Equal(t, quota.Exhausted, state, "diagnostics keep the values, only StateAt refuses them")
 	// Health reports this attempt, not the retained copy.
-	if health.Health != quota.Unavailable || health.Reason() != quota.ReasonServerError {
-		t.Errorf("health = %s/%s, want UNAVAILABLE/PROVIDER_ERROR", health.Health, health.Reason())
-	}
+	assert.Equal(t, quota.Unavailable, health.Health, "want UNAVAILABLE/PROVIDER_ERROR")
+	assert.Equal(t, quota.ReasonServerError, health.Reason(), "want UNAVAILABLE/PROVIDER_ERROR")
 }
 
 func TestNoCredentialLeaks(t *testing.T) {
@@ -257,29 +240,19 @@ func TestNoCredentialLeaks(t *testing.T) {
 		quota.NewProviderState(Provider, quota.Unavailable, quota.ReasonAuthFailed, now)
 	for _, v := range []any{snap, state} {
 		b, err := json.Marshal(v)
-		if err != nil {
-			t.Fatalf("Marshal() error = %v", err)
-		}
-		if strings.Contains(string(b), "sk-cp") {
-			t.Errorf("marshaled %T carries a credential: %s", v, b)
-		}
+		require.NoError(t, err, "Marshal()")
+		assert.NotContains(t, string(b), "sk-cp", "marshaled %T carries a credential", v)
 	}
-	if strings.Contains(Source, "?") {
-		t.Errorf("Source = %s, want no query string that could carry a credential", Source)
-	}
+	assert.NotContains(t, Source, "?", "want no query string that could carry a credential")
 }
 
 func TestNewUsesTheQuotaHost(t *testing.T) {
 	a, err := New(config.Provider{BaseURL: "https://www.minimax.io/v1", APIKey: config.Secret(key)}, 0.1, 10*time.Second)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if got, want := a.URL, "https://www.minimax.io/v1/token_plan/remains"; got != want {
-		t.Errorf("URL = %s, want %s", got, want)
-	}
-	if a.Key != config.Secret(key) || a.LowFraction != 0.1 || a.Timeout != 10*time.Second {
-		t.Errorf("New() = %+v, want the configured key and threshold", a)
-	}
+	require.NoError(t, err, "New()")
+	assert.Equal(t, "https://www.minimax.io/v1/token_plan/remains", a.URL)
+	assert.Equal(t, config.Secret(key), a.Key)
+	assert.Equal(t, 0.1, a.LowFraction)
+	assert.Equal(t, 10*time.Second, a.Timeout)
 }
 
 // Reset boundaries: the reported end is the reset; an absent one leaves the
@@ -297,22 +270,21 @@ func TestParseResetBoundary(t *testing.T) {
 			`"current_weekly_remaining_percent":100}],"base_resp":{"status_code":0}}`,
 	}
 	for name, body := range bodies {
-		s := Parse([]byte(body), now, 0.1)
-		if state, _ := s.State(); state != quota.Available {
-			t.Errorf("%s: State() = %s, want AVAILABLE: a reset time never changes quota", name, state)
-		}
+		t.Run(name, func(t *testing.T) {
+			s := Parse([]byte(body), now, 0.1)
+			state, _ := s.State()
+			assert.Equal(t, quota.Available, state, "a reset time never changes quota")
+		})
 	}
-	if s := Parse([]byte(bodies["end present"]), now, 0.1); s.Windows[0].ResetsAt.IsZero() || s.Confidence != quota.ConfidenceLow {
-		t.Errorf("end present: ResetsAt zero or confidence %s, want a dated window", s.Confidence)
-	}
+	s := Parse([]byte(bodies["end present"]), now, 0.1)
+	assert.False(t, s.Windows[0].ResetsAt.IsZero(), "want a dated window")
+	assert.Equal(t, quota.ConfidenceLow, s.Confidence, "want a dated window")
 	for _, name := range []string{"end absent", "end zero"} {
-		s := Parse([]byte(bodies[name]), now, 0.1)
-		if !s.Windows[0].ResetsAt.IsZero() {
-			t.Errorf("%s: ResetsAt = %s, want zero", name, s.Windows[0].ResetsAt)
-		}
-		if s.Confidence != quota.ConfidenceLow {
-			t.Errorf("%s: Confidence = %s, want LOW", name, s.Confidence)
-		}
+		t.Run(name, func(t *testing.T) {
+			s := Parse([]byte(bodies[name]), now, 0.1)
+			assert.True(t, s.Windows[0].ResetsAt.IsZero(), "want zero")
+			assert.Equal(t, quota.ConfidenceLow, s.Confidence, "want LOW")
+		})
 	}
 }
 
@@ -326,12 +298,9 @@ func TestFetchBoundsItself(t *testing.T) {
 
 	a := &Adapter{URL: srv.URL, Key: config.Secret(key), Timeout: 50 * time.Millisecond}
 	snap, state := a.Fetch(context.Background())
-	if got, _ := snap.State(); got != quota.QuotaUnknown {
-		t.Errorf("quota = %s, want UNKNOWN", got)
-	}
-	if state.Reason() != quota.ReasonTimeout {
-		t.Errorf("health reason = %s, want TIMEOUT", state.Reason())
-	}
+	got, _ := snap.State()
+	assert.Equal(t, quota.QuotaUnknown, got, "want UNKNOWN")
+	assert.Equal(t, quota.ReasonTimeout, state.Reason(), "want TIMEOUT")
 }
 
 // A configuration mistake must not carry the Token Plan key to another origin:
@@ -348,16 +317,18 @@ func TestNewRejectsUnsafeOrigins(t *testing.T) {
 		{"not a URL", "://"},
 	}
 	for _, tc := range bad {
-		if _, err := New(config.Provider{BaseURL: tc.baseURL, APIKey: config.Secret(key)}, 0.1, time.Second); !errors.Is(err, errUnsafeOrigin) {
-			t.Errorf("%s: New() error = %v, want errUnsafeOrigin", tc.name, err)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(config.Provider{BaseURL: tc.baseURL, APIKey: config.Secret(key)}, 0.1, time.Second)
+			assert.ErrorIs(t, err, errUnsafeOrigin)
+		})
 	}
 
 	// Loopback stays available for tests and local interposition.
 	for _, ok := range []string{"http://127.0.0.1:8080/v1", "http://localhost:8080/v1", "http://[::1]:8080/v1"} {
-		if _, err := New(config.Provider{BaseURL: ok}, 0.1, time.Second); err != nil {
-			t.Errorf("%s: New() error = %v, want a loopback origin to be accepted", ok, err)
-		}
+		t.Run(ok, func(t *testing.T) {
+			_, err := New(config.Provider{BaseURL: ok}, 0.1, time.Second)
+			assert.NoError(t, err, "want a loopback origin to be accepted")
+		})
 	}
 }
 
@@ -373,15 +344,11 @@ func TestUnsafeOriginNeverSendsTheKey(t *testing.T) {
 		Timeout: time.Second,
 	}
 	snap, state := a.Fetch(context.Background())
-	if got, reason := snap.State(); got != quota.QuotaUnknown || reason != quota.MalformedResponse {
-		t.Errorf("quota = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
-	}
-	if state.Health != quota.Degraded {
-		t.Errorf("health = %s, want DEGRADED", state.Health)
-	}
-	if n := transport.calls.Load(); n != 0 {
-		t.Errorf("transport was called %d times, want 0: the key must not leave the process", n)
-	}
+	got, reason := snap.State()
+	assert.Equal(t, quota.QuotaUnknown, got, "want UNKNOWN/MALFORMED_RESPONSE")
+	assert.Equal(t, quota.MalformedResponse, reason, "want UNKNOWN/MALFORMED_RESPONSE")
+	assert.Equal(t, quota.Degraded, state.Health, "want DEGRADED")
+	assert.Equal(t, int32(0), transport.calls.Load(), "the key must not leave the process")
 }
 
 // countingTransport records whether any request was attempted at all.
@@ -405,9 +372,9 @@ func TestFetchRejectsOversizedBody(t *testing.T) {
 	// enough on a cold run to trip a tight bound and report the wrong reason.
 	a := &Adapter{URL: srv.URL + path, Key: config.Secret(key), Timeout: 30 * time.Second}
 	snap, _ := a.Fetch(context.Background())
-	if got, reason := snap.State(); got != quota.QuotaUnknown || reason != quota.MalformedResponse {
-		t.Errorf("quota = %s/%s, want UNKNOWN/MALFORMED_RESPONSE", got, reason)
-	}
+	got, reason := snap.State()
+	assert.Equal(t, quota.QuotaUnknown, got, "want UNKNOWN/MALFORMED_RESPONSE")
+	assert.Equal(t, quota.MalformedResponse, reason, "want UNKNOWN/MALFORMED_RESPONSE")
 }
 
 // A slower, older attempt must not overwrite a newer observation, and the older
@@ -417,6 +384,7 @@ func TestSlowerOlderFetchDoesNotRegressCallers(t *testing.T) {
 	started := make(chan struct{}) // the older handler is waiting
 	release := make(chan struct{}) // let the older attempt finish
 	var first atomic.Bool
+	body := fixture(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if first.CompareAndSwap(false, true) {
 			// The older attempt holds its response until the newer one is stored.
@@ -429,7 +397,7 @@ func TestSlowerOlderFetchDoesNotRegressCallers(t *testing.T) {
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(fixture(t))
+		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
@@ -449,43 +417,30 @@ func TestSlowerOlderFetchDoesNotRegressCallers(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("the first request never reached the server")
+		require.Fail(t, "the first request never reached the server")
 	}
 	newer, newerHealth := a.Fetch(context.Background())
 	close(release)
 	got := <-older
 
-	if state, _ := newer.State(); state != quota.Exhausted {
-		t.Fatalf("newer fetch = %s, want EXHAUSTED", state)
-	}
+	state, _ := newer.State()
+	assert.Equal(t, quota.Exhausted, state, "newer fetch, want EXHAUSTED")
 	// The returned value is what a caller routes on, so assert on it, not only on
 	// the retained cache.
-	if state, _ := got.snap.State(); state != quota.Exhausted {
-		t.Fatalf("older fetch returned %s, want the retained newer EXHAUSTED observation", state)
-	}
-	if got.snap.Stale {
-		t.Errorf("older fetch marked the retained newer observation stale, want fresh")
-	}
-	if got.snap.ObservedAt.Before(newer.ObservedAt) {
-		t.Errorf("returned observation is older than the newer fetch, want the newest kept")
-	}
+	state, _ = got.snap.State()
+	assert.Equal(t, quota.Exhausted, state, "older fetch returned, want the retained newer EXHAUSTED observation")
+	assert.False(t, got.snap.Stale, "older fetch marked the retained newer observation stale, want fresh")
+	assert.False(t, got.snap.ObservedAt.Before(newer.ObservedAt), "returned observation is older than the newer fetch, want the newest kept")
 	// Health describes the attempt that just completed, not the retained copy.
-	if got.state.Health != quota.Healthy || got.state.Reason() != quota.ReasonNone {
-		t.Errorf("older fetch health = %s/%s, want HEALTHY: it reached the provider",
-			got.state.Health, got.state.Reason())
-	}
-	if newerHealth.Health != quota.Healthy {
-		t.Errorf("newer fetch health = %s, want HEALTHY", newerHealth.Health)
-	}
+	assert.Equal(t, quota.Healthy, got.state.Health, "older fetch health, want HEALTHY: it reached the provider")
+	assert.Equal(t, quota.ReasonNone, got.state.Reason(), "older fetch health, want HEALTHY: it reached the provider")
+	assert.Equal(t, quota.Healthy, newerHealth.Health, "newer fetch health, want HEALTHY")
 
 	// The fixture is EXHAUSTED (weekly 0%); the older body is LOW_QUOTA (20%).
 	a.mu.Lock()
 	retained := a.lastGood
 	a.mu.Unlock()
-	if state, _ := retained.State(); state != quota.Exhausted {
-		t.Fatalf("retained = %s, want the newer EXHAUSTED observation", state)
-	}
-	if newer.ObservedAt.Before(retained.ObservedAt) {
-		t.Fatalf("retained observation is newer than the latest fetch, want the latest kept")
-	}
+	state, _ = retained.State()
+	assert.Equal(t, quota.Exhausted, state, "retained, want the newer EXHAUSTED observation")
+	assert.False(t, newer.ObservedAt.Before(retained.ObservedAt), "retained observation is newer than the latest fetch, want the latest kept")
 }

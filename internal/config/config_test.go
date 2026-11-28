@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // configEnvKeys is every variable the loader reads, for the empty-value test.
@@ -35,28 +37,16 @@ func TestLoadDefaults(t *testing.T) {
 	cleanEnv(t)
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
+	require.NoError(t, err)
 	want := Default()
-	if cfg.Server != want.Server {
-		t.Fatalf("Server = %+v, want %+v", cfg.Server, want.Server)
-	}
-	if cfg.Polling != want.Polling {
-		t.Fatalf("Polling = %+v, want %+v", cfg.Polling, want.Polling)
-	}
-	if cfg.Routing.LowQuotaThreshold != want.Routing.LowQuotaThreshold || cfg.Routing.ReserveFraction != want.Routing.ReserveFraction || !reflect.DeepEqual(cfg.Routing.Providers, want.Routing.Providers) {
-		t.Fatalf("Routing = %+v, want %+v", cfg.Routing, want.Routing)
-	}
-	if cfg.SQLite != want.SQLite {
-		t.Fatalf("SQLite = %+v, want %+v", cfg.SQLite, want.SQLite)
-	}
-	if cfg.LiteLLM.BaseURL != want.LiteLLM.BaseURL {
-		t.Fatalf("LiteLLM.BaseURL = %q, want %q", cfg.LiteLLM.BaseURL, want.LiteLLM.BaseURL)
-	}
-	if cfg.Observability.Level != "info" {
-		t.Fatalf("Observability.Level = %q, want info", cfg.Observability.Level)
-	}
+	assert.Equal(t, want.Server, cfg.Server)
+	assert.Equal(t, want.Polling, cfg.Polling)
+	assert.Equal(t, want.Routing.LowQuotaThreshold, cfg.Routing.LowQuotaThreshold)
+	assert.Equal(t, want.Routing.ReserveFraction, cfg.Routing.ReserveFraction)
+	assert.Equal(t, want.Routing.Providers, cfg.Routing.Providers)
+	assert.Equal(t, want.SQLite, cfg.SQLite)
+	assert.Equal(t, want.LiteLLM.BaseURL, cfg.LiteLLM.BaseURL)
+	assert.Equal(t, "info", cfg.Observability.Level)
 }
 
 func TestLoadWorksWithoutConfigFile(t *testing.T) {
@@ -64,66 +54,32 @@ func TestLoadWorksWithoutConfigFile(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", "127.0.0.1:9090")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Server.Addr != "127.0.0.1:9090" {
-		t.Fatalf("Server.Addr = %q, want 127.0.0.1:9090", cfg.Server.Addr)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:9090", cfg.Server.Addr)
 }
 
 func TestLoadPrecedenceEnvOverFileOverDefaults(t *testing.T) {
 	cleanEnv(t)
-	path := writeConfig(t, `
-server:
-  addr: "127.0.0.1:7000"
-  read_timeout: 3s
-polling:
-  interval: 45s
-`)
+	path := writeConfig(t, fixture(t, "loading/precedence-env-over-file.yaml"))
 	t.Setenv(ConfigFileEnv, path)
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", "127.0.0.1:9000") // environment wins
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Server.Addr != "127.0.0.1:9000" {
-		t.Fatalf("Server.Addr = %q, want the environment value 127.0.0.1:9000", cfg.Server.Addr)
-	}
-	if cfg.Server.ReadTimeout != 3*time.Second {
-		t.Fatalf("Server.ReadTimeout = %s, want the file value 3s", cfg.Server.ReadTimeout)
-	}
-	if cfg.Polling.Interval != 45*time.Second {
-		t.Fatalf("Polling.Interval = %s, want the file value 45s", cfg.Polling.Interval)
-	}
-	if cfg.Server.WriteTimeout != Default().Server.WriteTimeout {
-		t.Fatalf("Server.WriteTimeout = %s, want the default", cfg.Server.WriteTimeout)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:9000", cfg.Server.Addr, "want the environment value")
+	assert.Equal(t, 3*time.Second, cfg.Server.ReadTimeout, "want the file value 3s")
+	assert.Equal(t, 45*time.Second, cfg.Polling.Interval, "want the file value 45s")
+	assert.Equal(t, Default().Server.WriteTimeout, cfg.Server.WriteTimeout, "want the default")
 }
 
 func TestLoadFileSetsNestedAndMapValues(t *testing.T) {
 	cleanEnv(t)
-	t.Setenv(ConfigFileEnv, writeConfig(t, `
-litellm:
-  base_url: https://litellm.example.com
-  model_aliases:
-    fast: minimax/MiniMax-M2.7
-providers:
-  minimax:
-    base_url: https://api.minimax.io/v1
-`))
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "loading/nested-and-map-values.yaml")))
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got := cfg.LiteLLM.ModelAliases["fast"]; got.Model != "minimax/MiniMax-M2.7" {
-		t.Fatalf("ModelAliases = %v, want the fast alias", cfg.LiteLLM.ModelAliases)
-	}
-	if got := cfg.Providers["minimax"]; got.BaseURL != "https://api.minimax.io/v1" {
-		t.Fatalf("Providers = %v, want minimax from the file", cfg.Providers)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "minimax/MiniMax-M2.7", cfg.LiteLLM.ModelAliases["fast"].Model, "want the fast alias")
+	assert.Equal(t, "https://api.minimax.io/v1", cfg.Providers["minimax"].BaseURL, "want minimax from the file")
 }
 
 func TestLoadRejectsCredentialsInConfigFile(t *testing.T) {
@@ -137,15 +93,10 @@ func TestLoadRejectsCredentialsInConfigFile(t *testing.T) {
 			t.Setenv(ConfigFileEnv, path)
 
 			_, err := Load()
-			if err == nil {
-				t.Fatal("expected a rejection for a credential in the config file")
-			}
-			if !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), path) {
-				t.Fatalf("error %q must name the setting and the file", err)
-			}
-			if strings.Contains(err.Error(), "file-secret") {
-				t.Fatalf("error %q leaked the credential", err)
-			}
+			require.Error(t, err, "expected a rejection for a credential in the config file")
+			assert.ErrorContains(t, err, tt.want, "must name the setting")
+			assert.ErrorContains(t, err, path, "must name the file")
+			assert.NotContains(t, err.Error(), "file-secret", "leaked the credential")
 		})
 	}
 }
@@ -153,19 +104,13 @@ func TestLoadRejectsCredentialsInConfigFile(t *testing.T) {
 func TestSecretFileBeatsConfigFile(t *testing.T) {
 	cleanEnv(t)
 	secretFile := filepath.Join(t.TempDir(), "api-key")
-	if err := os.WriteFile(secretFile, []byte("from-file\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(secretFile, []byte("from-file\n"), 0o600))
 	t.Setenv(ConfigFileEnv, writeConfig(t, "providers:\n  minimax:\n    base_url: https://api.minimax.io/v1"))
 	t.Setenv("QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY_FILE", secretFile)
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Providers["minimax"].APIKey != "from-file" {
-		t.Fatalf("api_key = %q, want the mounted secret", cfg.Providers["minimax"].APIKey)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "from-file", string(cfg.Providers["minimax"].APIKey), "want the mounted secret")
 }
 
 func TestLoadEnvSetsProvider(t *testing.T) {
@@ -174,12 +119,9 @@ func TestLoadEnvSetsProvider(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY", "env-secret")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got := cfg.Providers["minimax"]; got.BaseURL != "https://api.minimax.io/v1" || got.APIKey != "env-secret" {
-		t.Fatalf("Providers = %v, want minimax from the environment", cfg.Providers)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "https://api.minimax.io/v1", cfg.Providers["minimax"].BaseURL, "want minimax from the environment")
+	assert.Equal(t, "env-secret", string(cfg.Providers["minimax"].APIKey), "want minimax from the environment")
 }
 
 func TestLoadEnvSetsModelAlias(t *testing.T) {
@@ -187,12 +129,8 @@ func TestLoadEnvSetsModelAlias(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST", "minimax/MiniMax-M2.7")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got := cfg.LiteLLM.ModelAliases["fast"].Model; got != "minimax/MiniMax-M2.7" {
-		t.Fatalf("ModelAliases = %v, want the fast alias from the environment", cfg.LiteLLM.ModelAliases)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "minimax/MiniMax-M2.7", cfg.LiteLLM.ModelAliases["fast"].Model, "want the fast alias from the environment")
 }
 
 func TestLoadMissingConfigFileFails(t *testing.T) {
@@ -201,12 +139,8 @@ func TestLoadMissingConfigFileFails(t *testing.T) {
 	t.Setenv(ConfigFileEnv, path)
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected an error for an unreadable config file")
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Fatalf("error %q does not name the config file %q", err, path)
-	}
+	require.Error(t, err, "expected an error for an unreadable config file")
+	assert.ErrorContains(t, err, path, "does not name the config file")
 }
 
 func TestLoadInvalidYAMLFails(t *testing.T) {
@@ -215,12 +149,8 @@ func TestLoadInvalidYAMLFails(t *testing.T) {
 	t.Setenv(ConfigFileEnv, path)
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected an error for unparsable YAML")
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Fatalf("error %q does not name the config file %q", err, path)
-	}
+	require.Error(t, err, "expected an error for unparsable YAML")
+	assert.ErrorContains(t, err, path, "does not name the config file")
 }
 
 func TestLoadUnknownSettingFails(t *testing.T) {
@@ -228,12 +158,8 @@ func TestLoadUnknownSettingFails(t *testing.T) {
 	t.Setenv(ConfigFileEnv, writeConfig(t, "server:\n  adr: \"127.0.0.1:7000\"")) // typo
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected an error for an unknown setting")
-	}
-	if !strings.Contains(err.Error(), "adr") {
-		t.Fatalf("error %q does not name the unknown setting", err)
-	}
+	require.Error(t, err, "expected an error for an unknown setting")
+	assert.ErrorContains(t, err, "adr", "does not name the unknown setting")
 }
 
 func TestLoadInvalidDurationFails(t *testing.T) {
@@ -241,12 +167,8 @@ func TestLoadInvalidDurationFails(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__READ_TIMEOUT", "nope")
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected an error")
-	}
-	if !strings.Contains(err.Error(), "read_timeout") {
-		t.Fatalf("error %q does not name the setting", err)
-	}
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "read_timeout", "does not name the setting")
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
@@ -291,12 +213,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 			tt.mutate(t)
 
 			_, err := Load()
-			if err == nil {
-				t.Fatalf("expected a rejection naming %q", tt.want)
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error %q missing %q", err, tt.want)
-			}
+			require.Error(t, err, "expected a rejection naming %q", tt.want)
+			assert.ErrorContains(t, err, tt.want)
 		})
 	}
 }
@@ -307,13 +225,9 @@ func TestLoadReportsMultipleErrors(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_ROUTING__LOW_QUOTA_THRESHOLD", "9")
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected an error")
-	}
+	require.Error(t, err)
 	for _, want := range []string{"read_timeout", "low_quota_threshold"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q missing %q", err, want)
-		}
+		assert.ErrorContains(t, err, want)
 	}
 }
 
@@ -324,12 +238,8 @@ func TestLoadEmptyValuesUseDefaults(t *testing.T) {
 	}
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v, want defaults for empty variables", err)
-	}
-	if cfg.Server != Default().Server {
-		t.Fatalf("Server = %+v, want the defaults", cfg.Server)
-	}
+	require.NoError(t, err, "want defaults for empty variables")
+	assert.Equal(t, Default().Server, cfg.Server)
 }
 
 func TestSecretRedaction(t *testing.T) {
@@ -343,52 +253,34 @@ func TestSecretRedaction(t *testing.T) {
 		"GoString()":    s.GoString(),
 		"formatted cfg": fmt.Sprintf("%+v", Config{Auth: Auth{Token: s}}),
 	} {
-		if strings.Contains(got, "sk-live") {
-			t.Fatalf("%s = %q, leaked the secret", name, got)
-		}
+		assert.NotContains(t, got, "sk-live", "%s leaked the secret", name)
 	}
 
 	var buf strings.Builder
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("loaded", "token", s, "cfg", Config{Auth: Auth{Token: s}})
-	if strings.Contains(buf.String(), "sk-live") {
-		t.Fatalf("slog output leaked the secret: %s", buf.String())
-	}
+	assert.NotContains(t, buf.String(), "sk-live", "slog output leaked the secret")
 
 	// main.go logs through JSONHandler, which marshals a Secret as JSON text.
 	buf.Reset()
 	slog.New(slog.NewJSONHandler(&buf, nil)).Info("loaded", "token", s, "cfg", Config{Auth: Auth{Token: s}})
-	if strings.Contains(buf.String(), "sk-live") {
-		t.Fatalf("JSON log output leaked the secret: %s", buf.String())
-	}
+	assert.NotContains(t, buf.String(), "sk-live", "JSON log output leaked the secret")
 	encoded, err := json.Marshal(Config{Auth: Auth{Token: s}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), "sk-live") {
-		t.Fatalf("json.Marshal leaked the secret: %s", encoded)
-	}
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "sk-live", "json.Marshal leaked the secret")
 }
 
 func TestLoadSecretsFromEnvironmentAndFiles(t *testing.T) {
 	cleanEnv(t)
 	secretFile := filepath.Join(t.TempDir(), "api-key")
-	if err := os.WriteFile(secretFile, []byte("file-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(secretFile, []byte("file-token\n"), 0o600))
 	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN", "env-token")
 	t.Setenv("QUOTA_ROUTER_PROVIDERS__MINIMAX__BASE_URL", "https://api.minimax.io/v1")
 	t.Setenv("QUOTA_ROUTER_PROVIDERS__MINIMAX__API_KEY_FILE", secretFile)
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Auth.Token != "env-token" {
-		t.Fatal("Auth.Token was not read from the environment")
-	}
-	if cfg.Providers["minimax"].APIKey != "file-token" {
-		t.Fatalf("provider api_key = %q, want the trimmed file contents", cfg.Providers["minimax"].APIKey)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "env-token", string(cfg.Auth.Token), "Auth.Token was not read from the environment")
+	assert.Equal(t, "file-token", string(cfg.Providers["minimax"].APIKey), "want the trimmed file contents")
 }
 
 func TestLegacyFlatEnvNamesStillWork(t *testing.T) {
@@ -411,12 +303,8 @@ func TestLegacyFlatEnvNamesStillWork(t *testing.T) {
 			t.Setenv(tt.legacy, tt.value)
 
 			cfg, err := Load()
-			if err != nil {
-				t.Fatalf("Load() error = %v, want the deprecated flat name to keep working", err)
-			}
-			if got := tt.got(cfg); got != tt.want {
-				t.Fatalf("%s = %v, want %v from the deprecated alias", tt.legacy, got, tt.want)
-			}
+			require.NoError(t, err, "want the deprecated flat name to keep working")
+			assert.Equal(t, tt.want, tt.got(cfg), "%s from the deprecated alias", tt.legacy)
 		})
 	}
 }
@@ -427,12 +315,8 @@ func TestNestedNameBeatsLegacyFlatName(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", "127.0.0.1:7002")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Server.Addr != "127.0.0.1:7002" {
-		t.Fatalf("Server.Addr = %q, want the current name to win over the alias", cfg.Server.Addr)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:7002", cfg.Server.Addr, "want the current name to win over the alias")
 }
 
 func TestEmptyEnvFallsThroughToFile(t *testing.T) {
@@ -441,12 +325,8 @@ func TestEmptyEnvFallsThroughToFile(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SERVER__ADDR", "") // empty is unset, not an override
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Server.Addr != "127.0.0.1:7000" {
-		t.Fatalf("Server.Addr = %q, want the file value", cfg.Server.Addr)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:7000", cfg.Server.Addr, "want the file value")
 }
 
 func TestEnvSecretMakesUnreadableSecretFileIrrelevant(t *testing.T) {
@@ -454,27 +334,20 @@ func TestEnvSecretMakesUnreadableSecretFileIrrelevant(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN", "env-token")
 	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN_FILE", filepath.Join(t.TempDir(), "absent"))
 
-	if _, err := Load(); err != nil {
-		t.Fatalf("Load() error = %v, want the configured value to win over the missing file", err)
-	}
+	_, err := Load()
+	require.NoError(t, err, "want the configured value to win over the missing file")
 }
 
 func TestEnvSecretBeatsSecretFile(t *testing.T) {
 	cleanEnv(t)
 	path := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(path, []byte("file-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte("file-token\n"), 0o600))
 	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN", "env-token")
 	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN_FILE", path)
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Auth.Token != "env-token" {
-		t.Fatal("the explicit environment value must win over its _FILE counterpart")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "env-token", string(cfg.Auth.Token), "the explicit environment value must win over its _FILE counterpart")
 }
 
 func TestLoadMissingSecretFileFails(t *testing.T) {
@@ -483,12 +356,8 @@ func TestLoadMissingSecretFileFails(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_AUTH__TOKEN_FILE", path)
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected an error for an unreadable secret file")
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Fatalf("error %q does not name the secret file", err)
-	}
+	require.Error(t, err, "expected an error for an unreadable secret file")
+	assert.ErrorContains(t, err, path, "does not name the secret file")
 }
 
 func TestSecretFileRejectsNonSecretSetting(t *testing.T) {
@@ -497,12 +366,8 @@ func TestSecretFileRejectsNonSecretSetting(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_SQLITE__PATH_FILE", "/etc/passwd")
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("expected a rejection for a _FILE variable naming a non-secret setting")
-	}
-	if !strings.Contains(err.Error(), "not a secret setting") {
-		t.Fatalf("error %q does not explain the rejection", err)
-	}
+	require.Error(t, err, "expected a rejection for a _FILE variable naming a non-secret setting")
+	assert.ErrorContains(t, err, "not a secret setting", "does not explain the rejection")
 }
 
 func TestValidationURLErrorHidesCredentials(t *testing.T) {
@@ -510,25 +375,15 @@ func TestValidationURLErrorHidesCredentials(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_LITELLM__BASE_URL", "http://user:hunter2@example.com")
 
 	_, err := Load()
-	if err == nil {
-		t.Fatal("a URL with userinfo must be rejected, not accepted and later logged")
-	}
-	if !strings.Contains(err.Error(), "must not embed credentials") {
-		t.Fatalf("error %q does not explain the URL rule", err)
-	}
-	if strings.Contains(err.Error(), "hunter2") {
-		t.Fatalf("error %q leaked a URL credential", err)
-	}
+	require.Error(t, err, "a URL with userinfo must be rejected, not accepted and later logged")
+	assert.ErrorContains(t, err, "must not embed credentials", "does not explain the URL rule")
+	assert.NotContains(t, err.Error(), "hunter2", "leaked a URL credential")
 
 	cleanEnv(t)
 	t.Setenv("QUOTA_ROUTER_LITELLM__BASE_URL", "user:hunter2@example.com/relative")
 	_, err = Load()
-	if err == nil {
-		t.Fatal("expected a rejection")
-	}
-	if strings.Contains(err.Error(), "hunter2") {
-		t.Fatalf("error %q leaked a URL credential", err)
-	}
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "hunter2", "leaked a URL credential")
 }
 
 // setEnv sets one variable and returns a mutator for the table test above.
@@ -541,9 +396,8 @@ func TestExampleConfigLoads(t *testing.T) {
 	cleanEnv(t)
 	t.Setenv(ConfigFileEnv, "../../config.example.yaml")
 
-	if _, err := Load(); err != nil {
-		t.Fatalf("the shipped config.example.yaml must load: %v", err)
-	}
+	_, err := Load()
+	require.NoError(t, err, "the shipped config.example.yaml must load")
 }
 
 func writeConfig(t *testing.T, body string) string {

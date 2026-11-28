@@ -11,6 +11,8 @@ import (
 
 	"github.com/gazon1/quota-router/internal/quota"
 	"github.com/gazon1/quota-router/internal/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -158,32 +160,32 @@ func TestProviderIsolation(t *testing.T) {
 
 	// Polls of the healthy provider keep landing while the other is still in its
 	// first attempt.
+	var offending string
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		polls := rec.snapshots()
 		if len(polls) >= 3 {
 			for _, s := range polls {
 				if s.Provider != "fast" {
-					close(release)
-					cancel()
-					<-done
-					t.Fatalf("persisted %q while that provider was stuck", s.Provider)
+					offending = s.Provider
+					break
 				}
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			close(release)
-			cancel()
-			<-done
-			t.Fatalf("healthy provider persisted %d polls while another was stuck, want 3+", len(polls))
+			break
 		}
 		time.Sleep(time.Millisecond)
 	}
+	polls := len(rec.snapshots())
 
 	close(release)
 	cancel()
 	<-done
+
+	assert.Empty(t, offending, "persisted %q while that provider was stuck", offending)
+	assert.True(t, polls >= 3, "healthy provider persisted %d polls while another was stuck, want 3+", polls)
 }
 
 // A cancelled context stops the poller without leaking a goroutine that would
@@ -213,11 +215,9 @@ func TestStopsOnCancellation(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after cancellation: goroutine leaked")
+		require.Fail(t, "Run did not return after cancellation: goroutine leaked")
 	}
-	if n := len(rec.snapshots()); n != 0 {
-		t.Fatalf("persisted %d snapshots for a cancelled attempt, want 0", n)
-	}
+	assert.Empty(t, rec.snapshots(), "persisted %d snapshots for a cancelled attempt, want 0", len(rec.snapshots()))
 }
 
 // A transient failure is retried within the poll; the attempt count is capped.
@@ -231,17 +231,11 @@ func TestTransientFailureIsRetriedAndCapped(t *testing.T) {
 	defer cancel()
 	p.poll(ctx, p.Targets[0])
 
-	if got := src.callCount(); got != defaultAttempts {
-		t.Fatalf("attempts = %d, want the cap of %d", got, defaultAttempts)
-	}
+	assert.Equal(t, defaultAttempts, src.callCount(), "attempts, want the cap")
 	// Each attempt is persisted, so last-attempt tracks the retries.
-	if got := len(rec.snapshots()); got != defaultAttempts {
-		t.Fatalf("persisted %d snapshots, want one per attempt (%d)", got, defaultAttempts)
-	}
+	assert.Len(t, rec.snapshots(), defaultAttempts, "one persisted snapshot per attempt")
 	// No attempt succeeded, so no success time was recorded at all.
-	if got := rec.successAt("minimax"); !got.IsZero() {
-		t.Fatalf("last success = %s, want none after only failures", got)
-	}
+	assert.True(t, rec.successAt("minimax").IsZero(), "no success time after only failures")
 }
 
 // A permanent failure is not retried: a rejected credential answers the same way.
@@ -263,9 +257,7 @@ func TestPermanentFailureIsNotRetried(t *testing.T) {
 			p := newTestPoller(rec, Target{Name: "minimax", Source: src})
 
 			p.poll(context.Background(), p.Targets[0])
-			if got := src.callCount(); got != 1 {
-				t.Fatalf("attempts = %d, want 1: a permanent failure is not retried", got)
-			}
+			assert.Equal(t, 1, src.callCount(), "a permanent failure is not retried")
 		})
 	}
 }
@@ -287,17 +279,11 @@ func TestAttemptAndSuccessTimestampsAreIndependent(t *testing.T) {
 	src.mu.Unlock()
 
 	p.poll(context.Background(), p.Targets[0])
-	if got := rec.successAt("minimax"); !got.Equal(succeededAt) {
-		t.Fatalf("last success = %s, want the observation time %s", got, succeededAt)
-	}
+	assert.WithinDuration(t, succeededAt, rec.successAt("minimax"), 0, "last success is the observation time")
 
 	p.poll(context.Background(), p.Targets[0]) // fails
-	if got := rec.successAt("minimax"); !got.Equal(succeededAt) {
-		t.Fatalf("a failure overwrote last success: %s, want %s", got, succeededAt)
-	}
-	if got := rec.attempts["minimax"]; !got.After(succeededAt) {
-		t.Fatalf("last attempt = %s, want the failure's own later time", got)
-	}
+	assert.WithinDuration(t, succeededAt, rec.successAt("minimax"), 0, "a failure overwrote last success")
+	assert.True(t, rec.attempts["minimax"].After(succeededAt), "last attempt is the failure's own later time")
 }
 
 // A successful poll writes the state the provider reported, never AVAILABLE by
@@ -313,12 +299,8 @@ func TestSuccessDoesNotImplyAvailable(t *testing.T) {
 	p.poll(context.Background(), p.Targets[0])
 
 	snaps := rec.snapshots()
-	if len(snaps) != 1 {
-		t.Fatalf("persisted %d snapshots, want 1", len(snaps))
-	}
-	if snaps[0].State != store.QuotaExhausted {
-		t.Fatalf("state = %s, want EXHAUSTED from the reported window", snaps[0].State)
-	}
+	require.Len(t, snaps, 1)
+	assert.Equal(t, store.QuotaExhausted, snaps[0].State, "from the reported window")
 
 	// A healthy provider whose body established no quota is UNKNOWN, not AVAILABLE.
 	rec = newRecorder()
@@ -328,12 +310,10 @@ func TestSuccessDoesNotImplyAvailable(t *testing.T) {
 	p.Attempts = 1
 	p.poll(context.Background(), p.Targets[0])
 	snaps = rec.snapshots()
-	if len(snaps) != 1 || snaps[0].State != store.QuotaUnknown {
-		t.Fatalf("state = %+v, want UNKNOWN for a body with no usable quota", snaps)
-	}
-	if snaps[0].UnknownReason == nil || *snaps[0].UnknownReason != store.ReasonMalformed {
-		t.Fatalf("unknown_reason = %v, want malformed", snaps[0].UnknownReason)
-	}
+	require.Len(t, snaps, 1)
+	assert.Equal(t, store.QuotaUnknown, snaps[0].State, "for a body with no usable quota")
+	require.NotNil(t, snaps[0].UnknownReason)
+	assert.Equal(t, store.ReasonMalformed, *snaps[0].UnknownReason)
 }
 
 // An observation past its freshness bound is persisted as UNKNOWN, with its
@@ -350,18 +330,11 @@ func TestStaleTransitionIsPersistedAsUnknown(t *testing.T) {
 	p.poll(context.Background(), p.Targets[0])
 
 	snaps := rec.snapshots()
-	if len(snaps) != 1 {
-		t.Fatalf("persisted %d snapshots, want 1", len(snaps))
-	}
-	if snaps[0].State != store.QuotaUnknown {
-		t.Fatalf("state = %s, want UNKNOWN for an observation past its freshness bound", snaps[0].State)
-	}
-	if snaps[0].UnknownReason == nil || *snaps[0].UnknownReason != store.ReasonStale {
-		t.Fatalf("unknown_reason = %v, want stale", snaps[0].UnknownReason)
-	}
-	if len(snaps[0].Windows) != 1 {
-		t.Fatalf("windows = %d, want the stale values kept for diagnostics", len(snaps[0].Windows))
-	}
+	require.Len(t, snaps, 1)
+	assert.Equal(t, store.QuotaUnknown, snaps[0].State, "for an observation past its freshness bound")
+	require.NotNil(t, snaps[0].UnknownReason)
+	assert.Equal(t, store.ReasonStale, *snaps[0].UnknownReason)
+	assert.Len(t, snaps[0].Windows, 1, "the stale values are kept for diagnostics")
 }
 
 // A poll slower than the interval must not overlap the next one: one poll at a
@@ -394,12 +367,8 @@ func TestNoOverlappingPolls(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if peak != 1 {
-		t.Fatalf("peak concurrent polls = %d, want 1: polls for one provider overlapped", peak)
-	}
-	if len(rec.snapshots()) < 2 {
-		t.Fatalf("persisted %d polls, want several to make the assertion meaningful", len(rec.snapshots()))
-	}
+	assert.Equal(t, 1, peak, "polls for one provider overlapped")
+	assert.True(t, len(rec.snapshots()) >= 2, "persisted %d polls, want several to make the assertion meaningful", len(rec.snapshots()))
 }
 
 // After an outage the loop resumes with one poll per tick, not a burst of
@@ -427,44 +396,50 @@ func TestRecoveryDoesNotBurst(t *testing.T) {
 
 	// The failed attempt is persisted, then the loop waits the interval before
 	// the single recovery poll.
+	timedOut := false
 	deadline := time.Now().Add(2 * time.Second)
 	for len(rec.snapshots()) == 0 {
 		if time.Now().After(deadline) {
-			t.Fatal("outage attempt was not persisted")
+			timedOut = true
+			break
 		}
 		time.Sleep(time.Millisecond)
 	}
+	require.False(t, timedOut, "outage attempt was not persisted")
 
 	// Recovery starts one poll after the full interval: no burst of catch-up
 	// polls for the ticks the outage used up.
+	timedOut = false
 	deadline = time.Now().Add(2 * time.Second)
 	for len(rec.snapshots()) < 2 {
 		if time.Now().After(deadline) {
-			t.Fatal("recovery did not resume with a single poll after the interval")
+			timedOut = true
+			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if elapsed := time.Now().UTC().Sub(failedAt); elapsed < p.Interval {
-		t.Fatalf("recovery started %s after the failed attempt, want >= the interval of %s", elapsed, p.Interval)
-	}
+	require.False(t, timedOut, "recovery did not resume with a single poll after the interval")
+	elapsed := time.Now().UTC().Sub(failedAt)
+	assert.True(t, elapsed >= p.Interval, "recovery started %s after the failed attempt, want >= the interval of %s", elapsed, p.Interval)
 
 	// The normal cadence continues after the recovery.
+	timedOut = false
 	deadline = time.Now().Add(2 * time.Second)
 	for len(rec.snapshots()) < 3 {
 		if time.Now().After(deadline) {
-			t.Fatal("polling did not resume its normal cadence after the recovery")
+			timedOut = true
+			break
 		}
 		time.Sleep(time.Millisecond)
 	}
+	require.False(t, timedOut, "polling did not resume its normal cadence after the recovery")
 
 	cancel()
 	<-done
 
 	// Outage, one recovery poll, then the next normal cadence: exactly one poll
 	// per interval, and the missed ticks were not replayed.
-	if got := len(rec.snapshots()); got != 3 {
-		t.Fatalf("persisted %d polls, want 3: one per cadence, no catch-up burst", got)
-	}
+	assert.Len(t, rec.snapshots(), 3, "one per cadence, no catch-up burst")
 }
 
 // The retry delay is exponential, capped, and jittered within the upper half.
@@ -477,17 +452,14 @@ func TestBackoffIsBoundedAndJittered(t *testing.T) {
 		n    int
 		want time.Duration
 	}{{1, 100 * time.Millisecond}, {2, 200 * time.Millisecond}, {3, 400 * time.Millisecond}, {4, 400 * time.Millisecond}, {9, 400 * time.Millisecond}} {
-		if got := p.delay(tc.n); got != tc.want {
-			t.Errorf("delay(%d) = %s, want %s", tc.n, got, tc.want)
-		}
+		assert.Equal(t, tc.want, p.delay(tc.n), "delay(%d)", tc.n)
 	}
 
 	// Jitter never exceeds the delay and stays in the documented range.
 	for i := 0; i < 200; i++ {
 		got := spread(400 * time.Millisecond)
-		if got < 200*time.Millisecond || got > 400*time.Millisecond {
-			t.Fatalf("spread(400ms) = %s, want [200ms, 400ms]", got)
-		}
+		assert.True(t, got >= 200*time.Millisecond && got <= 400*time.Millisecond,
+			"spread(400ms) = %s, want [200ms, 400ms]", got)
 	}
 }
 
@@ -495,14 +467,10 @@ func TestBackoffIsBoundedAndJittered(t *testing.T) {
 func TestZeroBaseDelayDoesNotSpin(t *testing.T) {
 	p := New(time.Minute, time.Hour, testLog(), newRecorder())
 	p.BaseDelay, p.MaxDelay = 0, 0
-	if got := p.delay(3); got != 0 {
-		t.Fatalf("delay = %s, want 0", got)
-	}
+	assert.Equal(t, time.Duration(0), p.delay(3))
 	// wait(0) with a live context returns immediately, which the loop tolerates
 	// because the attempt count is still capped.
-	if !sleep(context.Background(), 0) {
-		t.Fatal("sleep(0) with a live context returned false")
-	}
+	assert.True(t, sleep(context.Background(), 0), "sleep(0) with a live context returned false")
 }
 
 // SourceFunc adapts a function to Source, so a test needs no adapter type.
@@ -515,13 +483,9 @@ func (f SourceFunc) Fetch(ctx context.Context) (quota.Snapshot, quota.ProviderSt
 // production, where it is logged and the observation is lost.
 func TestOutcomesSurviveStoreValidation(t *testing.T) {
 	st, err := store.Open(store.Config{Path: filepath.Join(t.TempDir(), "test.db"), BusyTimeout: 5 * time.Second}, testLog())
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	require.NoError(t, err, "Open")
 	defer st.Close()
-	if err := st.Migrate(context.Background()); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	require.NoError(t, st.Migrate(context.Background()), "Migrate")
 
 	cases := map[string]answer{
 		"success":   {snap: quota.Observed("minimax", "test", time.Now().UTC(), windows(80), 0.1), state: healthy()},
@@ -551,19 +515,11 @@ func TestOutcomesSurviveStoreValidation(t *testing.T) {
 			p.StaleAfter = time.Minute
 
 			snapshot := observation("minimax", a.snap, p.StaleAfter, time.Now())
-			if err := snapshot.Validate(); err != nil {
-				t.Fatalf("quota snapshot does not validate: %v", err)
-			}
-			if err := health("minimax", a.state).Validate(); err != nil {
-				t.Fatalf("health record does not validate: %v", err)
-			}
+			require.NoError(t, snapshot.Validate(), "quota snapshot does not validate")
+			require.NoError(t, health("minimax", a.state).Validate(), "health record does not validate")
 			// And the store accepts it, constraints included.
-			if err := st.SaveQuotaSnapshot(context.Background(), snapshot); err != nil {
-				t.Fatalf("SaveQuotaSnapshot: %v", err)
-			}
-			if err := st.SaveProviderHealth(context.Background(), health("minimax", a.state)); err != nil {
-				t.Fatalf("SaveProviderHealth: %v", err)
-			}
+			require.NoError(t, st.SaveQuotaSnapshot(context.Background(), snapshot), "SaveQuotaSnapshot")
+			require.NoError(t, st.SaveProviderHealth(context.Background(), health("minimax", a.state)), "SaveProviderHealth")
 		})
 	}
 }

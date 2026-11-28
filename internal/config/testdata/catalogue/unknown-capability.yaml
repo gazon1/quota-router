@@ -1,0 +1,6 @@
+litellm:
+  model_aliases:
+    fast:
+      model: minimax/MiniMax-M2.7
+      capabilities:
+        streaming: maybe

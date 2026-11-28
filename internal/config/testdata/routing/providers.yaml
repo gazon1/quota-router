@@ -1,0 +1,15 @@
+litellm:
+  model_aliases:
+    fast: minimax/MiniMax-M2.7
+    coding:
+      model: commandcode/stealth/glyph-cluster:free
+routing:
+  providers:
+    commandcode:
+      priority: 1
+      models:
+        coding: 1
+    minimax:
+      priority: 2
+      models:
+        fast: 1

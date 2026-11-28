@@ -1,0 +1,4 @@
+litellm:
+  model_aliases:
+    a/b:
+      model: minimax/MiniMax-M2.7

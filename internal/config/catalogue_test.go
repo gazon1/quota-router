@@ -3,12 +3,12 @@ package config
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // catalogue builds a Config with one entry per alias, bypassing the loader so a
@@ -45,67 +45,27 @@ func TestCandidatesFiltersCapabilitiesAndDisabled(t *testing.T) {
 		{"no match", Requirements{Tasks: []string{"translation"}}, []string{}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := cfg.Catalogue().Candidates(tt.req); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("Candidates(%+v) = %v, want %v", tt.req, got, tt.want)
-			}
+			assert.Equal(t, tt.want, cfg.Catalogue().Candidates(tt.req), "Candidates(%+v)", tt.req)
 		})
 	}
 }
 
 func TestLoadRejectsInvalidCatalogue(t *testing.T) {
-	for _, tt := range []struct{ name, body, want string }{
-		{"alias with a slash", `
-litellm:
-  model_aliases:
-    a/b:
-      model: minimax/MiniMax-M2.7
-`, "litellm.model_aliases.a/b must not contain a slash"},
-		{"model without a provider", `
-litellm:
-  model_aliases:
-    fast:
-      model: nope
-`, "litellm.model_aliases.fast.model must be <provider>/<model>"},
-		{"empty model name", `
-litellm:
-  model_aliases:
-    fast:
-      model: minimax/
-`, "litellm.model_aliases.fast.model must be <provider>/<model>"},
-		{"negative context limit", `
-litellm:
-  model_aliases:
-    fast:
-      model: minimax/MiniMax-M2.7
-      context_limit: -1
-`, "litellm.model_aliases.fast.context_limit must be >= 0"},
-		{"unknown capability", `
-litellm:
-  model_aliases:
-    fast:
-      model: minimax/MiniMax-M2.7
-      capabilities:
-        streaming: maybe
-`, "litellm.model_aliases.fast.capabilities.streaming"},
-		{"empty task class", `
-litellm:
-  model_aliases:
-    fast:
-      model: minimax/MiniMax-M2.7
-      tasks: [" "]
-`, "litellm.model_aliases.fast.tasks must not contain an empty task class"},
+	for _, tt := range []struct{ name, fixture, want string }{
+		{"alias with a slash", "catalogue/alias-with-slash.yaml", "litellm.model_aliases.a/b must not contain a slash"},
+		{"model without a provider", "catalogue/model-without-provider.yaml", "litellm.model_aliases.fast.model must be <provider>/<model>"},
+		{"empty model name", "catalogue/empty-model-name.yaml", "litellm.model_aliases.fast.model must be <provider>/<model>"},
+		{"negative context limit", "catalogue/negative-context-limit.yaml", "litellm.model_aliases.fast.context_limit must be >= 0"},
+		{"unknown capability", "catalogue/unknown-capability.yaml", "litellm.model_aliases.fast.capabilities.streaming"},
+		{"empty task class", "catalogue/empty-task-class.yaml", "litellm.model_aliases.fast.tasks must not contain an empty task class"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cleanEnv(t)
-			t.Setenv(ConfigFileEnv, writeConfig(t, tt.body))
+			t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, tt.fixture)))
 
 			_, err := Load()
-			if err == nil {
-				t.Fatalf("expected a rejection naming %q", tt.want)
-			}
-			if !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error %q missing %q", err, tt.want)
-			}
+			require.Error(t, err, "expected a rejection naming %q", tt.want)
+			assert.ErrorContains(t, err, tt.want)
 		})
 	}
 }
@@ -114,32 +74,15 @@ litellm:
 // same id under two aliases: legal, and each alias must stay its own entry.
 func TestLoadAcceptsFullCatalogueEntry(t *testing.T) {
 	cleanEnv(t)
-	t.Setenv(ConfigFileEnv, writeConfig(t, `
-litellm:
-  base_url: http://127.0.0.1:4000
-  model_aliases:
-    fast: minimax/MiniMax-M2.7
-    coding:
-      model: commandcode/stealth/glyph-cluster:free
-      enabled: false
-      context_limit: 256000
-      capabilities:
-        streaming: supported
-        tool_calling: supported
-        structured_output: unsupported
-      tasks: [coding]
-    coding2:
-      model: commandcode/stealth/glyph-cluster:free
-`))
+	t.Setenv(ConfigFileEnv, writeConfig(t, fixture(t, "catalogue/full-entry.yaml")))
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
+	require.NoError(t, err)
 	// The short form still loads, so an existing file did not break.
-	if got := cfg.Catalogue().ModelAliases["fast"]; got.Model != "minimax/MiniMax-M2.7" || !got.IsEnabled() || got.ContextLimit != 0 {
-		t.Fatalf("fast = %+v, want the model and nothing claimed", got)
-	}
+	fast := cfg.Catalogue().ModelAliases["fast"]
+	assert.Equal(t, "minimax/MiniMax-M2.7", fast.Model)
+	assert.True(t, fast.IsEnabled())
+	assert.Equal(t, 0, fast.ContextLimit)
 	want := Model{
 		Model:        "commandcode/stealth/glyph-cluster:free",
 		Enabled:      ptr(false),
@@ -151,12 +94,8 @@ litellm:
 		},
 		Tasks: []string{"coding"},
 	}
-	if got := cfg.LiteLLM.ModelAliases["coding"]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("coding = %+v, want %+v", got, want)
-	}
-	if got := cfg.Catalogue().Candidates(Requirements{}); !reflect.DeepEqual(got, []string{"coding2", "fast"}) {
-		t.Fatalf("Candidates = %v, want the enabled aliases only, disabled coding excluded", got)
-	}
+	assert.Equal(t, want, cfg.LiteLLM.ModelAliases["coding"])
+	assert.Equal(t, []string{"coding2", "fast"}, cfg.Catalogue().Candidates(Requirements{}), "want the enabled aliases only, disabled coding excluded")
 }
 
 func TestVerifyCatalogue(t *testing.T) {
@@ -176,12 +115,8 @@ func TestVerifyCatalogue(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/v1/models" {
-					t.Errorf("path = %q, want /v1/models", r.URL.Path)
-				}
-				if got := r.Header.Get("Authorization"); got != "Bearer master-key" {
-					t.Errorf("Authorization = %q, want the configured master key", got)
-				}
+				assert.Equal(t, "/v1/models", r.URL.Path)
+				assert.Equal(t, "Bearer master-key", r.Header.Get("Authorization"))
 				w.WriteHeader(tt.status)
 				_, _ = w.Write([]byte(tt.body))
 			}))
@@ -193,24 +128,17 @@ func TestVerifyCatalogue(t *testing.T) {
 
 			err := cfg.VerifyCatalogue(context.Background(), srv.Client())
 			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("error = %v, want %v", err, tt.wantErr)
-				}
+				assert.ErrorIs(t, err, tt.wantErr)
 				return
 			}
 			if tt.want == "" {
-				if err != nil {
-					t.Fatalf("error = %v, want a passing check", err)
-				}
+				require.NoError(t, err, "want a passing check")
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("error = %v, want it to name %q", err, tt.want)
-			}
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.want)
 			// A mismatch is a configuration fault, not a transient outage.
-			if errors.Is(err, ErrCatalogueUnavailable) {
-				t.Fatalf("error = %v, but a mismatch must not read as unavailable", err)
-			}
+			assert.NotErrorIs(t, err, ErrCatalogueUnavailable, "a mismatch must not read as unavailable")
 		})
 	}
 }
@@ -229,20 +157,14 @@ func TestVerifyCatalogueKeepsBasePath(t *testing.T) {
 	cfg.LiteLLM.BaseURL = srv.URL + "/litellm"
 	cfg.LiteLLM.APIKey = Secret("master-key")
 
-	if err := cfg.VerifyCatalogue(context.Background(), srv.Client()); err != nil {
-		t.Fatalf("error = %v, want the check to pass", err)
-	}
-	if gotPath != "/litellm/v1/models" {
-		t.Fatalf("path = %q, want the base path kept with the endpoint appended", gotPath)
-	}
+	require.NoError(t, cfg.VerifyCatalogue(context.Background(), srv.Client()), "want the check to pass")
+	assert.Equal(t, "/litellm/v1/models", gotPath, "want the base path kept with the endpoint appended")
 }
 
 func TestVerifyCatalogueSkippedWithoutKey(t *testing.T) {
 	cfg := catalogue(map[string]Model{"fast": {Model: "minimax/MiniMax-M2.7"}})
 	// No key, no server, no request: the proxy needs its master key for the list.
-	if err := cfg.VerifyCatalogue(context.Background(), nil); err != nil {
-		t.Fatalf("error = %v, want the check skipped when litellm.api_key is unset", err)
-	}
+	require.NoError(t, cfg.VerifyCatalogue(context.Background(), nil), "want the check skipped when litellm.api_key is unset")
 }
 
 // The catalogue must not leak the proxy master key through an error string.
@@ -260,12 +182,8 @@ func TestVerifyCatalogueErrorHidesKey(t *testing.T) {
 	cfg.LiteLLM.APIKey = Secret("sk-secret-master")
 
 	err := cfg.VerifyCatalogue(context.Background(), srv.Client())
-	if err == nil {
-		t.Fatal("expected an error for a 500")
-	}
-	if strings.Contains(err.Error(), "sk-secret-master") {
-		t.Fatalf("error %q leaked the master key", err)
-	}
+	require.Error(t, err, "expected an error for a 500")
+	assert.NotContains(t, err.Error(), "sk-secret-master", "leaked the master key")
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -281,9 +199,7 @@ func TestLoadEnvSetsCatalogueFields(t *testing.T) {
 	t.Setenv("QUOTA_ROUTER_LITELLM__MODEL_ALIASES__FAST__TASKS", "coding,reasoning")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
+	require.NoError(t, err)
 	want := Model{
 		Model:        "minimax/MiniMax-M2.7",
 		Enabled:      ptr(false),
@@ -291,7 +207,5 @@ func TestLoadEnvSetsCatalogueFields(t *testing.T) {
 		Capabilities: Capabilities{ToolCalling: CapabilitySupported},
 		Tasks:        []string{"coding", "reasoning"},
 	}
-	if got := cfg.LiteLLM.ModelAliases["fast"]; !reflect.DeepEqual(got, want) {
-		t.Fatalf("fast = %+v, want %+v", got, want)
-	}
+	assert.Equal(t, want, cfg.LiteLLM.ModelAliases["fast"])
 }

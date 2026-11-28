@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -14,61 +16,50 @@ import (
 // dependency and this is not worth adding one for.
 func TestComposeContract(t *testing.T) {
 	raw, err := os.ReadFile("compose.yaml")
-	if err != nil {
-		t.Fatalf("read compose.yaml: %v", err)
-	}
+	require.NoError(t, err, "read compose.yaml")
 	doc := string(raw)
 	services, ok := serviceBlocks(stripComments(doc))
-	if !ok {
-		t.Fatal("compose.yaml: no top-level services: mapping")
-	}
+	require.True(t, ok, "compose.yaml: no top-level services: mapping")
 
 	for _, name := range []string{"quota-controller", "litellm"} {
-		if _, ok := services[name]; !ok {
-			t.Fatalf("compose.yaml: service %q missing", name)
-		}
+		assert.Contains(t, services, name, "compose.yaml: service %q missing", name)
 	}
 	// Values are asserted, not just field presence: issue #6 names 128 MiB for
 	// the controller, so a silent raise or drop must fail the build.
 	for _, c := range []struct {
-		what string
-		ok   bool
+		what   string
+		block  string
+		needle string
 	}{
-		{"controller restart policy", strings.Contains(services["quota-controller"], "restart: unless-stopped")},
-		{"controller 128m memory limit", strings.Contains(services["quota-controller"], "mem_limit: 128m")},
-		{"controller cpu limit", strings.Contains(services["quota-controller"], "cpus:")},
-		{"controller health probes /health", strings.Contains(services["quota-controller"], "127.0.0.1:8080/health")},
-		{"litellm restart policy", strings.Contains(services["litellm"], "restart: unless-stopped")},
-		{"litellm memory limit", strings.Contains(services["litellm"], "mem_limit:")},
-		{"litellm cpu limit", strings.Contains(services["litellm"], "cpus:")},
-		{"litellm health probes liveliness", strings.Contains(services["litellm"], "127.0.0.1:4000/health/liveliness")},
+		{"controller restart policy", services["quota-controller"], "restart: unless-stopped"},
+		{"controller 128m memory limit", services["quota-controller"], "mem_limit: 128m"},
+		{"controller cpu limit", services["quota-controller"], "cpus:"},
+		{"controller health probes /health", services["quota-controller"], "127.0.0.1:8080/health"},
+		{"litellm restart policy", services["litellm"], "restart: unless-stopped"},
+		{"litellm memory limit", services["litellm"], "mem_limit:"},
+		{"litellm cpu limit", services["litellm"], "cpus:"},
+		{"litellm health probes liveliness", services["litellm"], "127.0.0.1:4000/health/liveliness"},
 	} {
-		if !c.ok {
-			t.Errorf("compose.yaml: missing %s", c.what)
-		}
+		assert.Contains(t, c.block, c.needle, "compose.yaml: missing %s", c.what)
 	}
 
 	// Issue #6 forbids one edge specifically: LiteLLM must not wait on the
 	// controller. Other edges (a future database) stay legal.
-	if dep := dependsOn(services["litellm"]); strings.Contains(dep, "quota-controller") {
-		t.Errorf("compose.yaml: litellm depends_on %q; it must start with the controller down", dep)
-	}
-	if strings.Contains(stripComments(doc), ":latest") || strings.Contains(stripComments(doc), ":stable") {
-		t.Error("compose.yaml: floating image tag (:latest or :stable)")
-	}
+	dep := dependsOn(services["litellm"])
+	assert.NotContains(t, dep, "quota-controller", "compose.yaml: litellm depends_on %q; it must start with the controller down", dep)
+	assert.NotContains(t, stripComments(doc), ":latest", "compose.yaml: floating image tag (:latest or :stable)")
+	assert.NotContains(t, stripComments(doc), ":stable", "compose.yaml: floating image tag (:latest or :stable)")
 	// A complete digest, not just the "sha256:" prefix: a truncated digest is
 	// an invalid reference that would only fail at run time.
 	digest := regexp.MustCompile(`litellm:v1\.110\.0@sha256:[0-9a-f]{64}\b`)
-	if !digest.MatchString(services["litellm"]) {
-		t.Error("compose.yaml: litellm image is not pinned by a full v1.110.0 tag@sha256:<64 hex> digest")
-	}
-	if got := publishedPorts(services["litellm"]); len(got) != 1 || got[0] != "127.0.0.1:4000:4000" {
-		t.Errorf("compose.yaml: litellm must publish exactly 127.0.0.1:4000:4000, got %v", got)
-	}
+	assert.True(t, digest.MatchString(services["litellm"]),
+		"compose.yaml: litellm image is not pinned by a full v1.110.0 tag@sha256:<64 hex> digest")
+	got := publishedPorts(services["litellm"])
+	require.Len(t, got, 1, "compose.yaml: litellm must publish exactly one host port")
+	assert.Equal(t, "127.0.0.1:4000:4000", got[0], "compose.yaml: litellm must publish exactly 127.0.0.1:4000:4000")
 	// The controller must not publish a host port at all.
-	if strings.Contains(services["quota-controller"], "ports:") {
-		t.Error("compose.yaml: quota-controller publishes a host port; it must stay internal")
-	}
+	assert.NotContains(t, services["quota-controller"], "ports:",
+		"compose.yaml: quota-controller publishes a host port; it must stay internal")
 }
 
 // stripComments drops inline comments so a comment that mentions a value cannot
@@ -210,57 +201,42 @@ func TestLiteLLMConfigContract(t *testing.T) {
 			apiKey:  "os.environ/COMMAND_CODE_API_KEY",
 		},
 	}
-	if len(cfg.models) != len(want) {
-		t.Errorf("litellm-config.yaml: %d models configured, expected %d", len(cfg.models), len(want))
-	}
+	assert.Equal(t, len(want), len(cfg.models), "litellm-config.yaml: models configured")
 	// A duplicate would otherwise pay for a missing model in the count check.
 	seen := map[string]int{}
 	for _, m := range cfg.models {
 		seen[m.name]++
 	}
 	for name, n := range seen {
-		if n != 1 {
-			t.Errorf("litellm-config.yaml: model %q is configured %d times", name, n)
-		}
+		assert.Equal(t, 1, n, "litellm-config.yaml: model %q is configured %d times", name, n)
 	}
 	for _, m := range cfg.models {
-		want, ok := want[m.name]
+		exp, ok := want[m.name]
 		if !ok {
-			t.Errorf("litellm-config.yaml: unexpected model %q", m.name)
+			assert.Fail(t, "unexpected model", "litellm-config.yaml: unexpected model %q", m.name)
 			continue
 		}
-		if m.model != want.model {
-			t.Errorf("litellm-config.yaml: %s model = %q, want %q", m.name, m.model, want.model)
-		}
-		if m.apiBase != want.apiBase {
-			t.Errorf("litellm-config.yaml: %s api_base = %q, want %q", m.name, m.apiBase, want.apiBase)
-		}
-		if m.apiKey != want.apiKey {
-			t.Errorf("litellm-config.yaml: %s api_key = %q, want %q (never a literal)", m.name, m.apiKey, want.apiKey)
-		}
+		assert.Equal(t, exp.model, m.model, "litellm-config.yaml: %s model", m.name)
+		assert.Equal(t, exp.apiBase, m.apiBase, "litellm-config.yaml: %s api_base", m.name)
+		assert.Equal(t, exp.apiKey, m.apiKey, "litellm-config.yaml: %s api_key (never a literal)", m.name)
 		// An anthropic provider with no api_base would fall through to the vendor's
 		// default host, which is not this account's provider.
-		if strings.HasPrefix(m.model, "anthropic/") && m.apiBase == "" {
-			t.Errorf("litellm-config.yaml: %s needs an explicit api_base", m.name)
+		if strings.HasPrefix(m.model, "anthropic/") {
+			assert.NotEmpty(t, m.apiBase, "litellm-config.yaml: %s needs an explicit api_base", m.name)
 		}
 	}
 
 	// Inference and quota are different hosts. A quota host used as api_base
 	// would make every model request a quota lookup.
 	for _, m := range cfg.models {
-		if strings.Contains(m.apiBase, "www.minimax.io") {
-			t.Errorf("litellm-config.yaml: %s api_base uses the quota host, not the inference host", m.name)
-		}
+		assert.NotContains(t, m.apiBase, "www.minimax.io",
+			"litellm-config.yaml: %s api_base uses the quota host, not the inference host", m.name)
 	}
 	// Verified: without disable_cooldowns, one rejected provider key marks the
 	// deployment unhealthy and the next request answers 429, which reads as rate
 	// limiting; num_retries must stay 0 so a retry cannot repeat a tool call.
-	if !cfg.router.DisableCooldowns {
-		t.Error("litellm-config.yaml: router_settings.disable_cooldowns must be true")
-	}
-	if cfg.router.NumRetries != 0 {
-		t.Errorf("litellm-config.yaml: router_settings.num_retries = %d, want 0", cfg.router.NumRetries)
-	}
+	assert.True(t, cfg.router.DisableCooldowns, "litellm-config.yaml: router_settings.disable_cooldowns must be true")
+	assert.Equal(t, 0, cfg.router.NumRetries, "litellm-config.yaml: router_settings.num_retries")
 }
 
 // liteLLMConfig is the slice of the proxy config these tests assert on.
@@ -286,9 +262,7 @@ type liteLLMModel struct {
 func readLiteLLMConfig(t *testing.T) liteLLMConfig {
 	t.Helper()
 	raw, err := os.ReadFile("litellm-config.yaml")
-	if err != nil {
-		t.Fatalf("read litellm-config.yaml: %v", err)
-	}
+	require.NoError(t, err, "read litellm-config.yaml")
 	var doc struct {
 		ModelList []struct {
 			ModelName  string `yaml:"model_name"`
@@ -303,9 +277,7 @@ func readLiteLLMConfig(t *testing.T) liteLLMConfig {
 			NumRetries       int  `yaml:"num_retries"`
 		} `yaml:"router_settings"`
 	}
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parse litellm-config.yaml: %v", err)
-	}
+	require.NoError(t, yaml.Unmarshal(raw, &doc), "parse litellm-config.yaml")
 	cfg := liteLLMConfig{raw: string(raw), router: doc.Router}
 	for _, m := range doc.ModelList {
 		cfg.models = append(cfg.models, liteLLMModel{
@@ -320,13 +292,9 @@ func readLiteLLMConfig(t *testing.T) liteLLMConfig {
 // requires each to be declared in .env.example, so setup cannot miss one.
 func TestEnvExampleCoversConfig(t *testing.T) {
 	cfg, err := os.ReadFile("litellm-config.yaml")
-	if err != nil {
-		t.Fatalf("read litellm-config.yaml: %v", err)
-	}
+	require.NoError(t, err, "read litellm-config.yaml")
 	env, err := os.ReadFile(".env.example")
-	if err != nil {
-		t.Fatalf("read .env.example: %v", err)
-	}
+	require.NoError(t, err, "read .env.example")
 	declared := map[string]bool{}
 	for _, line := range strings.Split(string(env), "\n") {
 		if name, _, ok := strings.Cut(strings.TrimSpace(line), "="); ok && !strings.HasPrefix(name, "#") {
@@ -338,9 +306,7 @@ func TestEnvExampleCoversConfig(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if !declared[name] {
-			t.Errorf(".env.example does not declare %q, which litellm-config.yaml requires", name)
-		}
+		assert.True(t, declared[name], ".env.example does not declare %q, which litellm-config.yaml requires", name)
 	}
 }
 
@@ -355,9 +321,7 @@ func TestCatalogueMatchesLiteLLMConfig(t *testing.T) {
 	}
 
 	raw, err := os.ReadFile("../config.example.yaml")
-	if err != nil {
-		t.Fatalf("read ../config.example.yaml: %v", err)
-	}
+	require.NoError(t, err, "read ../config.example.yaml")
 	var doc struct {
 		LiteLLM struct {
 			// Both catalogue forms are legal: `fast: minimax/MiniMax-M2.7` and
@@ -365,20 +329,15 @@ func TestCatalogueMatchesLiteLLMConfig(t *testing.T) {
 			ModelAliases map[string]any `yaml:"model_aliases"`
 		} `yaml:"litellm"`
 	}
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("parse ../config.example.yaml: %v", err)
-	}
-	if len(doc.LiteLLM.ModelAliases) == 0 {
-		t.Fatal("config.example.yaml: no model_aliases to check")
-	}
+	require.NoError(t, yaml.Unmarshal(raw, &doc), "parse ../config.example.yaml")
+	require.NotEmpty(t, doc.LiteLLM.ModelAliases, "config.example.yaml: no model_aliases to check")
 	for alias, entry := range doc.LiteLLM.ModelAliases {
 		model, ok := entry.(string)
 		if !ok {
 			model, _ = entry.(map[string]any)["model"].(string)
 		}
-		if !served[model] {
-			t.Errorf("config.example.yaml: alias %q names %q, which litellm-config.yaml does not serve", alias, model)
-		}
+		assert.True(t, served[model],
+			"config.example.yaml: alias %q names %q, which litellm-config.yaml does not serve", alias, model)
 	}
 }
 
@@ -387,9 +346,7 @@ func TestCatalogueMatchesLiteLLMConfig(t *testing.T) {
 // config.yaml would reach the builder and its layer cache.
 func TestDockerignoreExcludesSecrets(t *testing.T) {
 	raw, err := os.ReadFile("../.dockerignore")
-	if err != nil {
-		t.Fatalf("read ../.dockerignore: %v", err)
-	}
+	require.NoError(t, err, "read ../.dockerignore")
 	var patterns []string
 	for _, line := range strings.Split(string(raw), "\n") {
 		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
@@ -400,14 +357,7 @@ func TestDockerignoreExcludesSecrets(t *testing.T) {
 	// Docker matches a pattern from any path segment, so ".env" covers both
 	// the root file and deploy/.env; "deploy/.env" alone would not.
 	for _, want := range []string{".env", "config.yaml", "*.db"} {
-		ok := false
-		for _, p := range patterns {
-			if p == want {
-				ok = true
-			}
-		}
-		if !ok {
-			t.Errorf(".dockerignore does not exclude %q; the controller's build context would carry it", want)
-		}
+		assert.Contains(t, patterns, want,
+			".dockerignore does not exclude %q; the controller's build context would carry it", want)
 	}
 }

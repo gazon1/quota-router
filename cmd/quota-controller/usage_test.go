@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // The usage route is wired through run(), not only tested on its own: a report
@@ -37,48 +40,32 @@ func TestRunAcceptsUsageReports(t *testing.T) {
 		"source":"litellm.callback","outcome":"SUCCESS","decision_id":"dec-1"}`
 	for i := 0; i < 2; i++ {
 		req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/usage", strings.NewReader(body))
-		if err != nil {
-			t.Fatalf("new request: %v", err)
-		}
+		require.NoError(t, err, "new request")
 		req.Header.Set("Authorization", "Bearer test-token")
 		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("post #%d: %v", i, err)
-		}
+		require.NoError(t, err, "post #%d", i)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusAccepted {
-			t.Fatalf("post #%d status = %d, want 202", i, resp.StatusCode)
-		}
+		assert.Equal(t, http.StatusAccepted, resp.StatusCode, "post #%d status", i)
 	}
 
 	// A report without the token must be refused by the running controller.
 	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/usage", strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
+	require.NoError(t, err, "new request")
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("unauthenticated post: %v", err)
-	}
+	require.NoError(t, err, "unauthenticated post")
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated status = %d, want 401", resp.StatusCode)
-	}
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "unauthenticated status")
 
 	rows, err := usageRows(path)
-	if err != nil {
-		t.Fatalf("read usage: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Fatalf("rows = %d, want 1: a repeated report of one attempt stores nothing", len(rows))
-	}
+	require.NoError(t, err, "read usage")
+	require.Len(t, rows, 1, "a repeated report of one attempt stores nothing")
 	got := rows[0]
-	if got.attempt != 1 || got.outcome != "SUCCESS" || got.provenance != "reported" || got.decision != "dec-1" {
-		t.Fatalf("row = %+v, want attempt 1 of SUCCESS reported by dec-1", got)
-	}
-	if got.in != 100 || got.out != 20 {
-		t.Fatalf("tokens = %d/%d, want the reported 100/20", got.in, got.out)
-	}
+	assert.Equal(t, 1, got.attempt)
+	assert.Equal(t, "SUCCESS", got.outcome)
+	assert.Equal(t, "reported", got.provenance)
+	assert.Equal(t, "dec-1", got.decision)
+	assert.Equal(t, 100, got.in, "the reported input tokens")
+	assert.Equal(t, 20, got.out, "the reported output tokens")
 }
 
 type usageRow struct {

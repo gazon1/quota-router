@@ -7,6 +7,8 @@ import (
 
 	"github.com/gazon1/quota-router/internal/quota"
 	"github.com/gazon1/quota-router/internal/settings"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var selNow = time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
@@ -115,21 +117,13 @@ func TestSelectDeterministic(t *testing.T) {
 	}
 	d1 := sel.Select(req, state)
 	d2 := sel.Select(req, state)
-	if d1.SelectedAlias != "cc-coding" {
-		t.Fatalf("SelectedAlias = %q, want cc-coding", d1.SelectedAlias)
-	}
-	if d1.DecisionID == "" || d1.DecisionID != d2.DecisionID {
-		t.Fatalf("DecisionID not deterministic: %q vs %q", d1.DecisionID, d2.DecisionID)
-	}
-	if d1.PolicyVersion != PolicyVersion {
-		t.Fatalf("PolicyVersion = %q", d1.PolicyVersion)
-	}
-	if !d1.ConfiguredPreferenceInfluenced {
-		t.Fatal("expected configured preference influence")
-	}
-	if d1.ConfiguredPriority == nil || d1.ConfiguredPriority.ModelAlias != "cc-coding" {
-		t.Fatalf("ConfiguredPriority = %+v", d1.ConfiguredPriority)
-	}
+	assert.Equal(t, "cc-coding", d1.SelectedAlias)
+	assert.NotEmpty(t, d1.DecisionID)
+	assert.Equal(t, d1.DecisionID, d2.DecisionID, "decision id not deterministic")
+	assert.Equal(t, PolicyVersion, d1.PolicyVersion)
+	assert.True(t, d1.ConfiguredPreferenceInfluenced, "expected configured preference influence")
+	require.NotNil(t, d1.ConfiguredPriority)
+	assert.Equal(t, "cc-coding", d1.ConfiguredPriority.ModelAlias)
 }
 
 func TestDecisionIDChangesWhenConfigChanges(t *testing.T) {
@@ -141,12 +135,9 @@ func TestDecisionIDChangesWhenConfigChanges(t *testing.T) {
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
 	d1 := (Selector{Catalogue: settings.Catalogue{ModelAliases: cfg1.ModelAliases, Routing: cfg1.Routing}}).Select(req, state)
 	d2 := (Selector{Catalogue: settings.Catalogue{ModelAliases: cfg2.ModelAliases, Routing: cfg2.Routing}}).Select(req, state)
-	if d1.SelectedAlias != "cc-coding" || d2.SelectedAlias != "cc-coding" {
-		t.Fatalf("selected aliases = %q, %q; want cc-coding, cc-coding", d1.SelectedAlias, d2.SelectedAlias)
-	}
-	if d1.DecisionID == d2.DecisionID {
-		t.Fatal("decision id should change when routing configuration changes")
-	}
+	assert.Equal(t, "cc-coding", d1.SelectedAlias)
+	assert.Equal(t, "cc-coding", d2.SelectedAlias)
+	assert.NotEqual(t, d1.DecisionID, d2.DecisionID, "decision id should change when routing configuration changes")
 }
 
 func TestSelectNeverSelectsIneligible(t *testing.T) {
@@ -162,45 +153,35 @@ func TestSelectNeverSelectsIneligible(t *testing.T) {
 	}
 	// disabled excluded by initial candidates
 	d := sel.Select(baseRequest(), state)
-	if d.SelectedAlias == "cc-coding" {
-		t.Fatal("disabled alias selected")
-	}
+	assert.NotEqual(t, "cc-coding", d.SelectedAlias, "disabled alias selected")
 
 	// incompatible
 	req := baseRequest()
 	req.Capabilities = &RequiredCapabilities{StructuredOutput: true}
 	d = sel.Select(req, state)
-	if d.SelectedAlias == "cc-fast" {
-		t.Fatal("incompatible alias selected")
-	}
-	if r, ok := findRejected(d, "cc-fast"); !ok || r.Stage != "capabilities" {
-		t.Fatalf("cc-fast rejection = %+v, ok=%v", r, ok)
-	}
+	assert.NotEqual(t, "cc-fast", d.SelectedAlias, "incompatible alias selected")
+	r, ok := findRejected(d, "cc-fast")
+	require.True(t, ok, "want a cc-fast rejection")
+	assert.Equal(t, "capabilities", r.Stage)
 
 	// exhausted
 	q := availableQuota(selNow, "commandcode", "minimax")
 	limit, rem, used := 100.0, 0.0, 100.0
 	q["commandcode"] = quota.Observed("commandcode", "test", selNow, []quota.Window{{Name: "5h", Limit: &limit, Remaining: &rem, Used: &used, ResetsAt: selNow.Add(time.Hour)}}, 0.1)
 	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatalf("exhausted provider selected: %+v", d)
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "exhausted provider selected")
 
 	// unavailable
 	h := healthyProviders(selNow, "commandcode", "minimax")
 	h["commandcode"] = quota.NewProviderState("commandcode", quota.Unavailable, quota.ReasonServerError, selNow)
 	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatal("unavailable provider selected")
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "unavailable provider selected")
 
 	// cooling down
 	h = healthyProviders(selNow, "commandcode", "minimax")
 	h["commandcode"] = quota.ProviderState{Provider: "commandcode", Health: quota.Healthy, ObservedAt: selNow, CooldownUntil: selNow.Add(5 * time.Minute)}
 	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatal("cooldown provider selected")
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "cooldown provider selected")
 }
 
 func TestSelectReserveForReasoningCoding(t *testing.T) {
@@ -216,19 +197,16 @@ func TestSelectReserveForReasoningCoding(t *testing.T) {
 	coding := baseRequest()
 	coding.TaskClass = TaskCoding
 	d := sel.Select(coding, state)
-	if d.SelectedProvider == "commandcode" {
-		t.Fatalf("commandcode selected despite reserve: %+v", d)
-	}
-	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "subscription_quota" || !strings.Contains(r.Reason, "reserved") {
-		t.Fatalf("cc-coding rejection = %+v, ok=%v", r, ok)
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "commandcode selected despite reserve")
+	r, ok := findRejected(d, "cc-coding")
+	require.True(t, ok, "want a cc-coding rejection")
+	assert.Equal(t, "subscription_quota", r.Stage)
+	assert.Contains(t, r.Reason, "reserved")
 
 	routine := baseRequest()
 	routine.TaskClass = TaskRoutine
 	d = sel.Select(routine, state)
-	if d.SelectedProvider != "commandcode" {
-		t.Fatalf("routine task should still use low-quota provider, got %+v", d)
-	}
+	assert.Equal(t, "commandcode", d.SelectedProvider, "routine task should still use low-quota provider")
 }
 
 func TestSelectHealthFreshness(t *testing.T) {
@@ -237,18 +215,30 @@ func TestSelectHealthFreshness(t *testing.T) {
 	h := healthyProviders(selNow, "commandcode", "minimax")
 	h["commandcode"] = quota.NewProviderState("commandcode", quota.Healthy, quota.ReasonNone, selNow.Add(-2*time.Hour))
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour, HealthMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatal("stale healthy provider selected")
-	}
-	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "provider_health" || !strings.Contains(r.Reason, "stale") {
-		t.Fatalf("rejection=%+v ok=%v", r, ok)
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "stale healthy provider selected")
+	r, ok := findRejected(d, "cc-coding")
+	require.True(t, ok, "want a cc-coding rejection")
+	assert.Equal(t, "provider_health", r.Stage)
+	assert.Contains(t, r.Reason, "stale")
 
 	h["commandcode"] = quota.NewProviderState("commandcode", quota.Healthy, quota.ReasonNone, selNow.Add(2*time.Minute))
 	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour, HealthMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatal("future-dated healthy provider selected")
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "future-dated healthy provider selected")
+
+	// A current observation is eligible: the freshness rule rejects only what
+	// it cannot vouch for.
+	h["commandcode"] = quota.NewProviderState("commandcode", quota.Healthy, quota.ReasonNone, selNow.Add(-time.Minute))
+	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour, HealthMaxAge: time.Hour})
+	assert.Equal(t, "commandcode", d.SelectedProvider, "current healthy provider not selected")
+
+	// A missing observation stays unknown and transient.
+	delete(h, "commandcode")
+	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour, HealthMaxAge: time.Hour})
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "provider without a health observation selected")
+	r, ok = findRejected(d, "cc-coding")
+	require.True(t, ok, "want a cc-coding rejection")
+	assert.Equal(t, "provider_health", r.Stage)
+	assert.True(t, r.Transient)
 }
 
 func TestSelectUnknownQuotaAndHealth(t *testing.T) {
@@ -259,38 +249,30 @@ func TestSelectUnknownQuotaAndHealth(t *testing.T) {
 	q := availableQuota(selNow, "commandcode", "minimax")
 	q["commandcode"] = quota.Failed("commandcode", "test", selNow, quota.TransientFetchFailure)
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatal("unknown quota provider selected")
-	}
-	if r, ok := findRejected(d, "cc-coding"); !ok || !strings.Contains(r.Reason, "quota unknown") {
-		t.Fatalf("rejection = %+v ok=%v", r, ok)
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "unknown quota provider selected")
+	r, ok := findRejected(d, "cc-coding")
+	require.True(t, ok, "want a cc-coding rejection")
+	assert.Contains(t, r.Reason, "quota unknown")
 
 	// Missing quota observation
 	q = availableQuota(selNow, "minimax")
 	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatal("unobserved quota provider selected")
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "unobserved quota provider selected")
 
 	// Unknown health is conservative - not eligible
 	h := healthyProviders(selNow, "commandcode", "minimax")
 	h["commandcode"] = quota.NewProviderState("commandcode", quota.HealthUnknown, quota.ReasonNotProbed, selNow)
 	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-	if d.SelectedProvider == "commandcode" {
-		t.Fatal("unknown health provider selected")
-	}
-	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "provider_health" {
-		t.Fatalf("rejection = %+v ok=%v", r, ok)
-	}
+	assert.NotEqual(t, "commandcode", d.SelectedProvider, "unknown health provider selected")
+	r, ok = findRejected(d, "cc-coding")
+	require.True(t, ok, "want a cc-coding rejection")
+	assert.Equal(t, "provider_health", r.Stage)
 
 	// Degraded health is allowed by explicit policy
 	h = healthyProviders(selNow, "commandcode", "minimax")
 	h["commandcode"] = quota.NewProviderState("commandcode", quota.Degraded, quota.ReasonRateLimited, selNow)
 	d = sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-	if d.SelectedProvider != "commandcode" {
-		t.Fatalf("degraded provider should be eligible, got %+v", d)
-	}
+	assert.Equal(t, "commandcode", d.SelectedProvider, "degraded provider should be eligible")
 }
 
 func TestSelectAffinityOnlyAmongViable(t *testing.T) {
@@ -307,32 +289,22 @@ func TestSelectAffinityOnlyAmongViable(t *testing.T) {
 		QuotaMaxAge: time.Hour,
 	}
 	d := sel.Select(req, state)
-	if d.SelectedAlias != "mm-general" {
-		t.Fatalf("SelectedAlias = %q, want mm-general", d.SelectedAlias)
-	}
-	if !d.AffinityInfluenced {
-		t.Fatal("expected affinity influence")
-	}
+	assert.Equal(t, "mm-general", d.SelectedAlias)
+	assert.True(t, d.AffinityInfluenced, "expected affinity influence")
 
 	// Affinity must not override hard constraints
 	h := healthyProviders(selNow, "commandcode", "minimax")
 	h["minimax"] = quota.NewProviderState("minimax", quota.Unavailable, quota.ReasonServerError, selNow)
 	state.Health = h
 	d = sel.Select(req, state)
-	if d.SelectedAlias == "mm-general" {
-		t.Fatal("affinity overrode unavailable provider")
-	}
-	if d.AffinityInfluenced {
-		t.Fatal("affinity should not be marked influenced")
-	}
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "affinity overrode unavailable provider")
+	assert.False(t, d.AffinityInfluenced, "affinity should not be marked influenced")
 
 	// Affinity for different session ignored
 	state.Health = healthyProviders(selNow, "commandcode", "minimax")
 	state.Affinity = &Affinity{SessionID: "other", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}
 	d = sel.Select(req, state)
-	if d.SelectedAlias == "mm-general" {
-		t.Fatal("affinity from other session applied")
-	}
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "affinity from other session applied")
 }
 
 func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
@@ -345,9 +317,7 @@ func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
 		QuotaMaxAge: time.Hour,
 	}
 	d := sel.Select(baseRequest(), state)
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("SelectedAlias = %q, want cc-coding by configured priority", d.SelectedAlias)
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "want cc-coding by configured priority")
 
 	// Performance cannot override configured provider priority
 	state.Performance = map[string]PerformanceRecord{
@@ -356,12 +326,8 @@ func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
 	}
 	state.MaxPerformanceAge = time.Hour
 	d = sel.Select(baseRequest(), state)
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("performance overrode configured priority: %q", d.SelectedAlias)
-	}
-	if d.PerformanceInfluenced {
-		t.Fatal("performance should not influence across configured priority boundary")
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "performance overrode configured priority")
+	assert.False(t, d.PerformanceInfluenced, "performance should not influence across configured priority boundary")
 
 	// Performance can break ties among equal-priority candidates.
 	cfg2 := testConfig()
@@ -372,33 +338,23 @@ func TestSelectConfiguredPriorityAndPerformance(t *testing.T) {
 		"cc-fast":   {Alias: "cc-fast", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow},
 	}
 	d = sel2.Select(baseRequest(), state)
-	if d.SelectedAlias != "cc-fast" {
-		t.Fatalf("SelectedAlias = %q, want cc-fast by performance tie-break", d.SelectedAlias)
-	}
-	if !d.PerformanceInfluenced {
-		t.Fatal("expected performance influence")
-	}
+	assert.Equal(t, "cc-fast", d.SelectedAlias, "want cc-fast by performance tie-break")
+	assert.True(t, d.PerformanceInfluenced, "expected performance influence")
 
 	// Stale performance ignored
 	state.Performance["cc-fast"] = PerformanceRecord{Alias: "cc-fast", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow.Add(-2 * time.Hour)}
 	d = sel2.Select(baseRequest(), state)
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("stale performance influenced selection: %q", d.SelectedAlias)
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "stale performance influenced selection")
 
 	// Future-dated performance ignored
 	state.Performance["cc-fast"] = PerformanceRecord{Alias: "cc-fast", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow.Add(2 * time.Minute)}
 	d = sel2.Select(baseRequest(), state)
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("future performance influenced selection: %q", d.SelectedAlias)
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "future performance influenced selection")
 
 	// Sparse performance ignored
 	state.Performance["cc-fast"] = PerformanceRecord{Alias: "cc-fast", Score: 10, Fresh: true, Sufficient: false, ObservedAt: selNow}
 	d = sel2.Select(baseRequest(), state)
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("sparse performance influenced selection: %q", d.SelectedAlias)
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "sparse performance influenced selection")
 }
 
 func TestSelectManualOverride(t *testing.T) {
@@ -409,27 +365,18 @@ func TestSelectManualOverride(t *testing.T) {
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
 
 	d := sel.Select(req, state)
-	if d.SelectedAlias != "mm-general" {
-		t.Fatalf("SelectedAlias = %q, want mm-general", d.SelectedAlias)
-	}
-	if !d.OverrideRequested || !d.OverrideApplied {
-		t.Fatalf("override flags = requested:%v applied:%v", d.OverrideRequested, d.OverrideApplied)
-	}
+	assert.Equal(t, "mm-general", d.SelectedAlias)
+	assert.True(t, d.OverrideRequested)
+	assert.True(t, d.OverrideApplied)
 
 	// Override cannot bypass hard constraints
 	h := healthyProviders(selNow, "commandcode", "minimax")
 	h["minimax"] = quota.NewProviderState("minimax", quota.Unavailable, quota.ReasonServerError, selNow)
 	state.Health = h
 	d = sel.Select(req, state)
-	if d.SelectedAlias == "mm-general" {
-		t.Fatal("override bypassed unavailable provider")
-	}
-	if d.OverrideApplied {
-		t.Fatal("override should not be marked applied")
-	}
-	if !strings.Contains(strings.Join(d.Reasons, " "), "rejected") {
-		t.Fatalf("reasons = %v", d.Reasons)
-	}
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "override bypassed unavailable provider")
+	assert.False(t, d.OverrideApplied, "override should not be marked applied")
+	assert.Contains(t, strings.Join(d.Reasons, " "), "rejected")
 
 	// Override cannot bypass capabilities
 	req2 := baseRequest()
@@ -437,20 +384,14 @@ func TestSelectManualOverride(t *testing.T) {
 	req2.Override = &ManualOverride{ModelAlias: "cc-fast"}
 	state.Health = healthyProviders(selNow, "commandcode", "minimax")
 	d = sel.Select(req2, state)
-	if d.SelectedAlias == "cc-fast" {
-		t.Fatal("override bypassed capability constraint")
-	}
+	assert.NotEqual(t, "cc-fast", d.SelectedAlias, "override bypassed capability constraint")
 
 	// Unconfigured override target
 	req3 := baseRequest()
 	req3.Override = &ManualOverride{ModelAlias: "missing"}
 	d = sel.Select(req3, state)
-	if d.OverrideApplied {
-		t.Fatal("missing override applied")
-	}
-	if d.SelectedAlias == "missing" {
-		t.Fatal("missing alias selected")
-	}
+	assert.False(t, d.OverrideApplied, "missing override applied")
+	assert.NotEqual(t, "missing", d.SelectedAlias, "missing alias selected")
 }
 
 func TestSelectDecisionExplanation(t *testing.T) {
@@ -462,42 +403,30 @@ func TestSelectDecisionExplanation(t *testing.T) {
 	state := SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
 
 	d := sel.Select(baseRequest(), state)
-	if !hasStage(d, "capabilities") || !hasStage(d, "provider_health") || !hasStage(d, "subscription_quota") || !hasStage(d, "temporary_exclusions") || !hasStage(d, "session_affinity") {
-		t.Fatalf("missing stages: %+v", d.Stages)
-	}
-	if len(d.Rejected) == 0 {
-		t.Fatal("expected rejected candidates")
-	}
+	assert.True(t, hasStage(d, "capabilities"), "missing stages: %+v", d.Stages)
+	assert.True(t, hasStage(d, "provider_health"), "missing stages: %+v", d.Stages)
+	assert.True(t, hasStage(d, "subscription_quota"), "missing stages: %+v", d.Stages)
+	assert.True(t, hasStage(d, "temporary_exclusions"), "missing stages: %+v", d.Stages)
+	assert.True(t, hasStage(d, "session_affinity"), "missing stages: %+v", d.Stages)
+	assert.NotEmpty(t, d.Rejected, "expected rejected candidates")
 	found := false
 	for _, r := range d.Rejected {
 		if r.Alias == "cc-coding" && r.Stage == "subscription_quota" {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatalf("missing quota rejection: %+v", d.Rejected)
-	}
-	if d.SelectedAlias != "mm-general" {
-		t.Fatalf("SelectedAlias = %q", d.SelectedAlias)
-	}
-	if d.ConfiguredPriority == nil {
-		t.Fatal("expected configured priority")
-	}
+	assert.True(t, found, "missing quota rejection: %+v", d.Rejected)
+	assert.Equal(t, "mm-general", d.SelectedAlias)
+	assert.NotNil(t, d.ConfiguredPriority, "expected configured priority")
 }
 
 func TestSelectNoEligible(t *testing.T) {
 	cfg := testConfig()
 	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: map[string]quota.Snapshot{}, Health: map[string]quota.ProviderState{}, QuotaMaxAge: time.Hour})
-	if d.SelectedAlias != "" {
-		t.Fatalf("SelectedAlias = %q, want empty", d.SelectedAlias)
-	}
-	if d.DecisionID == "" {
-		t.Fatal("decision id should be set")
-	}
-	if len(d.Reasons) == 0 {
-		t.Fatal("expected reasons")
-	}
+	assert.Equal(t, "", d.SelectedAlias)
+	assert.NotEmpty(t, d.DecisionID, "decision id should be set")
+	assert.NotEmpty(t, d.Reasons, "expected reasons")
 }
 
 func TestSelectDeterministicTieBreak(t *testing.T) {
@@ -513,12 +442,8 @@ func TestSelectDeterministicTieBreak(t *testing.T) {
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "p1"), Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour}
 	d1 := sel.Select(req, state)
 	d2 := sel.Select(req, state)
-	if d1.SelectedAlias != "a" {
-		t.Fatalf("SelectedAlias = %q, want a", d1.SelectedAlias)
-	}
-	if d1.DecisionID != d2.DecisionID {
-		t.Fatal("deterministic tie-break produced different decision IDs")
-	}
+	assert.Equal(t, "a", d1.SelectedAlias)
+	assert.Equal(t, d1.DecisionID, d2.DecisionID, "deterministic tie-break produced different decision IDs")
 }
 
 func TestSelectModelPriorityNotComparedAcrossProviders(t *testing.T) {
@@ -535,12 +460,8 @@ func TestSelectModelPriorityNotComparedAcrossProviders(t *testing.T) {
 	req := RouteRequest{Version: 1, SessionID: "s1", Capabilities: &RequiredCapabilities{}}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "provider-a", "provider-b"), Health: healthyProviders(selNow, "provider-a", "provider-b"), QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
-	if d.SelectedProvider != "provider-a" {
-		t.Fatalf("SelectedProvider = %q, want provider-a (provider name tie-break, model ranks not cross-provider comparable)", d.SelectedProvider)
-	}
-	if d.SelectedAlias != "a1" {
-		t.Fatalf("SelectedAlias = %q, want a1", d.SelectedAlias)
-	}
+	assert.Equal(t, "provider-a", d.SelectedProvider, "want provider-a (provider name tie-break, model ranks not cross-provider comparable)")
+	assert.Equal(t, "a1", d.SelectedAlias)
 }
 
 func TestSelectProviderOnlyPriorityReported(t *testing.T) {
@@ -551,18 +472,11 @@ func TestSelectProviderOnlyPriorityReported(t *testing.T) {
 	}
 	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if !d.ConfiguredPreferenceInfluenced {
-		t.Fatal("provider-only configured priority should influence selection")
-	}
-	if d.ConfiguredPriority == nil {
-		t.Fatal("ConfiguredPriority should be reported for provider-only priority")
-	}
-	if d.ConfiguredPriority.Provider != "commandcode" || d.ConfiguredPriority.ProviderPriority != 1 {
-		t.Fatalf("ConfiguredPriority = %+v", d.ConfiguredPriority)
-	}
-	if d.ConfiguredPriority.ModelPriority != nil {
-		t.Fatalf("ModelPriority = %v, want nil for provider-only priority", *d.ConfiguredPriority.ModelPriority)
-	}
+	assert.True(t, d.ConfiguredPreferenceInfluenced, "provider-only configured priority should influence selection")
+	require.NotNil(t, d.ConfiguredPriority, "ConfiguredPriority should be reported for provider-only priority")
+	assert.Equal(t, "commandcode", d.ConfiguredPriority.Provider)
+	assert.Equal(t, 1, d.ConfiguredPriority.ProviderPriority)
+	assert.Nil(t, d.ConfiguredPriority.ModelPriority, "want nil for provider-only priority")
 }
 
 func TestSelectAffinityRejectionsInDecisionRejected(t *testing.T) {
@@ -571,12 +485,10 @@ func TestSelectAffinityRejectionsInDecisionRejected(t *testing.T) {
 	req := baseRequest()
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: req.SessionID, Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
-	if !d.AffinityInfluenced {
-		t.Fatal("expected affinity influence")
-	}
-	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "session_affinity" {
-		t.Fatalf("affinity elimination missing from Decision.Rejected: %+v", d.Rejected)
-	}
+	assert.True(t, d.AffinityInfluenced, "expected affinity influence")
+	r, ok := findRejected(d, "cc-coding")
+	require.True(t, ok, "affinity elimination missing from Decision.Rejected: %+v", d.Rejected)
+	assert.Equal(t, "session_affinity", r.Stage)
 }
 
 func TestSelectOverrideRejectionsInDecisionRejected(t *testing.T) {
@@ -586,12 +498,10 @@ func TestSelectOverrideRejectionsInDecisionRejected(t *testing.T) {
 	req.Override = &ManualOverride{ModelAlias: "mm-general"}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
-	if !d.OverrideApplied {
-		t.Fatal("override should apply")
-	}
-	if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "manual_override" {
-		t.Fatalf("override elimination missing from Decision.Rejected: %+v", d.Rejected)
-	}
+	assert.True(t, d.OverrideApplied, "override should apply")
+	r, ok := findRejected(d, "cc-coding")
+	require.True(t, ok, "override elimination missing from Decision.Rejected: %+v", d.Rejected)
+	assert.Equal(t, "manual_override", r.Stage)
 }
 
 func TestSelectRequestPreferenceDoesNotOverrideConfiguredPriority(t *testing.T) {
@@ -601,18 +511,14 @@ func TestSelectRequestPreferenceDoesNotOverrideConfiguredPriority(t *testing.T) 
 	req.Preference = &RoutePreference{ModelAlias: "mm-general"}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("SelectedAlias = %q, want cc-coding; request preference should not override configured priority", d.SelectedAlias)
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "request preference should not override configured priority")
 	found := false
 	for _, r := range d.Reasons {
 		if strings.Contains(r, "request model preference") && strings.Contains(r, "not selected") {
 			found = true
 		}
 	}
-	if !found {
-		t.Fatalf("reasons missing preference explanation: %v", d.Reasons)
-	}
+	assert.True(t, found, "reasons missing preference explanation: %v", d.Reasons)
 }
 
 func TestSelectRequestPreferenceBreaksEqualPriority(t *testing.T) {
@@ -627,9 +533,7 @@ func TestSelectRequestPreferenceBreaksEqualPriority(t *testing.T) {
 	req.Preference = &RoutePreference{ModelAlias: "b"}
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "p1"), Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
-	if d.SelectedAlias != "b" {
-		t.Fatalf("SelectedAlias = %q, want b", d.SelectedAlias)
-	}
+	assert.Equal(t, "b", d.SelectedAlias)
 }
 
 func TestSelectPerformanceNotInfluencedWhenPreferenceDecides(t *testing.T) {
@@ -654,12 +558,8 @@ func TestSelectPerformanceNotInfluencedWhenPreferenceDecides(t *testing.T) {
 		},
 	}
 	d := sel.Select(req, state)
-	if d.SelectedAlias != "a" {
-		t.Fatalf("SelectedAlias = %q, want a", d.SelectedAlias)
-	}
-	if d.PerformanceInfluenced {
-		t.Fatal("performance should not be reported as influence when request preference decided")
-	}
+	assert.Equal(t, "a", d.SelectedAlias)
+	assert.False(t, d.PerformanceInfluenced, "performance should not be reported as influence when request preference decided")
 }
 
 func TestSelectAffinityDifferentSessionNoInfluence(t *testing.T) {
@@ -669,12 +569,8 @@ func TestSelectAffinityDifferentSessionNoInfluence(t *testing.T) {
 	req.SessionID = "s2"
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
-	if d.AffinityInfluenced {
-		t.Fatal("affinity influenced for different session")
-	}
-	if d.SelectedAlias == "mm-general" {
-		t.Fatal("wrong-session affinity selected")
-	}
+	assert.False(t, d.AffinityInfluenced, "affinity influenced for different session")
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "wrong-session affinity selected")
 }
 
 func TestSelectAffinityEmptySessionIDIgnored(t *testing.T) {
@@ -684,27 +580,18 @@ func TestSelectAffinityEmptySessionIDIgnored(t *testing.T) {
 	req.SessionID = "s1"
 	state := SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour}
 	d := sel.Select(req, state)
-	if d.AffinityInfluenced {
-		t.Fatal("empty affinity session id should not influence selection")
-	}
-	if d.SelectedAlias == "mm-general" {
-		t.Fatal("empty affinity session id acted as wildcard")
-	}
+	assert.False(t, d.AffinityInfluenced, "empty affinity session id should not influence selection")
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "empty affinity session id acted as wildcard")
 }
 
 func TestSelectInvalidRequest(t *testing.T) {
 	cfg := testConfig()
 	sel := Selector{Catalogue: settings.Catalogue{ModelAliases: cfg.ModelAliases, Routing: cfg.Routing}}
 	d := sel.Select(RouteRequest{}, SelectState{Now: selNow})
-	if d.SelectedAlias != "" {
-		t.Fatalf("SelectedAlias = %q", d.SelectedAlias)
-	}
-	if d.DecisionID == "" {
-		t.Fatal("decision id should be set")
-	}
-	if len(d.Reasons) == 0 || !strings.Contains(d.Reasons[0], "request invalid") {
-		t.Fatalf("reasons = %v", d.Reasons)
-	}
+	assert.Equal(t, "", d.SelectedAlias)
+	assert.NotEmpty(t, d.DecisionID, "decision id should be set")
+	require.NotEmpty(t, d.Reasons)
+	assert.Contains(t, d.Reasons[0], "request invalid")
 }
 
 func TestSelectPreferredCandidateIneligibleFallsThrough(t *testing.T) {
@@ -714,12 +601,9 @@ func TestSelectPreferredCandidateIneligibleFallsThrough(t *testing.T) {
 	limit, rem, used := 100.0, 0.0, 100.0
 	q["commandcode"] = quota.Observed("commandcode", "test", selNow, []quota.Window{{Name: "5h", Limit: &limit, Remaining: &rem, Used: &used, ResetsAt: selNow.Add(time.Hour)}}, 0.1)
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if d.SelectedAlias != "mm-general" {
-		t.Fatalf("SelectedAlias = %q, want mm-general fallback", d.SelectedAlias)
-	}
-	if d.ConfiguredPriority == nil || d.ConfiguredPriority.Provider != "minimax" {
-		t.Fatalf("ConfiguredPriority = %+v", d.ConfiguredPriority)
-	}
+	assert.Equal(t, "mm-general", d.SelectedAlias, "want mm-general fallback")
+	require.NotNil(t, d.ConfiguredPriority)
+	assert.Equal(t, "minimax", d.ConfiguredPriority.Provider)
 }
 
 func TestSelectStageCoverage(t *testing.T) {
@@ -731,9 +615,7 @@ func TestSelectStageCoverage(t *testing.T) {
 	d := sel.Select(req, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
 	stages := []string{"configuration", "capabilities", "model_availability", "provider_health", "subscription_quota", "temporary_exclusions", "session_affinity", "configured_preference", "performance_preference", "tie_break"}
 	for _, s := range stages {
-		if !hasStage(d, s) {
-			t.Fatalf("missing stage %q in %+v", s, d.Stages)
-		}
+		assert.True(t, hasStage(d, s), "missing stage %q in %+v", s, d.Stages)
 	}
 }
 
@@ -747,9 +629,7 @@ func TestSelectSkipsExhaustedProviderButKeepsOtherProviderPriority(t *testing.T)
 	limit, rem, used := 100.0, 0.0, 100.0
 	q["commandcode"] = quota.Observed("commandcode", "test", selNow, []quota.Window{{Name: "5h", Limit: &limit, Remaining: &rem, Used: &used, ResetsAt: selNow.Add(time.Hour)}}, 0.1)
 	d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if d.SelectedAlias != "mm-general" {
-		t.Fatalf("SelectedAlias = %q, want mm-general", d.SelectedAlias)
-	}
+	assert.Equal(t, "mm-general", d.SelectedAlias)
 }
 
 func TestSelectOverrideCannotBypassQuotaOrCooldown(t *testing.T) {
@@ -763,17 +643,15 @@ func TestSelectOverrideCannotBypassQuotaOrCooldown(t *testing.T) {
 	req := baseRequest()
 	req.Override = &ManualOverride{ModelAlias: "mm-general"}
 	d := sel.Select(req, SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if d.OverrideApplied || d.SelectedAlias == "mm-general" {
-		t.Fatalf("override bypassed exhaustion: %+v", d)
-	}
+	assert.False(t, d.OverrideApplied, "override bypassed exhaustion")
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "override bypassed exhaustion")
 
 	// cooldown
 	h := healthyProviders(selNow, "commandcode", "minimax")
 	h["minimax"] = quota.ProviderState{Provider: "minimax", Health: quota.Healthy, ObservedAt: selNow, CooldownUntil: selNow.Add(time.Minute)}
 	d = sel.Select(req, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-	if d.OverrideApplied || d.SelectedAlias == "mm-general" {
-		t.Fatalf("override bypassed cooldown: %+v", d)
-	}
+	assert.False(t, d.OverrideApplied, "override bypassed cooldown")
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "override bypassed cooldown")
 
 	// disabled
 	cfg2 := testConfig()
@@ -781,9 +659,8 @@ func TestSelectOverrideCannotBypassQuotaOrCooldown(t *testing.T) {
 	m.Enabled = boolPtr(false)
 	cfg2.ModelAliases["mm-general"] = m
 	d = Selector{Catalogue: settings.Catalogue{ModelAliases: cfg2.ModelAliases, Routing: cfg2.Routing}}.Select(req, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-	if d.OverrideApplied || d.SelectedAlias == "mm-general" {
-		t.Fatalf("override selected disabled: %+v", d)
-	}
+	assert.False(t, d.OverrideApplied, "override selected disabled")
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "override selected disabled")
 }
 
 func TestSelectTableDrivenStages(t *testing.T) {
@@ -801,12 +678,10 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		m.Enabled = &off
 		c.ModelAliases["cc-coding"] = m
 		d := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-		if d.SelectedAlias == "cc-coding" {
-			t.Fatal("disabled selected")
-		}
-		if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "configuration" {
-			t.Fatalf("disabled rejection: %+v ok=%v", r, ok)
-		}
+		assert.NotEqual(t, "cc-coding", d.SelectedAlias, "disabled selected")
+		r, ok := findRejected(d, "cc-coding")
+		require.True(t, ok, "disabled rejection missing")
+		assert.Equal(t, "configuration", r.Stage)
 	}
 
 	// Capabilities
@@ -814,9 +689,9 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		req := baseRequest()
 		req.Capabilities = &RequiredCapabilities{StructuredOutput: true}
 		d := sel.Select(req, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-		if r, ok := findRejected(d, "cc-fast"); !ok || r.Stage != "capabilities" {
-			t.Fatalf("cap rejection: %+v ok=%v", r, ok)
-		}
+		r, ok := findRejected(d, "cc-fast")
+		require.True(t, ok, "cap rejection missing")
+		assert.Equal(t, "capabilities", r.Stage)
 	}
 
 	// Provider health unavailable
@@ -824,9 +699,9 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		h := healthyProviders(selNow, "commandcode", "minimax")
 		h["commandcode"] = quota.NewProviderState("commandcode", quota.Unavailable, quota.ReasonServerError, selNow)
 		d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-		if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "provider_health" {
-			t.Fatalf("health rejection: %+v ok=%v", r, ok)
-		}
+		r, ok := findRejected(d, "cc-coding")
+		require.True(t, ok, "health rejection missing")
+		assert.Equal(t, "provider_health", r.Stage)
 	}
 
 	// Unknown health
@@ -834,9 +709,9 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		h := healthyProviders(selNow, "commandcode", "minimax")
 		h["commandcode"] = quota.NewProviderState("commandcode", quota.HealthUnknown, quota.ReasonNotProbed, selNow)
 		d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-		if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "provider_health" {
-			t.Fatalf("unknown health rejection: %+v ok=%v", r, ok)
-		}
+		r, ok := findRejected(d, "cc-coding")
+		require.True(t, ok, "unknown health rejection missing")
+		assert.Equal(t, "provider_health", r.Stage)
 	}
 
 	// Exhausted quota
@@ -844,9 +719,9 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		q := availableQuota(selNow, "commandcode", "minimax")
 		q["commandcode"] = quota.Observed("commandcode", "test", selNow, exhaustedWin, 0.1)
 		d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-		if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "subscription_quota" {
-			t.Fatalf("exhausted rejection: %+v ok=%v", r, ok)
-		}
+		r, ok := findRejected(d, "cc-coding")
+		require.True(t, ok, "exhausted rejection missing")
+		assert.Equal(t, "subscription_quota", r.Stage)
 	}
 
 	// Unknown quota
@@ -854,9 +729,9 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		q := availableQuota(selNow, "commandcode", "minimax")
 		q["commandcode"] = quota.Failed("commandcode", "test", selNow, quota.MalformedResponse)
 		d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-		if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "subscription_quota" {
-			t.Fatalf("unknown quota rejection: %+v ok=%v", r, ok)
-		}
+		r, ok := findRejected(d, "cc-coding")
+		require.True(t, ok, "unknown quota rejection missing")
+		assert.Equal(t, "subscription_quota", r.Stage)
 	}
 
 	// Cooldown
@@ -866,25 +741,23 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		hs.CooldownUntil = selNow.Add(10 * time.Minute)
 		h["commandcode"] = hs
 		d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: h, QuotaMaxAge: time.Hour})
-		if r, ok := findRejected(d, "cc-coding"); !ok || r.Stage != "temporary_exclusions" {
-			t.Fatalf("cooldown rejection: %+v ok=%v", r, ok)
-		}
+		r, ok := findRejected(d, "cc-coding")
+		require.True(t, ok, "cooldown rejection missing")
+		assert.Equal(t, "temporary_exclusions", r.Stage)
 	}
 
 	// Affinity
 	{
 		d := sel.Select(RouteRequest{Version: RouteRequestVersionV1, SessionID: "s1", Capabilities: &RequiredCapabilities{}}, SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), Affinity: &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)}, QuotaMaxAge: time.Hour})
-		if !d.AffinityInfluenced || d.SelectedAlias != "mm-general" {
-			t.Fatalf("affinity: %+v", d)
-		}
+		assert.True(t, d.AffinityInfluenced, "affinity: %+v", d)
+		assert.Equal(t, "mm-general", d.SelectedAlias)
 	}
 
 	// Configured preference
 	{
 		d := sel.Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour})
-		if !d.ConfiguredPreferenceInfluenced || d.SelectedAlias != "cc-coding" {
-			t.Fatalf("preference: %+v", d)
-		}
+		assert.True(t, d.ConfiguredPreferenceInfluenced, "preference: %+v", d)
+		assert.Equal(t, "cc-coding", d.SelectedAlias)
 	}
 
 	// Performance tie-break
@@ -892,9 +765,8 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		c := testConfig()
 		c.Routing.Providers["commandcode"] = settings.ProviderRouting{Priority: 1, Models: map[string]int{"cc-coding": 1, "cc-fast": 1}}
 		d := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: availableQuota(selNow, "commandcode", "minimax"), Health: healthyProviders(selNow, "commandcode", "minimax"), QuotaMaxAge: time.Hour, MaxPerformanceAge: time.Hour, Performance: map[string]PerformanceRecord{"cc-fast": {Alias: "cc-fast", Score: 1, Fresh: true, Sufficient: true, ObservedAt: selNow}, "cc-coding": {Alias: "cc-coding", Score: 10, Fresh: true, Sufficient: true, ObservedAt: selNow}}})
-		if !d.PerformanceInfluenced || d.SelectedAlias != "cc-fast" {
-			t.Fatalf("perf tie break: %+v", d)
-		}
+		assert.True(t, d.PerformanceInfluenced, "perf tie break: %+v", d)
+		assert.Equal(t, "cc-fast", d.SelectedAlias)
 	}
 
 	// Deterministic tie-break
@@ -904,9 +776,8 @@ func TestSelectTableDrivenStages(t *testing.T) {
 		q := availableQuota(selNow, "p1")
 		d1 := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour})
 		d2 := (Selector{Catalogue: settings.Catalogue{ModelAliases: c.ModelAliases, Routing: c.Routing}}).Select(baseRequest(), SelectState{Now: selNow, Quota: q, Health: healthyProviders(selNow, "p1"), QuotaMaxAge: time.Hour})
-		if d1.SelectedAlias != "a" || d1.DecisionID != d2.DecisionID {
-			t.Fatalf("tie break: %q %q %q", d1.SelectedAlias, d1.DecisionID, d2.DecisionID)
-		}
+		assert.Equal(t, "a", d1.SelectedAlias)
+		assert.Equal(t, d1.DecisionID, d2.DecisionID)
 	}
 
 }
@@ -926,28 +797,22 @@ func TestSelectExpiredAffinityReevaluates(t *testing.T) {
 		QuotaMaxAge: time.Hour,
 	}
 	d := sel.Select(req, state)
-	if d.AffinityInfluenced {
-		t.Fatal("expired affinity influenced selection")
-	}
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("SelectedAlias = %q, want cc-coding from a fresh evaluation", d.SelectedAlias)
-	}
+	assert.False(t, d.AffinityInfluenced, "expired affinity influenced selection")
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "want cc-coding from a fresh evaluation")
 	var note string
 	for _, s := range d.Stages {
 		if s.Stage == "session_affinity" {
 			note = s.Note
 		}
 	}
-	if !strings.Contains(note, "expired") {
-		t.Fatalf("affinity stage note = %q, want it to say the pin expired", note)
-	}
+	assert.Contains(t, note, "expired", "want it to say the pin expired")
 
 	// The same inputs with an unexpired pin choose the other route, so expiry is
 	// what decided — not a different candidate set.
 	state.Affinity.ExpiresAt = selNow.Add(time.Minute)
-	if d := sel.Select(req, state); d.SelectedAlias != "mm-general" || !d.AffinityInfluenced {
-		t.Fatalf("live pin: SelectedAlias = %q influenced = %v", d.SelectedAlias, d.AffinityInfluenced)
-	}
+	d = sel.Select(req, state)
+	assert.Equal(t, "mm-general", d.SelectedAlias, "live pin")
+	assert.True(t, d.AffinityInfluenced, "live pin")
 }
 
 // A pin without an expiry is not affinity: an unbounded pin would outlive the
@@ -964,9 +829,8 @@ func TestSelectUnboundedAffinityIgnored(t *testing.T) {
 		QuotaMaxAge: time.Hour,
 	}
 	d := sel.Select(req, state)
-	if d.AffinityInfluenced || d.SelectedAlias == "mm-general" {
-		t.Fatalf("pin without expiry decided the route: %+v", d)
-	}
+	assert.False(t, d.AffinityInfluenced, "pin without expiry decided the route: %+v", d)
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "pin without expiry decided the route: %+v", d)
 }
 
 // A transient exclusion — a missing or stale observation — must not move a pinned
@@ -1041,12 +905,9 @@ func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 				QuotaMaxAge: time.Hour,
 			}
 			d := sel.Select(req, state)
-			if d.SelectedAlias != tc.want {
-				t.Fatalf("SelectedAlias = %q, want %q", d.SelectedAlias, tc.want)
-			}
-			if held := tc.want == "mm-general"; d.AffinityInfluenced != held {
-				t.Fatalf("AffinityInfluenced = %v, want %v", d.AffinityInfluenced, held)
-			}
+			assert.Equal(t, tc.want, d.SelectedAlias)
+			held := tc.want == "mm-general"
+			assert.Equal(t, held, d.AffinityInfluenced)
 		})
 	}
 
@@ -1063,9 +924,8 @@ func TestSelectAffinityHeldThroughTransientExclusions(t *testing.T) {
 		Affinity:    &Affinity{SessionID: "s1", Alias: "mm-general", ExpiresAt: selNow.Add(time.Hour)},
 		QuotaMaxAge: time.Hour,
 	})
-	if d.SelectedAlias != "cc-coding" || d.AffinityInfluenced {
-		t.Fatalf("pin survived a disabled alias: %+v", d)
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "pin survived a disabled alias")
+	assert.False(t, d.AffinityInfluenced, "pin survived a disabled alias")
 }
 
 // A cooldown must move a pinned session — the controller is choosing where to
@@ -1092,24 +952,19 @@ func TestSelectCooldownMovesPinnedSessionAndExpiryAllowsReturn(t *testing.T) {
 		QuotaMaxAge: time.Hour,
 	}
 	d := sel.Select(req, state)
-	if d.SelectedAlias == "mm-general" || d.AffinityInfluenced {
-		t.Fatalf("pinned session held on a cooled provider: %+v", d)
-	}
-	if d.SelectedAlias != "cc-coding" {
-		t.Fatalf("SelectedAlias = %q, want cc-coding while minimax is cooled", d.SelectedAlias)
-	}
-	if r, ok := rejectedCandidate(d.Rejected, "mm-general"); !ok || r.Transient {
-		t.Fatalf("cooldown rejection = %+v transient=%v, want a durable rejection", r, r.Transient)
-	}
+	assert.NotEqual(t, "mm-general", d.SelectedAlias, "pinned session held on a cooled provider")
+	assert.False(t, d.AffinityInfluenced, "pinned session held on a cooled provider")
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "want cc-coding while minimax is cooled")
+	r, ok := rejectedCandidate(d.Rejected, "mm-general")
+	require.True(t, ok, "cooldown rejection missing")
+	assert.False(t, r.Transient, "want a durable rejection")
 	var note string
 	for _, s := range d.Stages {
 		if s.Stage == "session_affinity" {
 			note = s.Note
 		}
 	}
-	if !strings.Contains(note, "durable") {
-		t.Fatalf("affinity note = %q, want it to name the durable exclusion", note)
-	}
+	assert.Contains(t, note, "durable", "want it to name the durable exclusion")
 
 	// After the cooldown expires, the session is pinned to whatever the policy
 	// now selects. Here that is cc-coding, because the pin it used to hold is
@@ -1117,9 +972,8 @@ func TestSelectCooldownMovesPinnedSessionAndExpiryAllowsReturn(t *testing.T) {
 	state.Health = healthyProviders(selNow, "commandcode", "minimax")
 	state.Affinity = &Affinity{SessionID: "s1", Alias: "cc-coding", ExpiresAt: selNow.Add(time.Hour)}
 	d = sel.Select(req, state)
-	if d.SelectedAlias != "cc-coding" || !d.AffinityInfluenced {
-		t.Fatalf("after cooldown: SelectedAlias = %q influenced = %v", d.SelectedAlias, d.AffinityInfluenced)
-	}
+	assert.Equal(t, "cc-coding", d.SelectedAlias, "after cooldown")
+	assert.True(t, d.AffinityInfluenced, "after cooldown")
 }
 
 // A pin excluded before the affinity stage is reached — a disabled alias or one
@@ -1141,16 +995,13 @@ func TestSelectAffinityNoteNamesEarlyExclusion(t *testing.T) {
 		QuotaMaxAge: time.Hour,
 	}
 	d := sel.Select(req, state)
-	if d.AffinityInfluenced {
-		t.Fatal("disabled pin influenced selection")
-	}
+	assert.False(t, d.AffinityInfluenced, "disabled pin influenced selection")
 	var note string
 	for _, s := range d.Stages {
 		if s.Stage == "session_affinity" {
 			note = s.Note
 		}
 	}
-	if !strings.Contains(note, "configuration") || !strings.Contains(note, "disabled") {
-		t.Fatalf("affinity note = %q, want it to name the configuration exclusion", note)
-	}
+	assert.Contains(t, note, "configuration", "want it to name the configuration exclusion")
+	assert.Contains(t, note, "disabled", "want it to name the configuration exclusion")
 }

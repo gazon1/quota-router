@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/gazon1/quota-router/internal/config"
 	"github.com/gazon1/quota-router/internal/routing"
 	"github.com/gazon1/quota-router/internal/store"
@@ -151,18 +154,12 @@ func newTestService() (*RouteService, *fakeState, *fakeAffinity, *fakeDecisions)
 func TestRouteWithoutHTTPOrSQLite(t *testing.T) {
 	svc, _, _, dec := newTestService()
 	got, err := svc.Route(context.Background(), routeReq("s1"))
-	if err != nil {
-		t.Fatalf("Route: %v", err)
-	}
-	if got.SelectedAlias != "cc-coding" {
-		t.Fatalf("selected=%q, want cc-coding", got.SelectedAlias)
-	}
-	if got.DecisionID == "" || got.PolicyVersion != routing.PolicyVersion {
-		t.Fatalf("decision metadata missing: %+v", got)
-	}
-	if len(dec.records) != 1 || dec.records[0].DecisionID != got.DecisionID {
-		t.Fatalf("decision not persisted: %+v", dec.records)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "cc-coding", got.SelectedAlias)
+	assert.NotEmpty(t, got.DecisionID, "decision metadata missing: %+v", got)
+	assert.Equal(t, routing.PolicyVersion, got.PolicyVersion, "decision metadata missing: %+v", got)
+	require.Len(t, dec.records, 1, "decision not persisted")
+	assert.Equal(t, got.DecisionID, dec.records[0].DecisionID)
 }
 
 func TestRoutePersistsDecisionBeforeAffinity(t *testing.T) {
@@ -174,14 +171,13 @@ func TestRoutePersistsDecisionBeforeAffinity(t *testing.T) {
 	order := &orderStore{fakeAffinity: &fakeAffinity{m: map[string]store.SessionAffinity{}}, fakeDecisions: &fakeDecisions{}}
 	svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, state, order, order)
 
-	if _, err := svc.Route(context.Background(), routeReq("s1")); err != nil {
-		t.Fatalf("Route: %v", err)
-	}
+	_, err := svc.Route(context.Background(), routeReq("s1"))
+	require.NoError(t, err)
 	order.mu.Lock()
 	defer order.mu.Unlock()
-	if len(order.events) != 2 || order.events[0] != "decision" || order.events[1] != "affinity" {
-		t.Fatalf("order=%v, want [decision affinity]", order.events)
-	}
+	require.Len(t, order.events, 2, "order=%v, want [decision affinity]", order.events)
+	assert.Equal(t, "decision", order.events[0], "order=%v, want [decision affinity]", order.events)
+	assert.Equal(t, "affinity", order.events[1], "order=%v, want [decision affinity]", order.events)
 }
 
 type orderStore struct {
@@ -211,24 +207,16 @@ func TestRouteDecisionPersistenceFailureReturnsError(t *testing.T) {
 	svc, _, aff, dec := newTestService()
 	dec.err = errors.New("boom")
 	_, err := svc.Route(context.Background(), routeReq("s1"))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if len(aff.m) != 0 {
-		t.Fatalf("affinity written despite decision failure: %+v", aff.m)
-	}
+	require.Error(t, err)
+	assert.Empty(t, aff.m, "affinity written despite decision failure")
 }
 
 func TestRouteAffinityFailureReturnsError(t *testing.T) {
 	svc, _, aff, dec := newTestService()
 	aff.saveErr = errors.New("boom")
 	_, err := svc.Route(context.Background(), routeReq("s1"))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if len(dec.records) != 1 {
-		t.Fatalf("decision records=%d, want 1 (audited before affinity failure surfaced)", len(dec.records))
-	}
+	require.Error(t, err)
+	assert.Len(t, dec.records, 1, "decision records=%d, want 1 (audited before affinity failure surfaced)", len(dec.records))
 }
 
 func TestRouteSameSessionSerialized(t *testing.T) {
@@ -286,12 +274,8 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("second same-session route did not enter critical section after lock release")
 	}
-	if err := <-done1; err != nil {
-		t.Fatalf("route1: %v", err)
-	}
-	if err := <-done2; err != nil {
-		t.Fatalf("route2: %v", err)
-	}
+	require.NoError(t, <-done1, "route1")
+	require.NoError(t, <-done2, "route2")
 }
 
 type gateState struct {
@@ -340,39 +324,23 @@ func TestRouteDifferentSessionsConcurrent(t *testing.T) {
 		t.Fatal("different session blocked on unrelated session lock")
 	}
 	close(state.gate1)
-	if err := <-done1; err != nil {
-		t.Fatalf("route1: %v", err)
-	}
-	if err := <-done2; err != nil {
-		t.Fatalf("route2: %v", err)
-	}
+	require.NoError(t, <-done1, "route1")
+	require.NoError(t, <-done2, "route2")
 }
 
 func TestRouteRenewsAffinityTTL(t *testing.T) {
 	svc, _, aff, _ := newTestService()
 	first, err := svc.Route(context.Background(), routeReq("s1"))
-	if err != nil {
-		t.Fatalf("first Route: %v", err)
-	}
+	require.NoError(t, err, "first Route")
 	pin1 := aff.m["s1"]
 	time.Sleep(10 * time.Millisecond)
 	second, err := svc.Route(context.Background(), routeReq("s1"))
-	if err != nil {
-		t.Fatalf("second Route: %v", err)
-	}
-	if second.SelectedAlias != first.SelectedAlias {
-		t.Fatalf("selected=%q want %q", second.SelectedAlias, first.SelectedAlias)
-	}
+	require.NoError(t, err, "second Route")
+	assert.Equal(t, first.SelectedAlias, second.SelectedAlias)
 	pin2 := aff.m["s1"]
-	if !pin2.UpdatedAt.After(pin1.UpdatedAt) {
-		t.Fatalf("updated_at not renewed: %v <= %v", pin2.UpdatedAt, pin1.UpdatedAt)
-	}
-	if !pin2.ExpiresAt.After(pin1.ExpiresAt) {
-		t.Fatalf("expires_at not renewed: %v <= %v", pin2.ExpiresAt, pin1.ExpiresAt)
-	}
-	if !pin2.CreatedAt.Equal(pin1.CreatedAt) {
-		t.Fatalf("created_at changed: %v != %v", pin2.CreatedAt, pin1.CreatedAt)
-	}
+	assert.True(t, pin2.UpdatedAt.After(pin1.UpdatedAt), "updated_at not renewed: %v <= %v", pin2.UpdatedAt, pin1.UpdatedAt)
+	assert.True(t, pin2.ExpiresAt.After(pin1.ExpiresAt), "expires_at not renewed: %v <= %v", pin2.ExpiresAt, pin1.ExpiresAt)
+	assert.True(t, pin2.CreatedAt.Equal(pin1.CreatedAt), "created_at changed: %v != %v", pin2.CreatedAt, pin1.CreatedAt)
 }
 func TestSessionLockIsPerSession(t *testing.T) {
 	var l sessionLocks
@@ -399,9 +367,7 @@ func TestSessionLockIsPerSession(t *testing.T) {
 	l.mu.Lock()
 	entries := len(l.m)
 	l.mu.Unlock()
-	if entries != 0 {
-		t.Fatalf("lock table holds %d entries after every holder left, want 0", entries)
-	}
+	assert.Equal(t, 0, entries, "lock table holds %d entries after every holder left, want 0", entries)
 }
 
 func TestRouteMissingDependenciesReturnErrors(t *testing.T) {
@@ -447,9 +413,8 @@ func TestRouteMissingDependenciesReturnErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.call(tc.svc)
-			if err == nil || err.Error() != tc.want {
-				t.Fatalf("err=%v want %q", err, tc.want)
-			}
+			require.Error(t, err)
+			assert.Equal(t, tc.want, err.Error())
 		})
 	}
 }
@@ -466,21 +431,20 @@ func TestRouteDependencyFailuresReturnErrors(t *testing.T) {
 	t.Run("affinity read failure", func(t *testing.T) {
 		aff := &fakeAffinity{m: map[string]store.SessionAffinity{}, readErr: errors.New("boom")}
 		svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, baseState(), aff, &fakeDecisions{})
-		if _, err := svc.Route(context.Background(), routeReq("s1")); err == nil || err.Error() != "routing state unavailable" {
-			t.Fatalf("err=%v", err)
-		}
+		_, err := svc.Route(context.Background(), routeReq("s1"))
+		require.Error(t, err)
+		assert.Equal(t, "routing state unavailable", err.Error())
 	})
 	t.Run("affinity delete failure", func(t *testing.T) {
 		aff := &fakeAffinity{m: map[string]store.SessionAffinity{"s1": {SessionID: "s1", Alias: "cc-coding", CreatedAt: time.Now(), UpdatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}}, delErr: errors.New("boom")}
 		svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, baseState(), aff, &fakeDecisions{})
-		if _, _, err := svc.Release(context.Background(), "s1"); err == nil {
-			t.Fatal("expected error")
-		}
+		_, _, err := svc.Release(context.Background(), "s1")
+		require.Error(t, err)
 	})
 	t.Run("decision persistence failure", func(t *testing.T) {
 		svc := NewRouteService(cfg, routing.Selector{Catalogue: cfg.Catalogue()}, baseState(), &fakeAffinity{m: map[string]store.SessionAffinity{}}, &fakeDecisions{err: errors.New("boom")})
-		if _, err := svc.Route(context.Background(), routeReq("s1")); err == nil || err.Error() != "routing decision audit persistence failed" {
-			t.Fatalf("err=%v", err)
-		}
+		_, err := svc.Route(context.Background(), routeReq("s1"))
+		require.Error(t, err)
+		assert.Equal(t, "routing decision audit persistence failed", err.Error())
 	})
 }

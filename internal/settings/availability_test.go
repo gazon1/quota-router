@@ -3,6 +3,9 @@ package settings
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func wantWindow(t *testing.T, u *Unavailable, now time.Time) (UnavailableWindow, bool) {
@@ -15,9 +18,7 @@ func wantWindow(t *testing.T, u *Unavailable, now time.Time) (UnavailableWindow,
 func at(t *testing.T, zone string, month time.Month, day, hour, minute int) time.Time {
 	t.Helper()
 	loc, err := time.LoadLocation(zone)
-	if err != nil {
-		t.Fatalf("LoadLocation(%q): %v", zone, err)
-	}
+	require.NoError(t, err, "LoadLocation(%q)", zone)
 	// 2026: the year the schedule examples are dated, and one where Yerevan has
 	// no DST transition to move the offsets under the test.
 	return time.Date(2026, month, day, hour, minute, 0, 0, loc)
@@ -51,9 +52,7 @@ func TestWindowAtWeekdayBoundaries(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, got := wantWindow(t, u, tt.now)
-			if got != tt.want {
-				t.Fatalf("WindowAt(%s) = %v, want %v", tt.now.Format(time.RFC3339), got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "WindowAt(%s)", tt.now.Format(time.RFC3339))
 		})
 	}
 }
@@ -80,9 +79,7 @@ func TestWindowAtOvernight(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, got := wantWindow(t, u, tt.now)
-			if got != tt.want {
-				t.Fatalf("WindowAt(%s) = %v, want %v", tt.now.Format(time.RFC3339), got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "WindowAt(%s)", tt.now.Format(time.RFC3339))
 		})
 	}
 }
@@ -95,13 +92,11 @@ func TestWindowAtUsesConfiguredZone(t *testing.T) {
 		Timezone: "Asia/Yerevan",
 		Windows:  []UnavailableWindow{{Days: []string{"saturday"}, Start: "12:00", End: "13:00"}},
 	}
-	if _, ok := u.WindowAt(instant); !ok {
-		t.Fatalf("12:00 Yerevan must be inside the window at %s", instant.Format(time.RFC3339))
-	}
+	_, ok := u.WindowAt(instant)
+	assert.True(t, ok, "12:00 Yerevan must be inside the window at %s", instant.Format(time.RFC3339))
 	u.Timezone = "UTC"
-	if _, ok := u.WindowAt(instant); ok {
-		t.Fatal("08:00 UTC must be outside a noon window; the zone was ignored")
-	}
+	_, ok = u.WindowAt(instant)
+	assert.False(t, ok, "08:00 UTC must be outside a noon window; the zone was ignored")
 }
 
 func TestWindowAtAcrossDSTTransition(t *testing.T) {
@@ -128,9 +123,7 @@ func TestWindowAtAcrossDSTTransition(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, got := u.WindowAt(tt.now)
-			if got != tt.want {
-				t.Fatalf("WindowAt(%s) = %v, want %v", tt.now.Format(time.RFC3339), got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "WindowAt(%s)", tt.now.Format(time.RFC3339))
 		})
 	}
 }
@@ -138,9 +131,8 @@ func TestWindowAtAcrossDSTTransition(t *testing.T) {
 func TestWindowAtAbsentConfigurationNeverRestricts(t *testing.T) {
 	now := time.Date(2026, time.November, 28, 3, 0, 0, 0, time.UTC)
 	for _, u := range []*Unavailable{nil, {}, {Timezone: "Asia/Yerevan"}} {
-		if _, ok := u.WindowAt(now); ok {
-			t.Fatalf("%+v must not restrict anything", u)
-		}
+		_, ok := u.WindowAt(now)
+		assert.False(t, ok, "%+v must not restrict anything", u)
 	}
 }
 
@@ -152,9 +144,8 @@ func TestWindowAtLastMinuteOfDay(t *testing.T) {
 		Timezone: "UTC",
 		Windows:  []UnavailableWindow{{Days: all, Start: "00:00", End: "23:59"}},
 	}
-	if _, ok := dayOnly.WindowAt(lastMinute); ok {
-		t.Fatal("23:59 must be outside a window ending at 23:59, because end is exclusive")
-	}
+	_, ok := dayOnly.WindowAt(lastMinute)
+	assert.False(t, ok, "23:59 must be outside a window ending at 23:59, because end is exclusive")
 
 	// The documented way to cover every instant: an overnight window fills the
 	// gap the exclusive end leaves.
@@ -168,8 +159,7 @@ func TestWindowAtLastMinuteOfDay(t *testing.T) {
 	base := time.Date(2026, time.November, 22, 0, 0, 0, 0, time.UTC) // Sunday
 	for m := 0; m < 7*24*60; m++ {
 		instant := base.Add(time.Duration(m) * time.Minute)
-		if _, ok := full.WindowAt(instant); !ok {
-			t.Fatalf("%s is not covered by the two-window schedule", instant.Format(time.RFC3339))
-		}
+		_, ok := full.WindowAt(instant)
+		assert.True(t, ok, "%s is not covered by the two-window schedule", instant.Format(time.RFC3339))
 	}
 }

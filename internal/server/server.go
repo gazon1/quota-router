@@ -433,10 +433,11 @@ func (s *Server) statusProviders(snaps []store.QuotaSnapshot, healths []store.He
 		if h, ok := byHealth[n]; ok {
 			ps := application.ProviderStateFromStore(h)
 			health := ps.Health
-			// Status reads apply the same freshness bound as the selector: an
-			// observation that is absent or older than the bound is not
-			// actionable, so the provider must not be reported healthy.
-			if ps.ObservedAt.IsZero() || now.Sub(ps.ObservedAt) > staleAfter(s.cfg.Polling.Interval) {
+			// Status reads apply the same freshness rule as the selector: an
+			// observation that is absent, dated in the future or older than
+			// the bound is not actionable, so the provider must not be
+			// reported healthy.
+			if quota.ClassifyHealth(ps.ObservedAt, now, staleAfter(s.cfg.Polling.Interval)) != quota.HealthFresh {
 				health = quota.HealthUnknown
 			}
 			cooldown := ""

@@ -95,3 +95,33 @@ func (s ProviderState) Reason() HealthReason {
 func (s ProviderState) CooldownActive(now time.Time) bool {
 	return s.CooldownUntil.After(now)
 }
+
+// HealthFreshness classifies one provider health observation against a
+// freshness bound. The routing selector and the status API share it so they
+// cannot disagree about which observation is actionable.
+type HealthFreshness int
+
+const (
+	// HealthFresh means the observation was taken and is current enough to act on.
+	HealthFresh HealthFreshness = iota
+	// HealthNotObserved means the provider carries no observation timestamp.
+	HealthNotObserved
+	// HealthStale means the observation is dated in the future or older than
+	// the freshness bound.
+	HealthStale
+)
+
+// ClassifyHealth classifies a provider health observation taken at observedAt
+// relative to now and the freshness bound maxAge. A future-dated observation is
+// as untrustworthy as an old one: a clock that runs ahead says nothing about
+// the provider, so neither is actionable.
+func ClassifyHealth(observedAt, now time.Time, maxAge time.Duration) HealthFreshness {
+	if observedAt.IsZero() {
+		return HealthNotObserved
+	}
+	age := now.Sub(observedAt.UTC())
+	if age < 0 || age > maxAge {
+		return HealthStale
+	}
+	return HealthFresh
+}

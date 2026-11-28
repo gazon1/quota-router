@@ -1,0 +1,5 @@
+litellm:
+  model_aliases:
+    fast:
+      model: minimax/MiniMax-M2.7
+      context_limit: -1
