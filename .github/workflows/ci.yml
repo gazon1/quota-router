@@ -34,11 +34,11 @@ jobs:
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
         env:
-          GOTOOLCHAIN: go1.27.3
+          GOTOOLCHAIN: go1.27.4
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
         env:
-          GOTOOLCHAIN: go1.27.3
+          GOTOOLCHAIN: go1.27.4
 
   docker:
     runs-on: ubuntu-latest
