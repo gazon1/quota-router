@@ -98,7 +98,7 @@ func New(log *slog.Logger, opts Options) *Server {
 		state = s.store
 		affinity = s.store
 	}
-	s.routes = application.NewRouteService(s.log, s.cfg, s.selector, state, affinity, s.decisions)
+	s.routes = application.NewRouteService(s.cfg, s.selector, state, affinity, s.decisions)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
 	s.mux.HandleFunc("POST /v1/route", s.handleSelect)

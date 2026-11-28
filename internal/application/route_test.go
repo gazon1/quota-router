@@ -144,7 +144,7 @@ func newTestService() (*RouteService, *fakeState, *fakeAffinity, *fakeDecisions)
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
-	svc := NewRouteService(nil, cfg, routing.Selector{Config: cfg}, state, aff, dec)
+	svc := NewRouteService(cfg, routing.Selector{Config: cfg}, state, aff, dec)
 	return svc, state, aff, dec
 }
 
@@ -172,7 +172,7 @@ func TestRoutePersistsDecisionBeforeAffinity(t *testing.T) {
 		health: []store.HealthRecord{healthRec("commandcode", store.Healthy), healthRec("minimax", store.Healthy)},
 	}
 	order := &orderStore{fakeAffinity: &fakeAffinity{m: map[string]store.SessionAffinity{}}, fakeDecisions: &fakeDecisions{}}
-	svc := NewRouteService(nil, cfg, routing.Selector{Config: cfg}, state, order, order)
+	svc := NewRouteService(cfg, routing.Selector{Config: cfg}, state, order, order)
 
 	if _, err := svc.Route(context.Background(), routeReq("s1")); err != nil {
 		t.Fatalf("Route: %v", err)
@@ -243,19 +243,28 @@ func TestRouteSameSessionSerialized(t *testing.T) {
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
-	svc := NewRouteService(nil, cfg, routing.Selector{Config: cfg}, state, aff, dec)
+	svc := NewRouteService(cfg, routing.Selector{Config: cfg}, state, aff, dec)
 
 	done1 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
-	<-state.read
+	<-state.read // route1 holds session lock and is blocked in state read
 
+	started2 := make(chan struct{})
 	done2 := make(chan error, 1)
-	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done2 <- err }()
+	go func() {
+		close(started2)
+		_, err := svc.Route(context.Background(), routeReq("s1"))
+		done2 <- err
+	}()
+	<-started2
+	// Give route2 a chance to attempt lock acquisition; it must not complete
+	// while route1 still holds the session lock.
 	select {
 	case err := <-done2:
-		t.Fatalf("second same-session route completed early: %v", err)
+		t.Fatalf("second same-session route completed before first released lock: %v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
+
 	close(state.gate)
 	if err := <-done1; err != nil {
 		t.Fatalf("route1: %v", err)
@@ -293,14 +302,20 @@ func TestRouteDifferentSessionsConcurrent(t *testing.T) {
 	}
 	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
 	dec := &fakeDecisions{}
-	svc := NewRouteService(nil, cfg, routing.Selector{Config: cfg}, state, aff, dec)
+	svc := NewRouteService(cfg, routing.Selector{Config: cfg}, state, aff, dec)
 
 	done1 := make(chan error, 1)
 	go func() { _, err := svc.Route(context.Background(), routeReq("s1")); done1 <- err }()
-	<-state.read
+	<-state.read // route1 holds s1 lock while blocked
 
+	started2 := make(chan struct{})
 	done2 := make(chan error, 1)
-	go func() { _, err := svc.Route(context.Background(), routeReq("s2")); done2 <- err }()
+	go func() {
+		close(started2)
+		_, err := svc.Route(context.Background(), routeReq("s2"))
+		done2 <- err
+	}()
+	<-started2
 	select {
 	case err := <-done2:
 		if err != nil {
@@ -369,4 +384,85 @@ func TestSessionLockIsPerSession(t *testing.T) {
 	if entries != 0 {
 		t.Fatalf("lock table holds %d entries after every holder left, want 0", entries)
 	}
+}
+
+func TestRouteMissingDependenciesReturnErrors(t *testing.T) {
+	cfg := testConfig()
+	state := &fakeState{
+		snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+		health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+	}
+	aff := &fakeAffinity{m: map[string]store.SessionAffinity{}}
+	dec := &fakeDecisions{}
+
+	cases := []struct {
+		name string
+		svc  *RouteService
+		call func(*RouteService) error
+		want string
+	}{
+		{
+			name: "route missing state",
+			svc:  NewRouteService(cfg, routing.Selector{Config: cfg}, nil, aff, dec),
+			call: func(s *RouteService) error { _, err := s.Route(context.Background(), routeReq("s1")); return err },
+			want: "routing state unavailable",
+		},
+		{
+			name: "route missing affinity",
+			svc:  NewRouteService(cfg, routing.Selector{Config: cfg}, state, nil, dec),
+			call: func(s *RouteService) error { _, err := s.Route(context.Background(), routeReq("s1")); return err },
+			want: "routing state unavailable",
+		},
+		{
+			name: "route missing decisions",
+			svc:  NewRouteService(cfg, routing.Selector{Config: cfg}, state, aff, nil),
+			call: func(s *RouteService) error { _, err := s.Route(context.Background(), routeReq("s1")); return err },
+			want: "routing decision audit persistence failed",
+		},
+		{
+			name: "release missing affinity",
+			svc:  NewRouteService(cfg, routing.Selector{Config: cfg}, state, nil, dec),
+			call: func(s *RouteService) error { _, _, err := s.Release(context.Background(), "s1"); return err },
+			want: "session affinity store unavailable",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call(tc.svc)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("err=%v want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRouteDependencyFailuresReturnErrors(t *testing.T) {
+	cfg := testConfig()
+	baseState := func() *fakeState {
+		return &fakeState{
+			snaps:  []store.QuotaSnapshot{quotaSnap("commandcode", store.QuotaAvailable, 80)},
+			health: []store.HealthRecord{healthRec("commandcode", store.Healthy)},
+		}
+	}
+
+	t.Run("affinity read failure", func(t *testing.T) {
+		aff := &fakeAffinity{m: map[string]store.SessionAffinity{}, readErr: errors.New("boom")}
+		svc := NewRouteService(cfg, routing.Selector{Config: cfg}, baseState(), aff, &fakeDecisions{})
+		if _, err := svc.Route(context.Background(), routeReq("s1")); err == nil || err.Error() != "routing state unavailable" {
+			t.Fatalf("err=%v", err)
+		}
+	})
+	t.Run("affinity delete failure", func(t *testing.T) {
+		aff := &fakeAffinity{m: map[string]store.SessionAffinity{"s1": {SessionID: "s1", Alias: "cc-coding", CreatedAt: time.Now(), UpdatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}}, delErr: errors.New("boom")}
+		svc := NewRouteService(cfg, routing.Selector{Config: cfg}, baseState(), aff, &fakeDecisions{})
+		if _, _, err := svc.Release(context.Background(), "s1"); err == nil {
+			t.Fatal("expected error")
+		}
+	})
+	t.Run("decision persistence failure", func(t *testing.T) {
+		svc := NewRouteService(cfg, routing.Selector{Config: cfg}, baseState(), &fakeAffinity{m: map[string]store.SessionAffinity{}}, &fakeDecisions{err: errors.New("boom")})
+		if _, err := svc.Route(context.Background(), routeReq("s1")); err == nil || err.Error() != "routing decision audit persistence failed" {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }

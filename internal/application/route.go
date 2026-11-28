@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -37,7 +36,6 @@ type DecisionWriter interface {
 // auditing the decision, and pinning session affinity. It is constructible with
 // interfaces so tests can exercise it without HTTP or SQLite.
 type RouteService struct {
-	log       *slog.Logger
 	cfg       config.Config
 	selector  routing.Selector
 	state     StateReader
@@ -47,12 +45,8 @@ type RouteService struct {
 }
 
 // NewRouteService creates a route use-case service.
-func NewRouteService(log *slog.Logger, cfg config.Config, selector routing.Selector, state StateReader, affinity AffinityStore, decisions DecisionWriter) *RouteService {
-	if log == nil {
-		log = slog.Default()
-	}
+func NewRouteService(cfg config.Config, selector routing.Selector, state StateReader, affinity AffinityStore, decisions DecisionWriter) *RouteService {
 	return &RouteService{
-		log:       log,
 		cfg:       cfg,
 		selector:  selector,
 		state:     state,
@@ -99,6 +93,9 @@ func (s *RouteService) Route(ctx context.Context, req routing.RouteRequest) (rou
 // Release ends one session's route use: the pin is deleted, so the next decision
 // starts from the normal candidate set. Deleting an absent pin is not an error.
 func (s *RouteService) Release(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error) {
+	if s.affinity == nil {
+		return store.SessionAffinity{}, false, errors.New("session affinity store unavailable")
+	}
 	unlock := s.sessions.lock(sessionID)
 	defer unlock()
 
@@ -211,6 +208,10 @@ func QuotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Sn
 }
 
 func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Snapshot {
+	if s.State == store.QuotaUnknown {
+		reason := quotaUnknownReasonFromStore(s.UnknownReason)
+		return quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
+	}
 	windows := make([]quota.Window, 0, len(s.Windows))
 	for _, w := range s.Windows {
 		win := quota.Window{Name: w.Window, Limit: w.Limit, Used: w.Used, Remaining: w.Remaining}
@@ -219,14 +220,7 @@ func quotaSnapshotFromStore(s store.QuotaSnapshot, lowFraction float64) quota.Sn
 		}
 		windows = append(windows, win)
 	}
-	if s.State == store.QuotaUnknown {
-		reason := quotaUnknownReasonFromStore(s.UnknownReason)
-		snap := quota.Failed(s.Provider, s.Source, s.ObservedAt, reason)
-		_ = windows
-		return snap
-	}
-	snap := quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
-	return snap
+	return quota.Observed(s.Provider, s.Source, s.ObservedAt, windows, lowFraction)
 }
 
 func quotaUnknownReasonFromStore(r *store.UnknownReason) quota.UnknownReason {
