@@ -97,6 +97,96 @@ func (s *Store) QueryUsageRecords(ctx context.Context, q UsageQuery) ([]UsageRec
 	return out, nil
 }
 
+// UsageConflictQuery selects the recorded conflicts between two reports of the
+// same event. Every field is optional: an empty filter matches every conflict.
+type UsageConflictQuery struct {
+	// RequestID narrows the conflicts to one request. Empty matches any.
+	RequestID string
+	// Attempt narrows the conflicts to one attempt. Zero matches any attempt.
+	Attempt int
+	// Since and Until bound the observation time. A zero bound is open.
+	Since, Until time.Time
+	// Limit bounds how many conflicts are returned. Zero uses the default, and
+	// the default is capped: a query never reads the whole table.
+	Limit int
+}
+
+// QueryUsageConflicts returns the conflicts between two reports of the same
+// event, newest first.
+//
+// A conflict is what a consumer sees when two sources disagree about one
+// attempt: the stored event keeps the first observation, and these rows keep
+// both sides of the disagreement.
+func (s *Store) QueryUsageConflicts(ctx context.Context, q UsageConflictQuery) ([]UsageConflict, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = defaultUsageQueryLimit
+	}
+	if limit > maxUsageQueryLimit {
+		limit = maxUsageQueryLimit
+	}
+	var (
+		where []string
+		args  []any
+	)
+	if q.RequestID != "" {
+		where = append(where, "request_id = ?")
+		args = append(args, q.RequestID)
+	}
+	if q.Attempt > 0 {
+		where = append(where, "attempt = ?")
+		args = append(args, q.Attempt)
+	}
+	if !q.Since.IsZero() {
+		where = append(where, "observed_at >= ?")
+		args = append(args, ts(q.Since))
+	}
+	if !q.Until.IsZero() {
+		where = append(where, "observed_at <= ?")
+		args = append(args, ts(q.Until))
+	}
+	query := `SELECT request_id, attempt, field, original_value, original_provenance,
+	                 incoming_value, incoming_provenance, source, observed_at, received_at
+	          FROM usage_conflicts`
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " ORDER BY id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+
+	var out []UsageConflict
+	for rows.Next() {
+		var (
+			c                          UsageConflict
+			originalProv, incomingProv sql.NullString
+			observedAt, receivedAt     string
+		)
+		if err := rows.Scan(&c.RequestID, &c.Attempt, &c.Field, &c.OriginalValue, &originalProv,
+			&c.IncomingValue, &incomingProv, &c.Source, &observedAt, &receivedAt); err != nil {
+			return nil, classify(err)
+		}
+		c.OriginalProvenance = TokenProvenance(originalProv.String)
+		c.IncomingProvenance = TokenProvenance(incomingProv.String)
+		if c.ObservedAt, err = parseTS(observedAt); err != nil {
+			return nil, err
+		}
+		if c.ReceivedAt, err = parseTS(receivedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classify(err)
+	}
+	return out, nil
+}
+
 // LatestRoutingDecisions returns the newest routing decisions, newest first.
 func (s *Store) LatestRoutingDecisions(ctx context.Context, limit int) ([]RoutingDecisionRecord, error) {
 	if limit <= 0 {

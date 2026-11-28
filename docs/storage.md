@@ -50,6 +50,7 @@ The schema is versioned SQL migrations under
 | `quota_snapshots` | provider, quota state, UNKNOWN reason, source, confidence, observed-at, reset-at (via windows), safe error text |
 | `quota_windows` | one row per quota window (`5h`, `weekly`, …) with limit/used/remaining/reset-at, each nullable so "not reported" ≠ `0` |
 | `usage_records` | one row per request attempt — the canonical request/outcome event ([docs/request-telemetry.md](./request-telemetry.md)): provider, model, task class, route source, nullable input/output tokens each with its own provenance, reporting source, outcome, error class, stream state, measured latencies, optional routing `decision_id`, source observation time and server arrival time. Deduplicated on `(request_id, attempt)`, so a retry is a new row and a repeated report is ignored |
+| `usage_conflicts` | one row per disagreement between two reports of the same attempt: the field name and the two values with the channel that produced each. The event keeps the first observation; this keeps the evidence of the disagreement. Holds no provider payload |
 | `provider_health` | reachability state, independent of quota |
 | `poll_state` | per-provider `last_attempt_at` and `last_success_at`, kept separately so a failure never erases when quota was last known good |
 | `controller_state` | key/value controller state, upserted |
@@ -84,6 +85,16 @@ routed. It is **not** a replica of a provider's quota or dashboard counter.
 - `(request_id, attempt)` is the ingestion identity. A repeated report of an
   already-stored attempt writes nothing, so a retry of the HTTP call is safe. A
   report without a `request_id` cannot be deduplicated and is stored as sent.
+- A report that disagrees with a stored attempt is a **conflict**: the stored
+  event keeps the first observation, the API answers `409`, and the
+  disagreement is recorded in `usage_conflicts` so both sides stay visible.
+- `task_class` is constrained to the routing vocabulary (`routine`, `coding`,
+  `reasoning`) by the store and by a `CHECK` constraint in the schema, so a
+  direct write cannot store a class nobody can aggregate on.
+- `event_id` is derived from `(request_id, attempt)`. Rows that predate the
+  column get one when the schema migrates — SQLite has no hashing function, so
+  the id is computed by a helper registered with the driver — and the id is
+  the same on every migration, so identities never silently change.
 - `observed_at` is the source's clock and `received_at` is the server's; the
   two are never reconciled, and the gap between them is the report delay.
 - No prompt, message or conversation field is accepted: the route rejects
@@ -196,7 +207,8 @@ pruned in **bounded batches** (1000 rows per statement, at most 100 statements
 per run) so a cleanup never holds the write lock for the whole table; whatever
 is left over goes in the next run. The usage-record age is additionally
 **clamped to 365 days** inside the store, so storage stays bounded even when
-the configuration asks for more history than the controller holds.
+the configuration asks for more history than the controller holds. The conflict
+rows are removed with the events they belong to.
 
 `session_affinity` is not governed by a configured age at all: a pin whose
 `expires_at` has passed is deleted by every run, including one where every

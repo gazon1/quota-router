@@ -94,7 +94,9 @@ different content, `413` for a body over 64 KiB, `503` when the database is busy
   different content is not a retry: the store returns a conflict and the API
   answers `409` with the stable error envelope, instead of silently overwriting
   the stored attempt. A changed token count, outcome or provenance is such a
-  conflict.
+  conflict. The stored attempt keeps its first observation, and the store also
+  records the disagreement itself, so the conflict stays visible to a consumer
+  after the reporter has been told about it.
 - **Retries are separate.** A retry is attempt 2 of the same request: the failed
   attempt keeps its outcome and no usage, the successful one keeps its own. No
   row copies another's token counts.

@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -255,4 +258,47 @@ func TestUsageResponseHasNoContent(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body), "body %q is not JSON", w.Body)
 	assert.Len(t, body, 1, "body = %v, want only a status", body)
 	assert.Equal(t, "recorded", body["status"], "body = %v, want only a status", body)
+}
+
+// Two sources that disagree about one attempt: the second report is a conflict
+// the caller is told about (409), and the disagreement itself is kept so it
+// stays visible instead of being answered once and lost.
+func TestUsageConflictIsReportedAndKept(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(store.Config{Path: filepath.Join(t.TempDir(), "test.db")},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	srv := New(nil, Options{Usage: st, AuthToken: testToken})
+
+	first := `{"request_id":"req-1","provider":"minimax","source":"agent","outcome":"SUCCESS",` +
+		`"input_tokens":10,"input_provenance":"proxy_reported"}`
+	if w := post(t, srv, testToken, first); w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", w.Code)
+	}
+	second := `{"request_id":"req-1","provider":"minimax","source":"agent","outcome":"SUCCESS",` +
+		`"input_tokens":20,"input_provenance":"proxy_reported"}`
+	if w := post(t, srv, testToken, second); w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+
+	conflicts, err := st.QueryUsageConflicts(ctx, store.UsageConflictQuery{RequestID: "req-1"})
+	if err != nil {
+		t.Fatalf("QueryUsageConflicts: %v", err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Field != "input_tokens" {
+		t.Fatalf("conflicts = %+v, want the disagreeing count", conflicts)
+	}
+	events, err := st.QueryUsageRecords(ctx, store.UsageQuery{Provider: "minimax"})
+	if err != nil {
+		t.Fatalf("QueryUsageRecords: %v", err)
+	}
+	if len(events) != 1 || events[0].InputTokens == nil || *events[0].InputTokens != 10 {
+		t.Fatalf("events = %+v, want the first observation kept", events)
+	}
 }

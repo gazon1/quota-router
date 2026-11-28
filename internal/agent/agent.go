@@ -16,8 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gazon1/quota-router/internal/routing"
@@ -56,6 +59,14 @@ const (
 	StreamNotStreamed = "not_streamed"
 	StreamComplete    = "complete"
 	StreamInterrupted = "interrupted"
+)
+
+// Error classes the usage endpoint accepts: the normalized reason an attempt
+// failed. They are classes, never provider messages.
+const (
+	ErrorTimeout        = "timeout"
+	ErrorNetwork        = "network"
+	ErrorInvalidRequest = "invalid_request"
 )
 
 // Source is the usage-report channel this client reports under.
@@ -312,32 +323,114 @@ func (c *Client) ProxyRequest(ctx context.Context, routed Routed, body []byte) (
 
 // Chat performs one non-streaming model call through the proxy. A streaming
 // caller uses ProxyRequest instead and reports its own Attempt.
+//
+// A failed call is an error and nothing else. Use ChatAttempt when the failed
+// call must also be reported.
 func (c *Client) Chat(ctx context.Context, routed Routed, body []byte) (Reply, error) {
+	reply, _, err := c.ChatAttempt(ctx, routed, body)
+	return reply, err
+}
+
+// ChatAttempt performs the call and returns the attempt that must be
+// reported, including when the call failed.
+//
+// A failed call is an attempt like any other. Without it the usage history
+// would show a request that apparently never happened, while the provider may
+// well have served it. The attempt says how far the call got: a failure before
+// the request left this process is not ambiguous, and a failure after it is,
+// because nothing in the failure says whether the provider answered.
+//
+// The returned attempt carries no number: only the caller knows which attempt
+// of the request this is.
+func (c *Client) ChatAttempt(ctx context.Context, routed Routed, body []byte) (Reply, Attempt, error) {
 	req, err := c.ProxyRequest(ctx, routed, body)
 	if err != nil {
-		return Reply{}, err
+		// The request was never built, so nothing was dispatched and nothing
+		// about the attempt is ambiguous.
+		return Reply{}, Attempt{Outcome: OutcomeFailedBeforeFirstToken, ErrorClass: ErrorInvalidRequest}, err
 	}
+	// The trace tells a failure that happened on the wire apart from one that
+	// happened before the request was written.
+	var dispatched atomic.Bool
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { dispatched.Store(true) },
+	}
+	req = req.WithContext(httptrace.WithClientTrace(ctx, trace))
+
 	started := time.Now()
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return Reply{}, fmt.Errorf("agent: call proxy: %w", err)
+		return Reply{}, failedAttempt(dispatched.Load(), time.Since(started), err), fmt.Errorf("agent: call proxy: %w", err)
 	}
 	defer resp.Body.Close()
 	payload, err := readBody(resp.Body)
 	if err != nil {
-		return Reply{}, fmt.Errorf("agent: read proxy response: %w", err)
+		// The provider answered and the body broke halfway: the request was
+		// served, and nothing says how much of the answer arrived.
+		return Reply{}, failedAttempt(true, time.Since(started), err), fmt.Errorf("agent: read proxy response: %w", err)
 	}
 	outcome := OutcomeFailedBeforeFirstToken
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		outcome = OutcomeSuccess
 	}
-	return Reply{
+	reply := Reply{
 		Status:  resp.StatusCode,
 		Body:    payload,
 		Usage:   parseUsage(payload),
 		Outcome: outcome,
 		Latency: time.Since(started),
-	}, nil
+	}
+	return reply, reply.Attempt(0), nil
+}
+
+// failedAttempt classifies a failed call. A failure after the request reached
+// the network is ambiguous: the provider may have served it, and the failure
+// itself does not say otherwise. A failure before that is a failure, not a
+// maybe.
+func failedAttempt(dispatched bool, elapsed time.Duration, err error) Attempt {
+	a := Attempt{}
+	if elapsed > 0 {
+		ms := elapsed.Milliseconds()
+		a.LatencyMS = &ms
+	}
+	if errors.Is(err, context.Canceled) {
+		// The caller abandoned the attempt; that is not the provider failing,
+		// and it is not a maybe either.
+		a.Outcome = OutcomeCancelled
+		return a
+	}
+	if dispatched {
+		a.Outcome = OutcomeAmbiguous
+	} else {
+		a.Outcome = OutcomeFailedBeforeFirstToken
+	}
+	a.ErrorClass = transportErrorClass(err)
+	return a
+}
+
+// transportErrorClass names a transport failure in the bounded vocabulary the
+// store accepts. It is a class, never a provider message.
+func transportErrorClass(err error) string {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return ErrorTimeout
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrorTimeout
+	}
+	return ErrorNetwork
+}
+
+// ReportAttempt reports one attempt and returns the call error unchanged.
+//
+// A failed report is joined with the call error, never replaces it: the caller
+// must still learn why the call failed, and the lost telemetry stays visible
+// beside it.
+func (c *Client) ReportAttempt(ctx context.Context, routed Routed, attempt Attempt, callErr error) error {
+	if err := c.Report(ctx, routed, attempt); err != nil {
+		return errors.Join(callErr, fmt.Errorf("agent: report usage: %w", err))
+	}
+	return callErr
 }
 
 // Report sends one finished attempt to the controller, correlated by the ids

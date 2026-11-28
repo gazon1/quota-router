@@ -32,8 +32,9 @@ CREATE TABLE usage_records_v2 (
     schema_version INTEGER NOT NULL DEFAULT 1,
     provider      TEXT NOT NULL,
     model         TEXT,
-    -- Bounded class of work, when the reporter named one.
-    task_class    TEXT,
+    -- Bounded class of work, when the reporter named one. The vocabulary is
+    -- the routing request's: routine, coding or reasoning.
+    task_class    TEXT CHECK (task_class IS NULL OR task_class IN ('routine', 'coding', 'reasoning')),
     -- controller: the controller selected the route. manual: the agent used
     -- its manual fallback because the controller could not answer.
     route_source  TEXT CHECK (route_source IS NULL OR route_source IN ('controller', 'manual')),
@@ -67,11 +68,19 @@ CREATE TABLE usage_records_v2 (
     UNIQUE (request_id, attempt)
 );
 
+-- Legacy rows get the same event id the store would have derived for them:
+-- SQLite has no hashing function, so usage_event_id computes it in Go from the
+-- row's identity. The id is derived, never random, so migrating again or
+-- rolling back and migrating once more leaves the identities unchanged. A row
+-- without a request id has no identity to derive from and keeps a NULL id.
 INSERT INTO usage_records_v2
     (id, request_id, attempt, event_id, schema_version, provider, model, task_class, route_source,
      input_tokens, input_provenance, output_tokens, output_provenance, source, outcome, error_class,
      stream_state, ttft_ms, latency_ms, decision_id, observed_at, observed_at_reported, received_at)
-SELECT id, request_id, attempt, NULL, 1, provider, model, NULL, NULL,
+SELECT id, request_id, attempt,
+       CASE WHEN request_id IS NOT NULL AND request_id <> ''
+            THEN usage_event_id(request_id, attempt) ELSE NULL END,
+       1, provider, model, NULL, NULL,
        input_tokens,
        CASE WHEN input_tokens IS NULL THEN NULL
             WHEN provenance = 'estimated' THEN 'estimated' ELSE 'reported' END,
@@ -88,13 +97,43 @@ CREATE INDEX usage_records_observed_at ON usage_records (observed_at);
 CREATE INDEX usage_records_provider_model_observed_at ON usage_records (provider, model, observed_at);
 CREATE INDEX usage_records_decision_id ON usage_records (decision_id);
 
-ALTER TABLE routing_decisions ADD COLUMN task_class TEXT;
+-- A conflicting report is kept, not discarded. The event keeps the first
+-- observation; a conflict row keeps both sides of the disagreement, so the
+-- conflict stays visible instead of being answered once and lost.
+--
+-- Only the field name and the two values are stored: a conflict is not a place
+-- for the report that caused it, so no provider payload reaches this table.
+CREATE TABLE usage_conflicts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id    TEXT NOT NULL,
+    attempt       INTEGER NOT NULL CHECK (attempt >= 1),
+    field         TEXT NOT NULL,
+    original_value TEXT NOT NULL DEFAULT '',
+    original_provenance TEXT,
+    incoming_value TEXT NOT NULL DEFAULT '',
+    incoming_provenance TEXT,
+    source        TEXT NOT NULL,
+    observed_at   TEXT NOT NULL,
+    received_at   TEXT NOT NULL,
+    -- The same disagreement reported twice is one row.
+    UNIQUE (request_id, attempt, field, incoming_value)
+);
+
+CREATE INDEX usage_conflicts_request ON usage_conflicts (request_id, attempt);
+
+ALTER TABLE routing_decisions ADD COLUMN task_class TEXT
+    CHECK (task_class IS NULL OR task_class IN ('routine', 'coding', 'reasoning'));
 ALTER TABLE routing_decisions ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0 CHECK (explicit IN (0, 1));
 
 -- +goose Down
 -- Back to the shape of issue #14: one row per attempt with a single row-level
 -- provenance. The per-count provenance is collapsed back to one value, which
 -- is all the old shape could hold, and the routing telemetry columns go away.
+--
+-- The conflicts go with the events: the old shape cannot say that two reports
+-- disagreed.
+DROP TABLE usage_conflicts;
+
 CREATE TABLE usage_records_v1 (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     request_id    TEXT,
@@ -115,7 +154,12 @@ CREATE TABLE usage_records_v1 (
 INSERT INTO usage_records_v1
     (id, request_id, attempt, provider, model, input_tokens, output_tokens, provenance, source, outcome, decision_id, observed_at)
 SELECT id, request_id, attempt, provider, model, input_tokens, output_tokens,
-       CASE WHEN COALESCE(input_provenance, output_provenance) = 'estimated' THEN 'estimated' ELSE 'reported' END,
+       -- The old shape holds one provenance for both counts, so it has to
+       -- degrade conservatively: if either count was estimated, the row is
+       -- estimated. Reporting it as "reported" would promote an estimate the
+       -- old shape cannot show to be an estimate.
+       CASE WHEN input_provenance = 'estimated' OR output_provenance = 'estimated'
+            THEN 'estimated' ELSE 'reported' END,
        source,
        -- The old shape cannot say "ambiguous"; an ambiguous attempt is an
        -- unknown outcome there, never a success.

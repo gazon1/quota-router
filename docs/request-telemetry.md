@@ -76,6 +76,12 @@ string does not fit the set, so it cannot be stored — that is the redaction
 boundary for failures, and it is enforced by the same enum check as everything
 else.
 
+The task class is checked at the **storage** boundary, not only at the wire:
+the store validates it against the routing vocabulary
+([internal/routing](../internal/routing)), and the schema carries a `CHECK`
+constraint on it, so a direct write cannot store a class nobody can aggregate
+on either.
+
 `AMBIGUOUS` is neither success nor failure: it says the attempt may or may
 not have been served (a timeout after dispatch, for example). It never implies
 that nothing was charged.
@@ -116,12 +122,48 @@ Rules:
   nothing and still succeeds (`202`). Retrying the HTTP call is safe.
 - A **repeated report with different content** is a conflicting reuse: the
   store keeps the first observation and answers `409`. That covers a changed
-  token count, a changed outcome and a changed provenance.
+  token count, a changed outcome and a changed provenance. The disagreement
+  itself is kept — see [Conflicts](#conflicts).
 - `event_id` is derived from the identity, so the same attempt always has the
   same id and two attempts never share one. It exists to correlate a row with
   logs and with the routing decision — it is **never** a Prometheus label.
 - A report **without** a `request_id` cannot be deduplicated and is stored as
   sent.
+- A row that **predates the event id** gets one when the schema migrates: the
+  id is derived from the row's identity, so it is the same id the store would
+  have written. Migrating again, or rolling back and migrating once more,
+  leaves the identities unchanged. A row without a `request_id` has no
+  identity to derive from and keeps no id.
+
+## Conflicts
+
+Two sources may disagree about the same attempt. The disagreement is not
+dropped: the stored event keeps the **first** observation, and the conflict is
+recorded next to it, so both sides of the disagreement stay visible.
+
+A conflict row holds the identity of the attempt, the name of the field the
+sources disagreed on, and the two values with the channel that produced each
+one (the provenance of a token count). It holds **no provider payload**: a
+conflict is not a second copy of the report that caused it, so no prompt, no
+transcript and no raw provider response can reach this table.
+
+`store.QueryUsageConflicts` is the read interface, next to
+`store.QueryUsageRecords`:
+
+```go
+conflicts, err := st.QueryUsageConflicts(ctx, store.UsageConflictQuery{
+    RequestID: "req-1",
+    Attempt:   1,
+})
+```
+
+- A **repeated report with identical content** is not a conflict: it writes
+  nothing and records no disagreement.
+- The **same** conflict reported again is one row, not one per redelivery.
+- A conflict is **bounded**: at most 8 rows per attempt, and the rows are
+  removed by the same retention run that removes the events they belong to.
+- The API still answers `409` for a conflicting report. The caller learns that
+  its report did not land; the store keeps the evidence of why.
 
 ## Time
 
@@ -229,6 +271,12 @@ A telemetry failure must not change behaviour:
   directly.
 - The agent's report is best effort by construction — the caller decides
   whether a failed report is worth retrying, and the identity makes that safe.
+- **A failed call is still an attempt.** When the proxy call fails, the agent
+  hands the caller an attempt that can be reported: a failure before the
+  request was sent is a failure (`FAILED_BEFORE_FIRST_TOKEN`), and a failure
+  after it is `AMBIGUOUS`, because nothing in the failure says whether the
+  provider served it. A failed report never replaces the proxy error — the
+  caller learns both.
 
 ## Boundaries
 

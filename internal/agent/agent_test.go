@@ -509,3 +509,107 @@ func deref(s *string) string {
 	}
 	return *s
 }
+
+// A call that failed on the wire is still an attempt: without it the usage
+// history would show a request that apparently never happened, while the
+// provider may well have served it. The attempt says so, and it is reportable.
+func TestFailedCallAfterDispatchIsAmbiguousAndReportable(t *testing.T) {
+	h := newHarness(t)
+	// A proxy that takes the request and then drops the connection: nothing
+	// says whether the provider answered it.
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}))
+	defer broken.Close()
+
+	c := *h.client
+	c.ProxyURL = broken.URL
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode", RequestID: "req-1"}
+	_, attempt, err := c.ChatAttempt(context.Background(), routed, []byte(`{"messages":[{"role":"user","content":"hi"}]}`))
+	if err == nil {
+		t.Fatal("the failed call was reported as a success")
+	}
+	if attempt.Outcome != agent.OutcomeAmbiguous {
+		t.Fatalf("outcome = %q, want %q", attempt.Outcome, agent.OutcomeAmbiguous)
+	}
+	if attempt.ErrorClass != agent.ErrorNetwork {
+		t.Fatalf("error class = %q, want %q", attempt.ErrorClass, agent.ErrorNetwork)
+	}
+	if attempt.LatencyMS == nil {
+		t.Fatal("the failed attempt carries no measurement")
+	}
+
+	// The attempt is reportable, and the stored event says what happened.
+	if err := c.Report(context.Background(), routed, attempt); err != nil {
+		t.Fatalf("Report: %v", err)
+	}
+	if row := h.usageRow(t); row.Outcome != store.OutcomeAmbiguous {
+		t.Fatalf("outcome = %q, want %q", row.Outcome, store.OutcomeAmbiguous)
+	}
+}
+
+// A failure that happened before the request was sent is not a maybe: nothing
+// was dispatched, so the attempt failed.
+func TestFailureBeforeDispatchIsNotAmbiguous(t *testing.T) {
+	h := newHarness(t)
+	c := *h.client
+	// Nothing listens there: the connection fails before the request is
+	// written.
+	c.ProxyURL = "http://127.0.0.1:1"
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode", RequestID: "req-2"}
+	_, attempt, err := c.ChatAttempt(context.Background(), routed, []byte(`{"messages":[]}`))
+	if err == nil {
+		t.Fatal("the failed call was reported as a success")
+	}
+	if attempt.Outcome == agent.OutcomeAmbiguous {
+		t.Fatal("a failure before the request was sent was called ambiguous")
+	}
+	if attempt.Outcome != agent.OutcomeFailedBeforeFirstToken {
+		t.Fatalf("outcome = %q, want %q", attempt.Outcome, agent.OutcomeFailedBeforeFirstToken)
+	}
+
+	// A request that was never built fails the same way: nothing was sent.
+	unconfigured := *h.client
+	unconfigured.ProxyURL = ""
+	_, attempt, err = unconfigured.ChatAttempt(context.Background(), routed, []byte(`{"messages":[]}`))
+	if err == nil {
+		t.Fatal("the unconfigured proxy was reported as a success")
+	}
+	if attempt.Outcome != agent.OutcomeFailedBeforeFirstToken {
+		t.Fatalf("outcome = %q, want %q", attempt.Outcome, agent.OutcomeFailedBeforeFirstToken)
+	}
+	if attempt.ErrorClass != agent.ErrorInvalidRequest {
+		t.Fatalf("error class = %q, want %q", attempt.ErrorClass, agent.ErrorInvalidRequest)
+	}
+}
+
+// A failed report must not replace the reason the call failed: the caller has
+// to learn both.
+func TestReportFailureDoesNotReplaceTheProxyError(t *testing.T) {
+	h := newHarness(t)
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+
+	c := *h.client
+	c.ControllerURL = failing.URL
+	c.ProxyURL = "http://127.0.0.1:1"
+
+	routed := agent.Routed{Alias: "cc-coding", Provider: "commandcode", RequestID: "req-3"}
+	_, attempt, callErr := c.ChatAttempt(context.Background(), routed, []byte(`{"messages":[]}`))
+	if callErr == nil {
+		t.Fatal("the failed call was reported as a success")
+	}
+	err := c.ReportAttempt(context.Background(), routed, attempt, callErr)
+	if err == nil {
+		t.Fatal("the failed report was reported as a success")
+	}
+	if !errors.Is(err, callErr) {
+		t.Fatalf("err = %v, want the proxy error to survive it", err)
+	}
+}

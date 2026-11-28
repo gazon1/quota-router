@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/gazon1/quota-router/internal/routing"
 )
 
 // QuotaState is the subscription-quota state. UNKNOWN is never zero remaining:
@@ -294,6 +296,53 @@ type UsageRecord struct {
 	ReceivedAt time.Time
 }
 
+// UsageConflict records that two sources reported different content for one
+// event identity.
+//
+// The stored event keeps the first observation: a conflict never overwrites
+// it. The conflict row keeps both sides of the disagreement, so the conflict
+// stays visible instead of being answered once and lost.
+type UsageConflict struct {
+	// RequestID and Attempt identify the event the conflict is about.
+	RequestID string
+	Attempt   int
+	// Field is the name of the field the two reports disagreed on.
+	Field string
+	// OriginalValue and IncomingValue are the two values, as text. An absent
+	// value is the empty string: a conflict never invents one.
+	OriginalValue, IncomingValue string
+	// OriginalProvenance and IncomingProvenance say which channel produced the
+	// matching value. They are set for the token counts; a field that is not a
+	// count has no channel of its own.
+	OriginalProvenance, IncomingProvenance TokenProvenance
+	// Source is the channel that reported the incoming value.
+	Source string
+	// ObservedAt is when the source observed the conflicting report, ReceivedAt
+	// when this installation stored it.
+	ObservedAt, ReceivedAt time.Time
+}
+
+// Validate checks the fields the conflict schema constrains.
+func (c UsageConflict) Validate() error {
+	var errs []error
+	if c.RequestID == "" {
+		errs = append(errs, errors.New("request_id must not be empty"))
+	}
+	if c.Attempt < 1 {
+		errs = append(errs, fmt.Errorf("attempt must be >= 1, got %d", c.Attempt))
+	}
+	if c.Field == "" {
+		errs = append(errs, errors.New("field must not be empty"))
+	}
+	if c.Source == "" {
+		errs = append(errs, errors.New("source must not be empty"))
+	}
+	if len(c.RequestID) > maxKey || len(c.Field) > maxKey || len(c.Source) > maxKey {
+		errs = append(errs, fmt.Errorf("request_id, field and source must be at most %d bytes", maxKey))
+	}
+	return errors.Join(errs...)
+}
+
 // HealthRecord is one observation of provider reachability.
 type HealthRecord struct {
 	Provider      string
@@ -432,6 +481,13 @@ func (u UsageRecord) Validate() error {
 	if len(u.TaskClass) > maxKey {
 		errs = append(errs, fmt.Errorf("task_class must be at most %d bytes", maxKey))
 	}
+	// The vocabulary belongs to the routing request contract, so the store
+	// checks it against the same list instead of keeping a second one. A task
+	// class nobody can aggregate on is rejected here, not only at the wire
+	// boundary: a direct write must not be able to store one either.
+	if u.TaskClass != "" && !routing.TaskClass(u.TaskClass).Known() {
+		errs = append(errs, fmt.Errorf("task_class %q is not a known task class", u.TaskClass))
+	}
 	if len(u.RequestID) > maxKey || len(u.DecisionID) > maxKey || len(u.Source) > maxKey || len(u.EventID) > maxKey {
 		errs = append(errs, fmt.Errorf("request_id, decision_id, source and event_id must be at most %d bytes", maxKey))
 	}
@@ -512,6 +568,11 @@ func (r RoutingDecisionRecord) Validate() error {
 	}
 	if r.CreatedAt.IsZero() {
 		errs = append(errs, errors.New("created_at must be set"))
+	}
+	// The task class is the same bounded vocabulary as on the event, so a
+	// decision cannot carry a class the events refuse.
+	if r.TaskClass != "" && !routing.TaskClass(r.TaskClass).Known() {
+		errs = append(errs, fmt.Errorf("task_class %q is not a known task class", r.TaskClass))
 	}
 	return errors.Join(errs...)
 }
