@@ -90,14 +90,14 @@ type fakeStore struct {
 	snaps       []store.QuotaSnapshot
 	health      []store.HealthRecord
 	decisions   []store.RoutingDecisionRecord
-	snapErr     error
-	healthErr   error
 	saveErr     error
 	affinity    map[string]store.SessionAffinity
 	affinityErr error
 	// lastAttempt is the per-provider freshness anchor the status and selection
 	// reads compare the persisted observation against.
 	lastAttempt map[string]time.Time
+	// pollErr fails the batch cycle read the status and selection paths use.
+	pollErr error
 }
 
 func (f *fakeStore) SessionAffinity(_ context.Context, sessionID string) (store.SessionAffinity, bool, error) {
@@ -127,35 +127,25 @@ func (f *fakeStore) DeleteSessionAffinity(_ context.Context, sessionID string) e
 	return nil
 }
 
-func (f *fakeStore) LatestQuotaSnapshot(context.Context) ([]store.QuotaSnapshot, error) {
-	if f.snapErr != nil {
-		return nil, f.snapErr
+// PollCycles maps the fake store's snapshot, health and last-attempt rows onto
+// the batch cycle read the status and selection paths use. A provider without a
+// snapshot row is absent from the map, like an absent poll cycle: nothing may be
+// fresh without one.
+func (f *fakeStore) PollCycles(_ context.Context) (map[string]store.PollCycle, error) {
+	if f.pollErr != nil {
+		return nil, f.pollErr
 	}
-	return f.snaps, nil
-}
-func (f *fakeStore) LatestProviderHealth(context.Context) ([]store.HealthRecord, error) {
-	if f.healthErr != nil {
-		return nil, f.healthErr
+	out := map[string]store.PollCycle{}
+	for _, sn := range f.snaps {
+		c := out[sn.Provider]
+		c.Snapshot = sn
+		c.AttemptAt = f.lastAttempt[sn.Provider]
+		out[sn.Provider] = c
 	}
-	return f.health, nil
-}
-
-// PollState reports the last attempt the fake store recorded per provider; an
-// absent provider means no attempt was ever made, so nothing may be fresh.
-func (f *fakeStore) PollState(_ context.Context, provider string) (time.Time, time.Time, error) {
-	at, ok := f.lastAttempt[provider]
-	if !ok {
-		return time.Time{}, time.Time{}, nil
-	}
-	return at, time.Time{}, nil
-}
-
-// PollStates maps the fake store's per-provider last attempts onto the batch
-// read the status and selection paths use.
-func (f *fakeStore) PollStates(_ context.Context) (map[string]time.Time, error) {
-	out := map[string]time.Time{}
-	for provider, at := range f.lastAttempt {
-		out[provider] = at
+	for _, h := range f.health {
+		c := out[h.Provider]
+		c.Health = h
+		out[h.Provider] = c
 	}
 	return out, nil
 }
@@ -434,7 +424,7 @@ func TestDecisionsEndpoint(t *testing.T) {
 
 func TestSelectEndpointStateLoadError(t *testing.T) {
 	cfg := testRoutingConfig()
-	st := &fakeStore{snapErr: context.DeadlineExceeded}
+	st := &fakeStore{pollErr: context.DeadlineExceeded}
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
 	srv.store = st
 	srv.decisions = st
@@ -443,6 +433,11 @@ func TestSelectEndpointStateLoadError(t *testing.T) {
 	w := postSelect(t, srv, testRoutingToken, `{"version":1,"session_id":"s1","capabilities":{}}`)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	// A failed read must not leave a decision behind: nothing was decided, so
+	// nothing may be persisted as the session's successful choice.
+	if len(st.decisions) != 0 {
+		t.Fatalf("decisions=%d, want none when the selection state cannot be read", len(st.decisions))
 	}
 }
 
@@ -787,6 +782,64 @@ func TestStatusEndpointStaleHealthNotHealthy(t *testing.T) {
 	}
 }
 
+// The freshness policy is applied in two steps: the read marks the row stale
+// when the poll anchor is missing or past the bound, and StateAt then derives the
+// actionable state from the observation itself, honouring an observation that is
+// older than the bound. Status and the selector must agree on every combination
+// of anchor and observation age, so the pair is pinned here.
+func TestFreshnessBoundCombinesAnchorAndObservation(t *testing.T) {
+	srv := New(nil, Options{Config: testRoutingConfig()})
+	now := time.Now().UTC()
+	bound := staleAfter(srv.cfg.Polling.Interval)
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := now.Add(time.Hour)
+	snap := store.QuotaSnapshot{
+		Provider:   "minimax",
+		State:      store.QuotaAvailable,
+		Source:     "test",
+		Confidence: store.Reported,
+		ObservedAt: now,
+		Windows: []store.QuotaWindow{{
+			Window: "5h", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset,
+		}},
+	}
+	snapWith := func(observedAt time.Time) store.QuotaSnapshot {
+		snap.ObservedAt = observedAt
+		return snap
+	}
+
+	cases := []struct {
+		name       string
+		anchor     time.Time
+		observedAt time.Time
+		wantStale  bool
+		wantState  store.QuotaState
+		wantReason string
+	}{
+		{"fresh anchor and fresh observation", now, now, false, store.QuotaAvailable, ""},
+		{"stale anchor marks the row stale", now.Add(-2 * time.Hour), now.Add(-2 * time.Hour), true, store.QuotaUnknown, "STALE_OBSERVATION"},
+		{"missing anchor marks the row stale", time.Time{}, now, true, store.QuotaUnknown, "STALE_OBSERVATION"},
+		{"stale observation is stale even with a fresh anchor", now, now.Add(-2 * time.Hour), false, store.QuotaUnknown, "STALE_OBSERVATION"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := srv.quotaAt(snapWith(tc.observedAt), tc.anchor, now, bound)
+			state, reason := q.StateAt(now, bound)
+			if q.Stale != tc.wantStale {
+				t.Fatalf("quotaAt stale = %t, want %t", q.Stale, tc.wantStale)
+			}
+			if got := string(state); got != string(tc.wantState) {
+				t.Fatalf("state = %s, want %s", got, tc.wantState)
+			}
+			if got := string(reason); got != tc.wantReason {
+				t.Fatalf("unknown reason = %q, want %q", got, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestStatusRequiresAuth(t *testing.T) {
 	srv := New(nil, Options{Config: testRoutingConfig(), AuthToken: testRoutingToken})
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
@@ -818,7 +871,7 @@ func TestStatusUnavailableWithoutStore(t *testing.T) {
 func TestStatusUnavailableOnStoreError(t *testing.T) {
 	cfg := testRoutingConfig()
 	srv := New(nil, Options{Config: cfg, AuthToken: testRoutingToken})
-	srv.store = &fakeStore{snapErr: context.DeadlineExceeded}
+	srv.store = &fakeStore{pollErr: context.DeadlineExceeded}
 	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
 	req.Header.Set("Authorization", "Bearer "+testRoutingToken)
 	w := httptest.NewRecorder()

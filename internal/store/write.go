@@ -287,6 +287,149 @@ func (s *Store) PollStates(ctx context.Context) (map[string]time.Time, error) {
 	return out, rows.Err()
 }
 
+// PollCycle is one provider's latest poll cycle: the snapshot the poller
+// committed, the health observation that came with it and the attempt anchor
+// that backs the snapshot's freshness. A cycle is persisted in one transaction
+// and read back in one, so a snapshot can never be paired with an anchor or a
+// health observation from a different cycle.
+type PollCycle struct {
+	Snapshot  QuotaSnapshot
+	Health    HealthRecord
+	AttemptAt time.Time
+}
+
+// PollCycles returns the latest poll cycle per provider in one query. The
+// snapshot, the health observation and the freshness anchor of a cycle are read
+// inside a single read transaction, so a cycle that SavePollResult committed
+// atomically is observed atomically here too: a reader cannot pair a snapshot
+// with an anchor from a later cycle, which is what would let an older snapshot
+// look fresh again. A provider without a committed cycle is absent from the map,
+// and readers treat absence as stale.
+func (s *Store) PollCycles(ctx context.Context) (map[string]PollCycle, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer tx.Rollback()
+
+	cycles := map[string]PollCycle{}
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, provider, state, unknown_reason, source, confidence, observed_at, error
+		 FROM quota_snapshots WHERE `+newestPerProvider("quota_snapshots", true))
+	if err != nil {
+		return nil, classify(err)
+	}
+	ids := map[string]int64{}
+	var order []string
+	for rows.Next() {
+		var (
+			id              int64
+			snap            QuotaSnapshot
+			reason, errText sql.NullString
+			observedAt      string
+		)
+		if err := rows.Scan(&id, &snap.Provider, &snap.State, &reason, &snap.Source, &snap.Confidence, &observedAt, &errText); err != nil {
+			rows.Close()
+			return nil, classify(err)
+		}
+		if snap.ObservedAt, err = parseTS(observedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if reason.Valid {
+			r := UnknownReason(reason.String)
+			snap.UnknownReason = &r
+		}
+		snap.Error = errText.String
+		cycles[snap.Provider] = PollCycle{Snapshot: snap}
+		ids[snap.Provider] = id
+		order = append(order, snap.Provider)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, classify(err)
+	}
+	rows.Close()
+	for _, p := range order {
+		windows, err := windows(ctx, tx, ids[p])
+		if err != nil {
+			return nil, err
+		}
+		c := cycles[p]
+		c.Snapshot.Windows = windows
+		cycles[p] = c
+	}
+
+	pollRows, err := tx.QueryContext(ctx, `SELECT provider, last_attempt_at FROM poll_state`)
+	if err != nil {
+		return nil, classify(err)
+	}
+	for pollRows.Next() {
+		var provider string
+		var at string
+		if err := pollRows.Scan(&provider, &at); err != nil {
+			pollRows.Close()
+			return nil, classify(err)
+		}
+		t, err := parseTS(at)
+		if err != nil {
+			pollRows.Close()
+			return nil, err
+		}
+		if c, ok := cycles[provider]; ok {
+			c.AttemptAt = t
+			cycles[provider] = c
+		}
+	}
+	if err := pollRows.Err(); err != nil {
+		pollRows.Close()
+		return nil, classify(err)
+	}
+	pollRows.Close()
+
+	healthRows, err := tx.QueryContext(ctx, `SELECT provider, state, observed_at, error, cooldown_until FROM provider_health WHERE `+newestPerProvider("provider_health", true))
+	if err != nil {
+		return nil, classify(err)
+	}
+	for healthRows.Next() {
+		var (
+			h             HealthRecord
+			observed      string
+			errText       sql.NullString
+			cooldownUntil sql.NullString
+		)
+		if err := healthRows.Scan(&h.Provider, &h.State, &observed, &errText, &cooldownUntil); err != nil {
+			healthRows.Close()
+			return nil, classify(err)
+		}
+		if h.ObservedAt, err = parseTS(observed); err != nil {
+			healthRows.Close()
+			return nil, err
+		}
+		h.Error = errText.String
+		if cooldownUntil.Valid {
+			t, err := parseTS(cooldownUntil.String)
+			if err != nil {
+				healthRows.Close()
+				return nil, err
+			}
+			h.CooldownUntil = &t
+		}
+		if c, ok := cycles[h.Provider]; ok {
+			c.Health = h
+			cycles[h.Provider] = c
+		}
+	}
+	if err := healthRows.Err(); err != nil {
+		healthRows.Close()
+		return nil, classify(err)
+	}
+	healthRows.Close()
+
+	return cycles, nil
+}
+
 // SavePollResult persists one poll cycle — the snapshot, the health observation
 // and the poll-state anchor — inside a single transaction, so a cycle is never
 // observable half-written: either all three land, or none do and the cycle fails

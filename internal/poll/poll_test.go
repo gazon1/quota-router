@@ -19,15 +19,15 @@ import (
 func testLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // recorder is a Sink that records what a poll persisted, so a test asserts on
-// what would have reached the database without one.
+// what would have reached the database without one. It implements the single
+// SavePollResult operation the Sink interface owns: a rejected write rolls the
+// whole cycle back, so nothing is recorded and the poll state is untouched.
 type recorder struct {
 	mu       sync.Mutex
 	snaps    []store.QuotaSnapshot
 	health   []store.HealthRecord
 	attempts map[string]time.Time
 	success  map[string]time.Time
-	// onSave runs before each snapshot write, so a test can block a poll.
-	onSave func()
 	// fail rejects sink writes, and failOp names one ("snapshot", "health" or
 	// "poll") or leaves it unset to reject all of them.
 	fail   bool
@@ -42,42 +42,6 @@ const (
 
 func newRecorder() *recorder {
 	return &recorder{attempts: map[string]time.Time{}, success: map[string]time.Time{}}
-}
-
-func (r *recorder) SaveQuotaSnapshot(_ context.Context, s store.QuotaSnapshot) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.fail && (r.failOp == "" || r.failOp == failSnapshot) {
-		return errors.New("simulated sink write failure")
-	}
-	if r.onSave != nil {
-		r.onSave()
-	}
-	r.snaps = append(r.snaps, s)
-	return nil
-}
-
-func (r *recorder) SaveProviderHealth(_ context.Context, h store.HealthRecord) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.fail && (r.failOp == "" || r.failOp == failHealth) {
-		return errors.New("simulated sink write failure")
-	}
-	r.health = append(r.health, h)
-	return nil
-}
-
-func (r *recorder) SavePollState(_ context.Context, provider string, attemptAt, successAt time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.fail && (r.failOp == "" || r.failOp == failPoll) {
-		return errors.New("simulated sink write failure")
-	}
-	r.attempts[provider] = attemptAt
-	if !successAt.IsZero() {
-		r.success[provider] = successAt
-	}
-	return nil
 }
 
 // SavePollResult persists one cycle atomically in the fake: any rejected write
@@ -270,8 +234,8 @@ func TestRetryCountersStayPerProvider(t *testing.T) {
 	if !strings.Contains(alphaLine, "consecutive_failures=2") {
 		t.Fatalf("alpha log %q: its own second transient failure must count as 2", alphaLine)
 	}
-	if !strings.Contains(alphaLine, "last_success_at=0001-01-01T00:00:00Z") {
-		t.Fatalf("alpha log %q: a provider that never succeeded must keep last_success unset", alphaLine)
+	if !strings.Contains(alphaLine, "process_last_success_at=0001-01-01T00:00:00Z") {
+		t.Fatalf("alpha log %q: a provider that never succeeded must keep last success unset", alphaLine)
 	}
 	if !strings.Contains(betaLine, "consecutive_failures=0") {
 		t.Fatalf("beta log %q: want its own success to reset its counter", betaLine)
@@ -662,7 +626,7 @@ func TestPollLogsDurationRetriesAndOutcome(t *testing.T) {
 
 	p.poll(context.Background(), p.Targets[0], &loopState{})
 	logged := buf.String()
-	for _, want := range []string{"attempt_duration_ms", "retries", "consecutive_failures", "last_success_at", "last_attempt_at", "persist_ok"} {
+	for _, want := range []string{"attempt_duration_ms", "retries", "consecutive_failures", "process_last_success_at", "last_attempt_at", "persist_ok"} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("poll log %q missing %q", logged, want)
 		}

@@ -29,13 +29,6 @@ type Source interface {
 
 // Sink persists what a poll observed. store.Store implements it.
 type Sink interface {
-	SaveQuotaSnapshot(ctx context.Context, snap store.QuotaSnapshot) error
-	SaveProviderHealth(ctx context.Context, h store.HealthRecord) error
-	// SavePollState records the attempt time and, when the attempt established
-	// quota, the success time. A zero success time must leave the recorded
-	// success untouched: the two timestamps are independent, and a failure does
-	// not erase when quota was last known good.
-	SavePollState(ctx context.Context, provider string, attemptAt, successAt time.Time) error
 	// SavePollResult persists one poll cycle — snapshot, health and the
 	// poll-state anchor — as a single transaction, so a cycle is never observed
 	// half-written and a failed cycle cannot leave a newer snapshot behind an
@@ -87,17 +80,17 @@ type Poller struct {
 // own state, so providers polled concurrently never share a counter and never
 // mix one provider's attempts into another's history.
 type loopState struct {
-	// consecutiveFailures counts attempts that did not establish quota; the
-	// per-attempt debug log reports it, the retry count and the duration, so a
-	// provider outage is diagnosable from logs alone.
-	//
-	// Both fields are loop diagnostics for this process's polls; the durable
-	// last success lives in poll_state and is the anchor runtime consumers read.
+	// consecutiveFailures counts committed cycles that did not establish quota;
+	// the per-attempt debug log reports it, the retry count and the duration, so
+	// a provider outage is diagnosable from logs alone. It counts only cycles that
+	// were persisted: a failed write is logged with persist_ok=false and leaves
+	// the failure history of the last committed cycle alone.
 	consecutiveFailures int
-	// lastSuccessAt is the newest attempt that did establish quota in this
-	// process; a restart starts the history over even though poll_state keeps
-	// the durable anchor.
-	lastSuccessAt time.Time
+	// processLastSuccessAt is the newest committed cycle in this process that
+	// established quota; a restart starts the history over even though poll_state
+	// keeps the durable anchor. It is a loop diagnostic, not the durable last
+	// success a reader compares against.
+	processLastSuccessAt time.Time
 }
 
 // New builds a poller with the production defaults for retry.
@@ -153,8 +146,9 @@ func (p *Poller) loop(ctx context.Context, t Target) {
 }
 
 // poll performs one poll: an attempt, and retries while the adapter classified
-// the failure as transient. Every attempt is persisted, so last-attempt moves
-// even when the poll never succeeds, while last-success keeps its own value.
+// the failure as transient. Every attempt is persisted, so last_attempt_at moves
+// even when the poll never succeeds, while the loop's process-local last success
+// keeps its own value until a committed cycle establishes quota again.
 func (p *Poller) poll(ctx context.Context, t Target, st *loopState) {
 	for attempt := 1; ; attempt++ {
 		started := time.Now().UTC()
@@ -197,7 +191,7 @@ func (p *Poller) record(ctx context.Context, provider string, st *loopState, sna
 	if cycleErr == nil {
 		if success {
 			st.consecutiveFailures = 0
-			st.lastSuccessAt = successAt
+			st.processLastSuccessAt = successAt
 		} else {
 			st.consecutiveFailures++
 		}
@@ -209,7 +203,7 @@ func (p *Poller) record(ctx context.Context, provider string, st *loopState, sna
 	p.Log.Debug("polled provider", "provider", provider,
 		"health", state.Health, "reason", state.Reason(), "fresh", success,
 		"attempt", attempt, "retries", attempt-1, "attempt_duration_ms", time.Since(started).Milliseconds(),
-		"consecutive_failures", st.consecutiveFailures, "last_success_at", st.lastSuccessAt.UTC().Format(time.RFC3339Nano),
+		"consecutive_failures", st.consecutiveFailures, "process_last_success_at", st.processLastSuccessAt.UTC().Format(time.RFC3339Nano),
 		"last_attempt_at", at.UTC().Format(time.RFC3339Nano), "persist_ok", cycleErr == nil)
 }
 

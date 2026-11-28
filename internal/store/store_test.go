@@ -1543,6 +1543,66 @@ func TestSavePollResultIsAtomic(t *testing.T) {
 	}
 }
 
+// The batch cycle read returns the snapshot, the health observation and the
+// freshness anchor of the same committed cycle, so a reader can never pair a
+// snapshot with an anchor from different cycles.
+func TestPollCyclesReturnsSnapshotHealthAndAnchorTogether(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	cycles, err := s.PollCycles(ctx)
+	if err != nil {
+		t.Fatalf("PollCycles: %v", err)
+	}
+	if len(cycles) != 0 {
+		t.Fatalf("PollCycles = %v, want no cycles before any poll", cycles)
+	}
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	snap := QuotaSnapshot{
+		Provider:   "minimax",
+		State:      QuotaAvailable,
+		Source:     "test",
+		Confidence: Reported,
+		ObservedAt: first,
+		Windows: []QuotaWindow{{
+			Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset,
+		}},
+	}
+	health := HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}
+	if err := s.SavePollResult(ctx, "minimax", snap, health, first, first); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
+	}
+
+	cycles, err = s.PollCycles(ctx)
+	if err != nil {
+		t.Fatalf("PollCycles: %v", err)
+	}
+	cycle, ok := cycles["minimax"]
+	if !ok {
+		t.Fatalf("PollCycles = %v, want a cycle for minimax", cycles)
+	}
+	if cycle.Snapshot.State != QuotaAvailable {
+		t.Fatalf("cycle snapshot state = %s, want AVAILABLE", cycle.Snapshot.State)
+	}
+	if len(cycle.Snapshot.Windows) != 1 || cycle.Snapshot.Windows[0].Window != "5h" {
+		t.Fatalf("cycle snapshot windows = %+v, want the single 5h window", cycle.Snapshot.Windows)
+	}
+	if cycle.AttemptAt != first {
+		t.Fatalf("cycle attempt_at = %s, want %s", cycle.AttemptAt, first)
+	}
+	if cycle.Health.State != Healthy {
+		t.Fatalf("cycle health state = %s, want HEALTHY", cycle.Health.State)
+	}
+	if got := cycle.Health.ObservedAt; !got.Equal(first) {
+		t.Fatalf("cycle health observed_at = %s, want %s", got, first)
+	}
+}
+
 // A pin must survive a restart with its timestamps intact: that is what makes
 // affinity something a controller can lose its process on and still honour.
 func TestSessionAffinitySurvivesRestart(t *testing.T) {

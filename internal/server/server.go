@@ -26,19 +26,19 @@ type DecisionStore interface {
 	LatestRoutingDecisions(ctx context.Context, limit int) ([]store.RoutingDecisionRecord, error)
 }
 
-// StateStore reads the latest quota and provider health observations and the
-// session-to-route pins. Affinity lives here rather than behind a second seam
-// because it is routing state the selection path reads and writes, like quota.
+// StateStore reads the latest persisted poll cycle per provider — snapshot, health
+// and freshness anchor — plus the session-to-route pins. Affinity lives here rather
+// than behind a second seam because it is routing state the selection path reads
+// and writes, like quota.
 type StateStore interface {
-	LatestQuotaSnapshot(ctx context.Context) ([]store.QuotaSnapshot, error)
-	LatestProviderHealth(ctx context.Context) ([]store.HealthRecord, error)
+	// PollCycles returns the latest poll cycle per provider — snapshot, health
+	// and freshness anchor — read in one transaction, for callers that read
+	// several providers at once. Same zero value as an absent cycle: readers fail
+	// closed on it.
+	PollCycles(ctx context.Context) (map[string]store.PollCycle, error)
 	SessionAffinity(ctx context.Context, sessionID string) (store.SessionAffinity, bool, error)
 	SaveSessionAffinity(ctx context.Context, a store.SessionAffinity) error
 	DeleteSessionAffinity(ctx context.Context, sessionID string) error
-	// PollStates returns the latest poll anchor per provider in one query, for
-	// callers that read several providers at once. Same zero value as an absent
-	// poll state: readers fail closed on it.
-	PollStates(ctx context.Context) (map[string]time.Time, error)
 }
 
 // Server wires HTTP routes and handlers.
@@ -325,25 +325,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
 		return
 	}
-	snaps, err := s.store.LatestQuotaSnapshot(r.Context())
+	cycles, err := s.store.PollCycles(r.Context())
 	if err != nil {
-		s.log.ErrorContext(r.Context(), "read status quota", "error", err)
+		s.log.ErrorContext(r.Context(), "read status cycles", "error", err)
 		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
 		return
 	}
-	healths, err := s.store.LatestProviderHealth(r.Context())
-	if err != nil {
-		s.log.ErrorContext(r.Context(), "read status health", "error", err)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
-		return
-	}
-	providers, err := s.statusProviders(r.Context(), snaps, healths)
-	if err != nil {
-		s.log.ErrorContext(r.Context(), "read status providers", "error", err)
-		s.writeError(w, r, http.StatusServiceUnavailable, errorCodeUnavailable, "status state unavailable", true)
-		return
-	}
-	s.writeJSON(w, http.StatusOK, statusResponse{Providers: providers})
+	s.writeJSON(w, http.StatusOK, statusResponse{Providers: s.statusProviders(cycles)})
 }
 
 // statusResponse is the GET /v1/status payload: one entry per provider the
@@ -391,22 +379,16 @@ type statusHealth struct {
 }
 
 // statusProviders builds the status rows. Observed providers come first in the
-// map iteration order of the reads; the union with configured catalogue providers
+// map iteration order of the cycles; the union with configured catalogue providers
 // keeps a freshly started controller from reporting an empty status before its
 // first poll. The per-provider quota is judged at now against the freshness bound
 // anchored to the last poll attempt, so a row that was fresh when written reads
 // as stale once polling has not run within the bound.
-func (s *Server) statusProviders(ctx context.Context, snaps []store.QuotaSnapshot, healths []store.HealthRecord) ([]statusProvider, error) {
-	byQuota := make(map[string]store.QuotaSnapshot, len(snaps))
-	for _, sn := range snaps {
-		byQuota[sn.Provider] = sn
-	}
-	byHealth := make(map[string]store.HealthRecord, len(healths))
-	for _, h := range healths {
-		byHealth[h.Provider] = h
-	}
-	names := make([]string, 0, len(byQuota)+len(byHealth))
-	seen := make(map[string]bool, len(byQuota)+len(byHealth))
+func (s *Server) statusProviders(cycles map[string]store.PollCycle) []statusProvider {
+	byQuota := make(map[string]store.QuotaSnapshot, len(cycles))
+	byHealth := make(map[string]store.HealthRecord, len(cycles))
+	names := make([]string, 0, len(cycles))
+	seen := make(map[string]bool, len(cycles))
 	add := func(n string) {
 		if n == "" || seen[n] {
 			return
@@ -414,11 +396,10 @@ func (s *Server) statusProviders(ctx context.Context, snaps []store.QuotaSnapsho
 		seen[n] = true
 		names = append(names, n)
 	}
-	for n := range byQuota {
-		add(n)
-	}
-	for n := range byHealth {
-		add(n)
+	for provider, c := range cycles {
+		byQuota[provider] = c.Snapshot
+		byHealth[provider] = c.Health
+		add(provider)
 	}
 	for _, m := range s.cfg.LiteLLM.ModelAliases {
 		add(m.Provider())
@@ -428,14 +409,10 @@ func (s *Server) statusProviders(ctx context.Context, snaps []store.QuotaSnapsho
 	out := make([]statusProvider, 0, len(names))
 	now := time.Now().UTC()
 	bound := staleAfter(s.cfg.Polling.Interval)
-	anchors, err := s.store.PollStates(ctx)
-	if err != nil {
-		return nil, err
-	}
 	for _, n := range names {
 		p := statusProvider{Provider: n}
 		if snap, ok := byQuota[n]; ok {
-			q := s.quotaAt(snap, anchors[snap.Provider], now, bound)
+			q := s.quotaAt(snap, cycles[n].AttemptAt, now, bound)
 			state, reason := q.StateAt(now, bound)
 			p.Quota = &statusQuota{
 				State:         string(state),
@@ -468,7 +445,7 @@ func (s *Server) statusProviders(ctx context.Context, snaps []store.QuotaSnapsho
 		}
 		out = append(out, p)
 	}
-	return out, nil
+	return out
 }
 
 func statusWindows(ws []quota.Window) []statusWindow {
@@ -645,23 +622,13 @@ func (s *Server) loadSelectState(ctx context.Context, sessionID string) (routing
 	if s.store == nil {
 		return routing.SelectState{}, fmt.Errorf("routing state store unavailable")
 	}
-	snaps, err := s.store.LatestQuotaSnapshot(ctx)
+	cycles, err := s.store.PollCycles(ctx)
 	if err != nil {
 		return routing.SelectState{}, err
 	}
-	anchors, err := s.store.PollStates(ctx)
-	if err != nil {
-		return routing.SelectState{}, err
-	}
-	for _, snap := range snaps {
-		state.Quota[snap.Provider] = s.quotaAt(snap, anchors[snap.Provider], now, freshness)
-	}
-	health, err := s.store.LatestProviderHealth(ctx)
-	if err != nil {
-		return routing.SelectState{}, err
-	}
-	for _, h := range health {
-		state.Health[h.Provider] = providerStateFromStore(h)
+	for provider, c := range cycles {
+		state.Quota[provider] = s.quotaAt(c.Snapshot, c.AttemptAt, now, freshness)
+		state.Health[provider] = providerStateFromStore(c.Health)
 	}
 	pin, ok, err := s.store.SessionAffinity(ctx, sessionID)
 	if err != nil {
