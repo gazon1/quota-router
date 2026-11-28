@@ -298,6 +298,15 @@ func (s *Store) SavePollResult(ctx context.Context, provider string, snap QuotaS
 	if attemptAt.IsZero() {
 		return errors.New("poll result: attempt time must be set")
 	}
+	if err := snap.Validate(); err != nil {
+		return fmt.Errorf("quota snapshot: %w", err)
+	}
+	if err := health.Validate(); err != nil {
+		return fmt.Errorf("provider health: %w", err)
+	}
+	if snap.Provider != provider || health.Provider != provider {
+		return fmt.Errorf("poll result: provider mismatch: snapshot %q health %q cycle %q", snap.Provider, health.Provider, provider)
+	}
 	var reason *string
 	if snap.UnknownReason != nil {
 		r := string(*snap.UnknownReason)

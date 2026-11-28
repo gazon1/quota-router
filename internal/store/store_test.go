@@ -1478,6 +1478,71 @@ func TestPollStatesReturnsAnchorsPerProvider(t *testing.T) {
 	}
 }
 
+// SavePollResult commits one poll cycle — snapshot, health and the poll-state
+// anchor — as a single transaction: either all three land, or the cycle fails
+// and none of them change.
+func TestSavePollResultIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openMigrated(t)
+
+	first := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	limit := 100.0
+	used := 20.0
+	remaining := 80.0
+	reset := first.Add(time.Hour)
+	snap := QuotaSnapshot{
+		Provider:   "minimax",
+		State:      QuotaAvailable,
+		Source:     "test",
+		Confidence: Reported,
+		ObservedAt: first,
+		Windows: []QuotaWindow{{
+			Window: "5h", Unit: "tokens", Limit: &limit, Used: &used, Remaining: &remaining, ResetAt: &reset,
+		}},
+	}
+	health := HealthRecord{Provider: "minimax", State: Healthy, ObservedAt: first}
+
+	if err := s.SavePollResult(ctx, "minimax", snap, health, first, first); err != nil {
+		t.Fatalf("SavePollResult: %v", err)
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(first) || !success.Equal(first) {
+		t.Fatalf("after a good cycle: PollState = %s/%s (err %v), want %s/%s", attempt, success, err, first, first)
+	}
+	if healths, err := s.LatestProviderHealth(ctx); err != nil || len(healths) != 1 || healths[0].Provider != "minimax" {
+		t.Fatalf("after a good cycle: healths = %+v (err %v)", healths, err)
+	}
+	if snaps, err := s.LatestQuotaSnapshot(ctx); err != nil || len(snaps) != 1 || snaps[0].Provider != "minimax" {
+		t.Fatalf("after a good cycle: snaps = %+v (err %v)", snaps, err)
+	}
+
+	// A failed cycle rolls back: a cancelled context fails the transaction after
+	// the snapshot, windows and health were staged, and nothing changes.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.SavePollResult(cctx, "minimax", snap, health, first.Add(time.Minute), time.Time{}); err == nil {
+		t.Fatal("SavePollResult with a cancelled context: want failure")
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(first) || !success.Equal(first) {
+		t.Fatalf("after a failed cycle: PollState = %s/%s (err %v), want the previous %s/%s", attempt, success, err, first, first)
+	}
+	if snaps, err := s.LatestQuotaSnapshot(ctx); err != nil || len(snaps) != 1 {
+		t.Fatalf("after a failed cycle: snaps = %+v (err %v), want the single committed row", snaps, err)
+	}
+
+	// Validation failures reject before any write, so no partial state lands.
+	badsnap := snap
+	badsnap.Provider = ""
+	if err := s.SavePollResult(ctx, "minimax", badsnap, health, first.Add(time.Minute), time.Time{}); err == nil {
+		t.Fatal("SavePollResult accepted a snapshot without a provider")
+	}
+	if err := s.SavePollResult(ctx, "minimax", snap, HealthRecord{Provider: "other", State: Healthy, ObservedAt: first}, first.Add(time.Minute), time.Time{}); err == nil {
+		t.Fatal("SavePollResult accepted mismatched providers")
+	}
+	if attempt, success, err := s.PollState(ctx, "minimax"); err != nil || !attempt.Equal(first) || !success.Equal(first) {
+		t.Fatalf("after rejected cycles: PollState = %s/%s (err %v), want the previous %s/%s", attempt, success, err, first, first)
+	}
+}
+
 // A pin must survive a restart with its timestamps intact: that is what makes
 // affinity something a controller can lose its process on and still honour.
 func TestSessionAffinitySurvivesRestart(t *testing.T) {

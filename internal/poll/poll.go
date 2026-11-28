@@ -90,8 +90,13 @@ type loopState struct {
 	// consecutiveFailures counts attempts that did not establish quota; the
 	// per-attempt debug log reports it, the retry count and the duration, so a
 	// provider outage is diagnosable from logs alone.
+	//
+	// Both fields are loop diagnostics for this process's polls; the durable
+	// last success lives in poll_state and is the anchor runtime consumers read.
 	consecutiveFailures int
-	// lastSuccessAt is the newest attempt that did establish quota.
+	// lastSuccessAt is the newest attempt that did establish quota in this
+	// process; a restart starts the history over even though poll_state keeps
+	// the durable anchor.
 	lastSuccessAt time.Time
 }
 
